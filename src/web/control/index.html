@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WhaleTalk 控制台</title>
+  <style>
+    :root { color-scheme: light; font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+    body { margin: 0; background: #f3f5f8; color: #1f2933; }
+    header { background: #10314f; color: #fff; padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    header h1 { font-size: 16px; margin: 0 auto 0 0; }
+    header .pill { background: rgba(255,255,255,.15); border-radius: 999px; padding: 3px 10px; font-size: 12px; }
+    header .pill.ok { background: #1f7a4d; }
+    header .pill.bad { background: #a4262c; }
+    header button { margin-left: 4px; }
+    main { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; padding: 12px; max-width: 1200px; margin: 0 auto; }
+    section { background: #fff; border: 1px solid #d9e2ec; border-radius: 8px; padding: 12px; }
+    section h2 { font-size: 13px; margin: 0 0 8px; color: #52606d; text-transform: uppercase; letter-spacing: .04em; }
+    button { font: inherit; padding: 5px 12px; border: 1px solid #9fb3c8; background: #fff; border-radius: 6px; cursor: pointer; }
+    button:hover { background: #eef2f6; }
+    button.primary { background: #10314f; border-color: #10314f; color: #fff; }
+    button.danger { background: #a4262c; border-color: #a4262c; color: #fff; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    input, select { font: inherit; padding: 5px 8px; border: 1px solid #9fb3c8; border-radius: 6px; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .row input[type="text"] { flex: 1; min-width: 160px; }
+    .muted { color: #627d98; font-size: 12px; }
+    .mono { font-family: Consolas, monospace; font-size: 12px; word-break: break-all; }
+    ul.list { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; }
+    ul.list li { padding: 4px 6px; border-bottom: 1px solid #eef2f6; font-size: 13px; display: flex; gap: 8px; }
+    .tag { background: #eef2f6; border-radius: 4px; padding: 0 6px; font-size: 11px; color: #486581; }
+    .tag.warn { background: #fff3e0; color: #8a5a00; }
+    .tag.err { background: #fdecea; color: #8a1c21; }
+    .copybox { display: flex; gap: 6px; }
+    .copybox input { flex: 1; }
+    #msg { position: fixed; bottom: 12px; right: 12px; max-width: 420px; background: #102a43; color: #fff; border-radius: 8px; padding: 8px 12px; font-size: 13px; display: none; }
+    #msg.err { background: #a4262c; }
+    label.field { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; }
+    label.field span { min-width: 150px; color: #52606d; }
+    label.field input { width: 110px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>WhaleTalk 控制台(P0)</h1>
+    <span class="pill" id="conn">连接中</span>
+    <span class="pill" id="run">run:-</span>
+    <span class="pill" id="sched">调度:-</span>
+    <span class="pill" id="rend">播放端:-</span>
+    <button id="btn-pause">暂停</button>
+    <button id="btn-resume">恢复</button>
+    <button id="btn-stop" class="danger">紧急停止</button>
+  </header>
+  <main>
+    <section id="sec-sim">
+      <h2>模拟事件</h2>
+      <div class="row">
+        <input type="text" id="sim-text" placeholder="输入弹幕,例如:大肥鱼跳个舞" />
+        <button class="primary" id="sim-send">发送弹幕</button>
+      </div>
+      <div class="row">
+        <button data-sim="chat:大肥鱼跳个舞">跳个舞</button>
+        <button data-sim="chat:今天吃什么">今天吃什么</button>
+        <button data-sim="chat:大家好">打招呼</button>
+        <button data-sim="gift:1">送小心心×1</button>
+        <button data-sim="gift:10">送小心心×10(连击)</button>
+        <button data-sim="guard">大航海</button>
+        <button data-sim="superchat">醒目留言</button>
+      </div>
+      <p class="muted">连击模拟会以 10 条独立事件快速提交,验证 2 秒窗口内的礼物合并感谢。</p>
+    </section>
+    <section id="sec-manual">
+      <h2>手动动作</h2>
+      <div class="row">
+        <select id="manual-action"></select>
+        <button class="primary" id="manual-send">点播动作</button>
+      </div>
+      <p class="muted">手动动作优先级最高,入队后等待当前表演结束。</p>
+    </section>
+    <section id="sec-overlay">
+      <h2>OBS 播放页链接</h2>
+      <div class="copybox">
+        <input type="text" id="overlay-url" readonly />
+        <button id="overlay-copy">复制</button>
+      </div>
+      <p class="muted">链接含播放端凭据(fragment),粘贴到 OBS 浏览器源即可;请勿外传。</p>
+    </section>
+    <section id="sec-queue">
+      <h2>待播队列</h2>
+      <div class="row">
+        <span class="tag" id="queue-len">0 / 20</span>
+        <span class="muted">当前任务:</span><span id="current" class="mono">空闲</span>
+      </div>
+      <ul class="list" id="queue-list"></ul>
+      <h2 style="margin-top:10px">丢弃记录</h2>
+      <ul class="list" id="drop-list"></ul>
+    </section>
+    <section id="sec-settings">
+      <h2>设置</h2>
+      <div id="settings-fields"></div>
+      <div class="row">
+        <button class="primary" id="settings-save">保存</button>
+        <span class="muted" id="settings-version"></span>
+      </div>
+      <div class="row"><span class="muted" id="settings-note"></span></div>
+    </section>
+  </main>
+  <div id="msg"></div>
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>

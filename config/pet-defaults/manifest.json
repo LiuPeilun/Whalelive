@@ -1,0 +1,20 @@
+{
+  "formatVersion": 1,
+  "petId": "main",
+  "name": "大肥鱼(P0 占位角色包)",
+  "license": {
+    "name": "占位素材(本仓库脚本生成的纯色视频,无第三方形象)",
+    "source": "scripts/gen-test-assets.mjs",
+    "note": "正式直播请替换为具备直播用途授权的素材,并同步更新本清单与 LICENSE.txt"
+  },
+  "actions": [
+    { "id": "idle", "file": "animations/idle.webm", "loop": true },
+    { "id": "wave", "file": "animations/wave.webm" },
+    { "id": "think", "file": "animations/think.webm" },
+    { "id": "talk", "file": "animations/talk.webm", "loop": true },
+    { "id": "eat", "file": "animations/eat.webm" },
+    { "id": "dance", "file": "animations/dance.webm" },
+    { "id": "gift", "file": "animations/gift.webm" },
+    { "id": "celebrate", "file": "animations/celebrate.webm" }
+  ]
+}

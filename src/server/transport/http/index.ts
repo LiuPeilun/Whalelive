@@ -1,0 +1,228 @@
+import fs from 'node:fs';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { ErrorCodes, apiError } from '../../../shared/errors.js';
+import type { StateSnapshot } from '../../../shared/protocol.js';
+import type { SettingsUpdateRequest } from '../../../shared/settings.js';
+import type { Logger } from '../../infrastructure/logger.js';
+import type { CharactersModule } from '../../modules/characters/index.js';
+import type { InteractionModule } from '../../modules/interaction/index.js';
+import type { SettingsModule } from '../../modules/settings/index.js';
+import type { MockEventInput } from '../../integrations/platforms/mock.js';
+import type { createAccessControl } from '../auth.js';
+
+// 路由、请求校验、响应与资源传输(PROJECT_STRUCTURE《接口与页面路径》)。
+// 处理器只做输入校验、凭据检查、调用与错误映射,业务规则在业务模块。
+
+export type HttpDeps = {
+  runId: string;
+  startedAt: number;
+  settings: SettingsModule;
+  access: ReturnType<typeof createAccessControl>;
+  interaction: InteractionModule;
+  characters: CharactersModule;
+  stateSnapshot(): StateSnapshot;
+  submitMock(input: MockEventInput): { eventId: string; ingest: string; enqueue: { accepted: boolean; reason: string | null } | null };
+  overlayUrl(): string;
+  logger: Logger;
+};
+
+function guardControl(deps: HttpDeps, request: FastifyRequest, reply: FastifyReply): boolean {
+  const check = deps.access.checkControlRequest(request.headers);
+  if (!check.ok) {
+    reply.code(check.code === ErrorCodes.ORIGIN_REJECTED ? 403 : 401).send(apiError(check.code, '控制接口需要有效的控制台凭据', 'http'));
+    return false;
+  }
+  return true;
+}
+
+function serveFile(request: FastifyRequest, reply: FastifyReply, file: string, mime: string, method: 'GET' | 'HEAD'): void {
+  let size: number;
+  try {
+    size = fs.statSync(file).size;
+  } catch {
+    reply.code(404).send(apiError(ErrorCodes.NOT_FOUND, '资源不存在或不可用', 'media'));
+    return;
+  }
+  let start = 0;
+  let end = size - 1;
+  let status: 200 | 206 = 200;
+  let contentRange: string | undefined;
+  const range = request.headers.range;
+  if (typeof range === 'string') {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+    const rejectRange = (message: string): void => {
+      reply.code(416).header('content-range', `bytes */${size}`).send(apiError(ErrorCodes.BAD_REQUEST, message, 'media'));
+    };
+    if (!match) {
+      rejectRange('Range 请求格式不受支持');
+      return;
+    }
+    const rawStart = match[1] ?? '';
+    const rawEnd = match[2] ?? '';
+    if (rawStart === '' && rawEnd === '') {
+      rejectRange('Range 为空');
+      return;
+    }
+    if (rawStart === '') {
+      // 后缀范围:bytes=-N
+      const suffix = Math.min(Number(rawEnd), size);
+      start = size - suffix;
+      end = size - 1;
+    } else {
+      start = Number(rawStart);
+      end = rawEnd === '' ? size - 1 : Math.min(Number(rawEnd), size - 1);
+    }
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= size) {
+      rejectRange('Range 超出资源范围');
+      return;
+    }
+    status = 206;
+    contentRange = `bytes ${start}-${end}/${size}`;
+  }
+  // 媒体流经 hijack 直写原始响应,精确控制状态码与 Range 头。
+  reply.hijack();
+  const raw = reply.raw;
+  const headers: Record<string, string> = {
+    'content-type': mime,
+    'content-length': String(end - start + 1),
+    'accept-ranges': 'bytes',
+    'cache-control': 'no-store',
+  };
+  if (contentRange !== undefined) headers['content-range'] = contentRange;
+  raw.writeHead(status, headers);
+  if (method === 'HEAD') {
+    raw.end();
+    return;
+  }
+  const stream = fs.createReadStream(file, { start, end });
+  stream.on('error', () => raw.destroy());
+  stream.pipe(raw);
+}
+
+export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): void {
+  fastify.get('/api/health', async () => ({
+    ok: true,
+    app: 'whaletalk',
+    phase: 'P0',
+    runId: deps.runId,
+    uptimeMs: Date.now() - deps.startedAt,
+  }));
+
+  fastify.get('/api/state', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    return deps.stateSnapshot();
+  });
+
+  fastify.post('/api/mock/events', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    const body = request.body as Partial<MockEventInput> | undefined;
+    if (!body || typeof body.type !== 'string' || !['chat', 'gift', 'guard', 'superchat'].includes(body.type)) {
+      reply.code(400).send(apiError(ErrorCodes.VALIDATION_FAILED, 'type 需为 chat / gift / guard / superchat', 'mock'));
+      return reply;
+    }
+    const result = deps.submitMock(body as MockEventInput);
+    return { eventId: result.eventId, ingest: result.ingest, enqueue: result.enqueue };
+  });
+
+  fastify.post('/api/control/action', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    const body = request.body as { actionId?: unknown } | undefined;
+    if (typeof body?.actionId !== 'string' || body.actionId === '') {
+      reply.code(400).send(apiError(ErrorCodes.VALIDATION_FAILED, '缺少 actionId', 'control'));
+      return reply;
+    }
+    if (deps.characters.resolveAction(body.actionId) === null) {
+      reply.code(400).send(apiError(ErrorCodes.VALIDATION_FAILED, `动作 ${body.actionId} 不在角色清单白名单`, 'control'));
+      return reply;
+    }
+    return deps.interaction.manualAction(body.actionId);
+  });
+
+  fastify.post('/api/control/pause', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    deps.interaction.pause();
+    return { ok: true, paused: true };
+  });
+
+  fastify.post('/api/control/resume', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    deps.interaction.resume();
+    return { ok: true, paused: false };
+  });
+
+  fastify.post('/api/control/stop', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    deps.interaction.stop();
+    return { ok: true, paused: true };
+  });
+
+  fastify.get('/api/settings', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    return deps.settings.view();
+  });
+
+  // 控制台展示“可复制到 OBS 的播放链接”(PROJECT_STRUCTURE《P0 连接注册与权限》),
+  // 该链接含播放端凭据,仅发给持有控制台凭据的本机操作者。
+  fastify.get('/api/overlay-link', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    return { url: deps.overlayUrl() };
+  });
+
+  fastify.put('/api/settings', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    const body = request.body as Partial<SettingsUpdateRequest> | undefined;
+    if (
+      !body ||
+      typeof body.expectedVersion !== 'number' ||
+      typeof body.settings !== 'object' ||
+      body.settings === null
+    ) {
+      reply.code(400).send(apiError(ErrorCodes.VALIDATION_FAILED, '需要 { expectedVersion, settings }', 'settings'));
+      return reply;
+    }
+    const result = deps.settings.update({ expectedVersion: body.expectedVersion, settings: body.settings });
+    if (!result.ok) {
+      reply.code(result.code === ErrorCodes.VERSION_CONFLICT ? 409 : 400).send(apiError(result.code, result.detail, 'settings'));
+      return reply;
+    }
+    return { savedVersion: result.savedVersion, settings: result.settings };
+  });
+
+  const mediaGuard = (request: FastifyRequest, reply: FastifyReply): boolean => {
+    if (!deps.access.checkMediaRequest(request.headers, request.socket.remoteAddress)) {
+      reply.code(403).send(apiError(ErrorCodes.SCOPE_DENIED, '媒体接口仅限本机只读访问', 'media'));
+      return false;
+    }
+    return true;
+  };
+
+  const petAsset = async (request: FastifyRequest, reply: FastifyReply, method: 'GET' | 'HEAD') => {
+    if (!mediaGuard(request, reply)) return;
+    const params = request.params as { petId?: string } & Record<'*', string | undefined>;
+    const petId = params.petId;
+    const assetId = params['*'];
+    if (!petId || !assetId || petId !== deps.settings.effective().petId) {
+      reply.code(404).send(apiError(ErrorCodes.NOT_FOUND, '角色或资源不存在', 'media'));
+      return;
+    }
+    const resolved = deps.characters.resolveAsset(assetId);
+    if (!resolved) {
+      reply.code(404).send(apiError(ErrorCodes.ASSET_MISSING, '资源不在角色清单或不可用', 'media'));
+      return;
+    }
+    serveFile(request, reply, resolved.file, resolved.mime, method);
+  };
+
+  // 单一路由同时声明 GET/HEAD(fastify.get 会隐式占用 HEAD,显式 head 会冲突)
+  fastify.route({
+    method: ['GET', 'HEAD'],
+    url: '/media/pets/:petId/*',
+    handler: async (request, reply) => petAsset(request, reply, request.method === 'HEAD' ? 'HEAD' : 'GET'),
+  });
+
+  fastify.get('/media/audio/:audioId', async (request, reply) => {
+    if (!mediaGuard(request, reply)) return;
+    // P0 无语音合成缓存,保留契约路由;P1 接入 audio-cache 后提供内容。
+    reply.code(404).send(apiError(ErrorCodes.NOT_FOUND, 'P0 阶段无音频缓存', 'media'));
+  });
+}

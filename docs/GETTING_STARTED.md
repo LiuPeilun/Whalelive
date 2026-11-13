@@ -1,6 +1,6 @@
 # 零基础准备与操作指南
 
-当前为方案阶段。WhaleTalk 的控制台与播放页面待开发，文中的本地地址是计划入口。现阶段可完成软件和账号准备，也可以先安装现成桌宠观察动画。
+P0 已于 2026 年 11 月 13 日交付：本地服务、控制台与透明播放页可用，支持模拟弹幕 / 礼物、手动动作、暂停与紧急停止。DeepSeek、语音与真实直播在 P1 / P2 交付。安装与启动见第 3 节的实测命令。
 
 ## 1. 准备清单
 
@@ -38,9 +38,29 @@ dsh-pet-standalone --port 3080
 
 默认独立模式地址为 `http://127.0.0.1:3080`。访问根路径可读取服务信息。角色显示于独立桌面窗口，OBS 捕获窗口的透明效果需要实际测试。[安装说明](https://github.com/PC2005-cloud/dsh-pet/blob/main/INSTALL.md)
 
-## 3. WhaleTalk 的计划配置
+## 3. WhaleTalk 的安装与启动（P0 实测命令）
 
-P0 开发完成后，由实现代码提供以下配置入口和可复制命令。以下是配置草案。
+在项目根目录用终端依次执行（Node.js 需 22.12 或更高，本机以 24.12 验证）：
+
+```powershell
+npm install          # 安装依赖并生成锁定文件
+npm start            # 普通启动（持续录制/直播用）
+```
+
+启动后按 `Ctrl+C` 停止。启动输出会给出两个**含凭据**的地址：`/control#…` 是控制台，`/overlay#…` 是给 OBS 的播放页链接，请勿外传。端口默认 3210，可用 `npm start -- --port 3311` 覆盖。
+
+其他命令：
+
+```powershell
+npm run dev                # 开发模式:改服务端源码自动重启(会重置内存队列)
+npm run check              # 类型检查(服务端+页面)与全部回归测试
+npm run test               # 仅回归测试
+node scripts/ws-smoke.mjs  # 全链路冒烟自检(需服务已启动)
+npm run gen:test-assets    # 生成占位角色素材(需带 libvpx 的 ffmpeg,可用 FFMPEG_PATH 指定)
+npm run start:reset-access # 重置本机访问凭据(旧链接全部失效,需重新复制)
+```
+
+环境配置保存在项目根的 `.env.local`（参考 `.env.example` 复制创建）。当前已生效的键与 P1/P2 依赖如下：
 
 ```dotenv
 HOST=127.0.0.1
@@ -66,9 +86,9 @@ BILIBILI_OPEN_ANCHOR_CODE=
 
 初始 `PLATFORM=mock` 使用模拟事件。`bilibili-web` 接法按实现和当前平台要求配置房间号及登录信息，`bilibili-open` 接法配置应用凭据和主播身份码。TTS 音色列表由所选提供方加载，正式云语音服务增加其对应配置。
 
-环境配置计划保存在项目根的 `.env.local`。`WHALETALK_DATA_DIR` 指定用户数据目录，示例中的 `main` 角色包位于 `data/pets/main/manifest.json`。界面修改的设置保存在 `data/config`，动画、日志和语音缓存分别保存在数据目录的对应子目录。备份时保留用户配置、角色包和后续数据库，本地密钥单独妥善保存。详细路径见 [项目结构](PROJECT_STRUCTURE.md)。
+环境配置保存在项目根的 `.env.local`（可先复制 `.env.example`）。`WHALETALK_DATA_DIR` 指定用户数据目录，示例中的 `main` 角色包位于 `data/pets/main/manifest.json`。界面修改的设置保存在 `data/config`，动画、日志和语音缓存分别保存在数据目录的对应子目录。备份时保留用户配置、角色包和后续数据库，本地密钥单独妥善保存。详细路径见 [项目结构](PROJECT_STRUCTURE.md)。
 
-服务启动后，计划通过 `http://127.0.0.1:3210/control` 操作角色，通过 `http://127.0.0.1:3210/overlay` 提供 OBS 画面。端口可修改，实际地址以应用显示为准。
+服务启动后，使用启动输出的 `http://127.0.0.1:3210/control#<凭据>` 操作角色，把 `http://127.0.0.1:3210/overlay#<凭据>` 提供给 OBS。端口可修改，实际地址以启动输出为准。
 
 实际操作使用启动入口给出的控制台访问链接，并从控制台复制 OBS 播放链接。应用自动生成并保存相应用途的本机凭据，普通重启沿用，显式重置后重新复制链接。`data/access.json` 按本地密钥妥善保存。
 

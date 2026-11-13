@@ -1,0 +1,5 @@
+{
+  "formatVersion": 1,
+  "thanksTemplate": "谢谢 {user} 的 {gift} ×{count}!",
+  "celebrateText": "哇,{user} 的{kind}!大肥鱼记你一辈子!"
+}

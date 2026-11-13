@@ -1,0 +1,253 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import Fastify from 'fastify';
+import { WebSocketServer } from 'ws';
+import { VITE_HMR_PATH, WS_PATH, type StateSnapshot } from '../shared/protocol.js';
+import { createAccessControl } from './transport/auth.js';
+import { registerHttpRoutes } from './transport/http/index.js';
+import { createWsTransport } from './transport/ws/index.js';
+import { createLogger, redactUrl, type Logger } from './infrastructure/logger.js';
+import { createPaths, ensureDir, type AppPaths } from './infrastructure/paths.js';
+import { createSettings, type SettingsModule } from './modules/settings/index.js';
+import { createCharacters, type CharactersModule } from './modules/characters/index.js';
+import { createEvents } from './modules/events/index.js';
+import { createInteraction, type InteractionModule } from './modules/interaction/index.js';
+import { createPlayback, type PlaybackModule } from './modules/playback/index.js';
+import { mockEvent, type MockEventInput } from './integrations/platforms/mock.js';
+import type { GiftRuleConfig, PersonaConfig } from './modules/interaction/rules.js';
+
+// 依赖组装与资源关闭(PROJECT_STRUCTURE《依赖方向》):
+// app.ts 只做创建、连接与生命周期;任务选择与调度在业务模块。
+
+export type App = {
+  runId: string;
+  paths: AppPaths;
+  logger: Logger;
+  settings: SettingsModule;
+  characters: CharactersModule;
+  interaction: InteractionModule;
+  playback: PlaybackModule;
+  urls: { base: string; control: string; overlay: string };
+  close(): Promise<void>;
+};
+
+function readJson<T>(file: string, fallback: T, logger: Logger, what: string): T {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
+  } catch (err) {
+    logger.warn('app.config-read-failed', { what, file, error: String(err) });
+    return fallback;
+  }
+}
+
+export async function createApp(opts: { env: Record<string, string | undefined>; resetAccess?: boolean }): Promise<App> {
+  const now = () => Date.now();
+  const paths = createPaths(opts.env.WHALETALK_DATA_DIR);
+  for (const dir of [paths.dataDir, paths.userConfigDir, paths.petsDir, paths.audioCacheDir, paths.logsDir, paths.dbDir]) {
+    ensureDir(dir);
+  }
+  const logger = createLogger({ logsDir: paths.logsDir });
+  const runId = `run-${now().toString(36)}-${randomUUID().slice(0, 6)}`;
+
+  const settings = createSettings({ paths, env: opts.env, logger });
+  const effective = () => settings.effective();
+
+  const access = createAccessControl({ paths, logger, port: () => effective().server.port });
+  access.ensure({ reset: opts.resetAccess === true });
+
+  const characters = createCharacters({ paths, petId: effective().petId, logger });
+  const events = createEvents({ now });
+  const playback = createPlayback({
+    runId,
+    settings: effective,
+    logger,
+    now,
+    urlForAsset(assetId) {
+      const petId = effective().petId;
+      const encoded = assetId.split('/').map(encodeURIComponent).join('/');
+      return `/media/pets/${encodeURIComponent(petId)}/${encoded}`;
+    },
+  });
+
+  const personaFallback: PersonaConfig = { name: '大肥鱼', fallbackReplies: ['我看到你的弹幕啦~'], commandReplies: {} };
+  const giftFallback: GiftRuleConfig = { thanksTemplate: '谢谢 {user} 的 {gift} ×{count}!', celebrateText: '欢迎 {user} 加入{kind}!' };
+  const persona = readJson<PersonaConfig>(path.join(paths.versionedConfigDir, 'persona.json'), personaFallback, logger, 'persona');
+  const giftRulesCfg = readJson<GiftRuleConfig>(path.join(paths.versionedConfigDir, 'gift-rules.json'), giftFallback, logger, 'gift-rules');
+
+  const interaction = createInteraction({ settings: effective, characters, playback, persona, giftRules: giftRulesCfg, logger, now });
+
+  // 平台适配器 → events → app 连接的回调 → interaction(PROJECT_STRUCTURE《依赖方向》)
+  let mockSeq = 0;
+  const submitMock = (input: MockEventInput) => {
+    const event = mockEvent(input, now, () => (mockSeq += 1));
+    const ingest = events.ingest(event);
+    if (!ingest.accepted) {
+      logger.info('mock.event-dropped', { eventId: event.id, reason: ingest.reason });
+      return { eventId: event.id, ingest: ingest.reason, enqueue: null };
+    }
+    const enqueue = interaction.enqueue(ingest.event);
+    return {
+      eventId: event.id,
+      ingest: 'accepted',
+      enqueue: { accepted: enqueue.accepted, reason: 'reason' in enqueue ? enqueue.reason : null },
+    };
+  };
+
+  const startedAt = now();
+  const stateSnapshot = (): StateSnapshot => {
+    const st = interaction.state();
+    const view = settings.view();
+    return {
+      runId,
+      startedAt,
+      paused: st.paused,
+      platform: effective().platform,
+      petId: effective().petId,
+      queue: {
+        capacity: st.queue.capacity,
+        length: st.queue.length,
+        items: st.queue.items.map((item) => ({
+          eventId: item.eventId,
+          type: item.type,
+          priority: item.priority,
+          enqueuedAt: item.enqueuedAt,
+          sayPreview: item.say.slice(0, 30),
+        })),
+        dropped: st.queue.drops,
+      },
+      current: st.current,
+      playback: { ...playback.view(), action: st.current?.action ?? null },
+      renderers: playback.renderersView(),
+      settingsVersion: view.savedVersion,
+      serverTime: now(),
+    };
+  };
+
+  const fastify = Fastify({ logger: false, disableRequestLogging: true });
+  const idleInfo = (): { url: string; loop: boolean; available: boolean } | null => {
+    const idle = characters.resolveAction('idle');
+    if (!idle) return null;
+    return { url: `/media/pets/${encodeURIComponent(effective().petId)}/${idle.file.split('/').map(encodeURIComponent).join('/')}`, loop: idle.loop, available: idle.available };
+  };
+  const ws = createWsTransport({ runId, access, playback, stateSnapshot, settings: effective, idleInfo, logger, now });
+
+  registerHttpRoutes(fastify, {
+    runId,
+    startedAt,
+    settings,
+    access,
+    interaction,
+    characters,
+    stateSnapshot,
+    submitMock,
+    overlayUrl: () => access.overlayUrl(),
+    logger,
+  });
+
+  // 页面入口统一尾斜杠形式;浏览器重定向时保留 URL fragment 中的凭据。
+  fastify.get('/control', async (_request, reply) => reply.code(308).redirect('/control/'));
+  fastify.get('/overlay', async (_request, reply) => reply.code(308).redirect('/overlay/'));
+
+  // P0 源码运行:页面经 Vite 开发中间件同源提供,业务 /ws 与 HMR 共用同一 HTTP server。
+  // 全部路由(含本代理路由)必须在 ready/listen 之前注册;Vite 实例在监听建立后创建并绑定。
+  let viteDev: Awaited<ReturnType<typeof import('vite')['createServer']>> | null = null;
+  fastify.route({
+    method: ['GET', 'HEAD'],
+    url: '/*',
+    handler: (request, reply) => {
+      if (!viteDev) {
+        reply.code(503).send({ code: 'UNKNOWN', message: '页面服务初始化中,请稍后刷新' });
+        return;
+      }
+      reply.hijack();
+      viteDev.middlewares(request.raw, reply.raw, () => {
+        if (!reply.raw.headersSent) {
+          reply.raw.statusCode = 404;
+          reply.raw.end('not found');
+        }
+      });
+    },
+  });
+
+  await fastify.ready();
+  const httpServer = fastify.server;
+
+  const wss = new WebSocketServer({ noServer: true });
+  ws.attach(wss);
+
+  // 升级路由:业务 /ws 精确接管;Vite HMR 交给其自身监听;未知路径明确拒绝。
+  httpServer.on('upgrade', (req, socket, head) => {
+    let pathname = '';
+    try {
+      pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    } catch {
+      socket.destroy();
+      return;
+    }
+    if (pathname === WS_PATH) {
+      const check = access.checkUpgrade(req.headers, req.socket.remoteAddress);
+      if (!check.ok) {
+        logger.warn('ws.upgrade-rejected', { code: check.code, pathname });
+        socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (client) => wss.emit('connection', client, req));
+      return;
+    }
+    if (pathname === VITE_HMR_PATH) return;
+    socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+  });
+
+  const pushState = () => ws.broadcastState();
+  interaction.onChange(pushState);
+  playback.onChange(pushState);
+  const ticker = setInterval(() => {
+    interaction.tick();
+    playback.tick();
+  }, 250);
+
+  const eff = effective();
+  const host = eff.server.host;
+  const port = eff.server.port;
+  await fastify.listen({ host, port });
+
+  // Vite 在监听建立后创建:middleware 模式提供页面,HMR WS 经 server.ws.server 挂同一 server。
+  const viteModule = await import('vite');
+  viteDev = await viteModule.createServer({
+    root: path.join(paths.projectRoot, 'src', 'web'),
+    configFile: path.join(paths.projectRoot, 'vite.config.ts'),
+    server: { ws: { server: httpServer } },
+  });
+  logger.info('server.pages-ready', { hmr: VITE_HMR_PATH });
+
+  logger.info('server.started', { runId, host, port, control: redactUrl(access.controlUrl()) });
+
+  async function close(): Promise<void> {
+    clearInterval(ticker);
+    interaction.stop();
+    ws.closeAll();
+    wss.close();
+    if (viteDev) await viteDev.close();
+    await fastify.close();
+    logger.info('server.stopped', { runId });
+  }
+
+  return {
+    runId,
+    paths,
+    logger,
+    settings,
+    characters,
+    interaction,
+    playback,
+    urls: {
+      base: `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`,
+      control: access.controlUrl(),
+      overlay: access.overlayUrl(),
+    },
+    close,
+  };
+}

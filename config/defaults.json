@@ -1,0 +1,24 @@
+{
+  "formatVersion": 1,
+  "petId": "main",
+  "queue": {
+    "capacity": 20,
+    "chatTtlMs": 30000,
+    "userCooldownMs": 10000
+  },
+  "gift": {
+    "mergeWindowMs": 2000
+  },
+  "playback": {
+    "preloadTimeoutMs": 8000,
+    "overallTimeoutMs": 120000,
+    "noRendererGraceMs": 3000
+  },
+  "lease": {
+    "ttlMs": 15000,
+    "renewIntervalMs": 5000
+  },
+  "auth": {
+    "timeoutMs": 5000
+  }
+}

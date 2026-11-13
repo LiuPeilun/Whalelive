@@ -1,0 +1,51 @@
+// 明确动作指令与回复策略:P0 无 DeepSeek,聊天经确定性规则或人设兜底回复。
+// P1 接入 DeepSeek 后,本文件保留“确定性指令”部分,语义回复切换到 reply.ts + providers。
+
+export type PersonaConfig = {
+  name: string;
+  fallbackReplies: string[];
+  commandReplies: Record<string, string>;
+};
+
+export type GiftRuleConfig = {
+  thanksTemplate: string; // 例:"谢谢 {user} 的 {gift} ×{count}!"
+  celebrateText: string;
+};
+
+export type ParsedChat = {
+  action: string | null;
+  say: string;
+};
+
+const COMMAND_PATTERNS: { action: string; pattern: RegExp }[] = [
+  { action: 'dance', pattern: /(跳个舞|跳舞|跳一支舞|来段舞)/ },
+  { action: 'wave', pattern: /(挥手|打个招呼|say hi|嗨|哈喽|你好呀|大家好)/ },
+  { action: 'eat', pattern: /(吃什么|吃饭|干饭|吃点啥)/ },
+  { action: 'think', pattern: /(想想|思考一下|想一下|为什么)/ },
+  { action: 'gift', pattern: /(拆礼物|开礼物)/ },
+];
+
+export function createRules(persona: PersonaConfig, giftRules: GiftRuleConfig) {
+  let fallbackCursor = 0;
+
+  function parseChat(text: string): ParsedChat {
+    for (const cmd of COMMAND_PATTERNS) {
+      if (cmd.pattern.test(text)) {
+        return { action: cmd.action, say: persona.commandReplies[cmd.action] ?? `${persona.name}收到!` };
+      }
+    }
+    const reply = persona.fallbackReplies[fallbackCursor % persona.fallbackReplies.length] ?? `${persona.name}看到你的弹幕啦~`;
+    fallbackCursor += 1;
+    return { action: null, say: reply };
+  }
+
+  function thanks(user: string, gift: string, count: number): string {
+    return giftRules.thanksTemplate.replaceAll('{user}', user).replaceAll('{gift}', gift).replaceAll('{count}', String(count));
+  }
+
+  function celebrate(user: string, kind: string): string {
+    return giftRules.celebrateText.replaceAll('{user}', user).replaceAll('{kind}', kind);
+  }
+
+  return { parseChat, thanks, celebrate };
+}
