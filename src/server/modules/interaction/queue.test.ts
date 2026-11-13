@@ -78,4 +78,46 @@ describe('interaction 有界队列', () => {
     expect(queue.dropLog().filter((d) => d.reason === 'stopped').length).toBe(2);
     expect(queue.length()).toBe(0);
   });
+
+  it('满载聊天队列:礼物(60)与人工动作(100)可挤出普通聊天(WT-P0-004)', () => {
+    let t = 0;
+    const queue = createQueue({ capacity: 2, now: () => t });
+    queue.push(makeItem('c-1', 40, 'chat'));
+    t += 1;
+    queue.push(makeItem('c-2', 40, 'chat'));
+    t += 1;
+    const gift = queue.push(makeItem('g-3', 60, 'gift'));
+    expect(gift.ok).toBe(true);
+    expect(queue.length()).toBe(2);
+    expect(queue.dropLog().at(-1)?.reason).toBe('capacity-evict-chat');
+    expect(queue.snapshot().some((item) => item.eventId === 'g-3')).toBe(true);
+    const manual = queue.push(makeItem('m-4', 100, 'manual'));
+    expect(manual.ok).toBe(true);
+    expect(queue.snapshot().some((item) => item.eventId === 'm-4')).toBe(true);
+    expect(queue.snapshot().every((item) => item.type !== 'gift' || item.eventId === 'g-3')).toBe(true);
+  });
+
+  it('满载且无普通聊天时,礼物被拒绝(WT-P0-004)', () => {
+    let t = 0;
+    const queue = createQueue({ capacity: 2, now: () => t });
+    queue.push(makeItem('g-1', 60, 'gift'));
+    queue.push(makeItem('m-2', 100, 'manual'));
+    const rejected = queue.push(makeItem('g-3', 60, 'gift'));
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok) expect(rejected.reason).toBe('queue-full');
+    expect(queue.length()).toBe(2);
+  });
+
+  it('缩容:容量 2→1 保留高优先级,挤出普通聊天并记录 capacity-shrink(WT-P0-008)', () => {
+    let t = 0;
+    const queue = createQueue({ capacity: 2, now: () => t });
+    queue.push(makeItem('c-1', 40, 'chat'));
+    t += 1;
+    queue.push(makeItem('g-2', 80, 'gift'));
+    queue.setCapacity(1);
+    expect(queue.length()).toBe(1);
+    const kept = queue.snapshot();
+    expect(kept[0]?.eventId).toBe('g-2');
+    expect(queue.dropLog().at(-1)?.reason).toBe('capacity-shrink');
+  });
 });

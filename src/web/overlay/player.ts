@@ -60,7 +60,8 @@ export function createPlayer(deps: {
   function setIdle(idle: { url: string; loop: boolean; available: boolean } | null): void {
     idleLoop = idle?.loop ?? true;
     if (idle && idle.available) {
-      idleClipPromise = deps.video.prepare(idle.url, idleLoop);
+      // 待机无限循环:直到表演派发或停止才离开,不做“一轮即结束”
+      idleClipPromise = deps.video.prepare(idle.url, idleLoop, true);
       void idleClipPromise
         .then((clip) => {
           clip.show();

@@ -127,12 +127,17 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
         socket.send(JSON.stringify({ kind: 'lease-request' }));
         return undefined;
       }
-      if (msg.kind === 'lease-result' && msg.ok) {
-        void http('/api/mock/events', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', ...controlAuth },
-          body: JSON.stringify({ type: 'chat', text: '大肥鱼跳个舞', userId: 'smoke', userName: '冒烟员' }),
-        });
+      if (msg.kind === 'lease-result') {
+        if (msg.ok) {
+          void http('/api/mock/events', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...controlAuth },
+            body: JSON.stringify({ type: 'chat', text: '大肥鱼跳个舞', userId: 'smoke', userName: '冒烟员' }),
+          });
+        } else {
+          // 租约被其他播放端持有:稍后重试(与页面行为一致)
+          setTimeout(() => socket.send(JSON.stringify({ kind: 'lease-request' })), msg.retryAfterMs ?? 2000);
+        }
         return undefined;
       }
       if (msg.kind === 'performance') {
@@ -210,6 +215,44 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
   // Node ws 默认不携带 Origin:回环 + 合法 Host → 允许进入待认证
   const missingOrigin = await probe(undefined);
   check('回环缺失 Origin 放行至待认证', missingOrigin === 'open', String(missingOrigin));
+}
+
+// 11. 畸形 WS 消息受控处理(WT-P0-002)
+{
+  const outcome = await withSocket(
+    connectWs(),
+    (socket) => socket.send(JSON.stringify({ kind: 'auth', protocolVersion: 1, role: 'playback' })), // 缺 credential
+    (msg) => (msg.kind === 'auth-result' && msg.ok === false ? `rejected:${msg.code}` : undefined),
+  );
+  check('缺失凭据的 auth 得到受控拒绝', outcome === 'rejected:AUTH_REJECTED', String(outcome));
+}
+{
+  const outcome = await withSocket(
+    connectWs(),
+    (socket) => socket.send(JSON.stringify({ kind: 'auth', protocolVersion: 1, role: 'control', credential: access.control })),
+    (msg, socket) => {
+      if (msg.kind === 'auth-result' && msg.ok) {
+        socket.send('null'); // JSON null:修复前会在读取 kind 时抛异常
+        socket.send(JSON.stringify({ kind: 'ping' }));
+        return undefined;
+      }
+      if (msg.kind === 'pong') return 'pong-after-null';
+      return undefined;
+    },
+  );
+  check('JSON null 消息不致崩溃,后续 ping 仍得到 pong', outcome === 'pong-after-null', String(outcome));
+}
+
+// 12. Vite 文件服务范围(WT-P0-003):运行数据被拒,源码目录可服务
+{
+  const toFsUrl = (p) => `${base}/@fs/${p.replace(/\\/g, '/')}`;
+  const denied = await fetch(toFsUrl(path.join(root, 'data', 'access.json')));
+  const deniedSettings = await fetch(toFsUrl(path.join(root, 'data', 'config', 'settings.json')));
+  const allowedSource = await fetch(toFsUrl(path.join(root, 'src', 'shared', 'protocol.ts')));
+  check('data/access.json 经 /@fs/ 被拒绝', denied.status === 403, `status=${denied.status}`);
+  // settings.json 从未保存时文件不存在(Vite 返回 404),存在时被 deny 规则拒绝(403);两者均不可读
+  check('data/config/settings.json 经 /@fs/ 不可读', deniedSettings.status === 403 || deniedSettings.status === 404, `status=${deniedSettings.status}`);
+  check('src/shared 源码经 /@fs/ 仍可服务', allowedSource.status === 200, `status=${allowedSource.status}`);
 }
 
 console.log(`\n冒烟结果:${passed} 通过,${failed} 失败`);

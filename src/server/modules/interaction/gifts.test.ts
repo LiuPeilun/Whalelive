@@ -39,4 +39,16 @@ describe('interaction 礼物合并窗口', () => {
     t += 1000;
     expect(agg.sweep()[0]?.totalQuantity).toBe(1); // 第二笔独立成窗
   });
+
+  it('跨窗口后清空:待产出的旧感谢一并清理(WT-P0-006)', () => {
+    let t = 0;
+    const agg = createGiftAggregator({ mergeWindowMs: () => 1000, now: () => t });
+    agg.add({ userKey: 'u1', userName: '甲', giftId: 'xinxin', giftName: '小心心', quantity: 3 });
+    t += 1500; // 旧窗口过期:新礼物开新窗,旧累计转入待产出
+    agg.add({ userKey: 'u1', userName: '甲', giftId: 'xinxin', giftName: '小心心', quantity: 1 });
+    agg.clear();
+    expect(agg.sweep()).toEqual([]); // 旧结果不再产出
+    t += 1000;
+    expect(agg.sweep()).toEqual([]); // 清空后的新窗口同样不产出
+  });
 });

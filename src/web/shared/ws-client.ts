@@ -76,11 +76,14 @@ export function createWsClient(opts: {
 }
 
 export async function apiFetch(path: string, credential: string, init?: RequestInit): Promise<{ ok: boolean; status: number; body: unknown }> {
+  // 仅在确有请求体时声明 JSON Content-Type:空 POST 带 JSON 头会被 Fastify 按
+  // 空请求体拒绝(FST_ERR_CTP_EMPTY_JSON_BODY),暂停/恢复/停止均为无体 POST。
+  const headers: Record<string, string> = { authorization: `Bearer ${credential}` };
+  if (init?.body !== undefined) headers['content-type'] = 'application/json';
   const response = await fetch(path, {
     ...init,
     headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${credential}`,
+      ...headers,
       ...(init?.headers ?? {}),
     },
   });

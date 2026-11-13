@@ -26,6 +26,7 @@ function main(): void {
   let rendererId: string | null = null;
   let leaseId: string | null = null;
   let leaseTimer: number | null = null;
+  let leaseDeadlineTimer: number | null = null;
   let statusHideTimer: number | null = null;
 
   function setStatus(text: string, ok: boolean, sticky = false): void {
@@ -75,6 +76,39 @@ function main(): void {
     }
   }
 
+  function clearLeaseDeadline(): void {
+    if (leaseDeadlineTimer !== null) {
+      window.clearTimeout(leaseDeadlineTimer);
+      leaseDeadlineTimer = null;
+    }
+  }
+
+  /** 本地截止看门狗:超过租约时长仍未成功续租,即认定播放权失效,停止当前播放并重新申请。 */
+  function armLeaseDeadline(ttlMs: number): void {
+    clearLeaseDeadline();
+    leaseDeadlineTimer = window.setTimeout(() => {
+      leaseDeadlineTimer = null;
+      if (leaseId === null) return;
+      leaseId = null;
+      clearLeaseTimer();
+      setStatus('播放租约已失效,已停止声音', false, true);
+      player.stop(currentPerformanceId);
+      ws.send({ kind: 'lease-request' });
+    }, ttlMs + 1500);
+  }
+
+  /** 失去播放权时停止本端表演;无租约在身(如首次申请被拒)只需重试。 */
+  function dropLeaseAndStopIfHeld(): void {
+    const hadLease = leaseId !== null;
+    leaseId = null;
+    clearLeaseTimer();
+    clearLeaseDeadline();
+    if (hadLease) {
+      setStatus('播放权已转交,本端停止', false, true);
+      player.stop(currentPerformanceId);
+    }
+  }
+
   const ws = createWsClient({
     role: 'playback',
     credential: credential ?? '',
@@ -107,9 +141,9 @@ function main(): void {
             leaseTimer = window.setInterval(() => {
               if (leaseId) ws.send({ kind: 'lease-renew', leaseId });
             }, message.renewIntervalMs);
+            armLeaseDeadline(message.ttlMs);
           } else {
-            leaseId = null;
-            clearLeaseTimer();
+            dropLeaseAndStopIfHeld();
             window.setTimeout(() => ws.send({ kind: 'lease-request' }), message.retryAfterMs ?? 2000);
           }
           return;
@@ -138,6 +172,7 @@ function main(): void {
         setStatus('连接断开,已停止声音,重连中…', false, true);
         player.stopAll();
         clearLeaseTimer();
+        clearLeaseDeadline();
         leaseId = null;
         rendererId = null;
       } else if (status === 'connected') {
@@ -147,6 +182,8 @@ function main(): void {
   });
 
   window.addEventListener('beforeunload', () => {
+    clearLeaseTimer();
+    clearLeaseDeadline();
     if (leaseId && rendererId) {
       ws.send({ kind: 'lease-release', leaseId });
     }

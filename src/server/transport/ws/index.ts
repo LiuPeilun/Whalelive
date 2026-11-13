@@ -69,15 +69,22 @@ export function createWsTransport(deps: {
     if (conn.rendererId) deps.playback.unregisterRenderer(conn.rendererId);
   }
 
-  function handleAuth(conn: Conn, protocolVersion: number, role: ClientRole, credential: string): void {
+  function handleAuth(conn: Conn, msg: { protocolVersion?: unknown; role?: unknown; credential?: unknown }): void {
     if (conn.role !== null) return; // 重复 auth 忽略
-    if (protocolVersion !== PROTOCOL_VERSION) {
+    if (typeof msg.protocolVersion !== 'number' || msg.protocolVersion !== PROTOCOL_VERSION) {
       send(conn.ws, { kind: 'auth-result', ok: false, code: ErrorCodes.PROTOCOL_VERSION_UNSUPPORTED });
       closeConn(conn, 4002, 'protocol-unsupported');
       return;
     }
-    if (!deps.access.verify(credential, role)) {
-      deps.logger.warn('ws.auth-rejected', { remote: 'credential-mismatch' });
+    if ((msg.role !== 'control' && msg.role !== 'playback') || typeof msg.credential !== 'string' || msg.credential.length === 0) {
+      deps.logger.warn('ws.auth-rejected', { reason: 'malformed-auth' });
+      send(conn.ws, { kind: 'auth-result', ok: false, code: ErrorCodes.AUTH_REJECTED });
+      closeConn(conn, 4001, 'auth-rejected');
+      return;
+    }
+    const role: ClientRole = msg.role;
+    if (!deps.access.verify(msg.credential, role)) {
+      deps.logger.warn('ws.auth-rejected', { reason: 'credential-mismatch' });
       send(conn.ws, { kind: 'auth-result', ok: false, code: ErrorCodes.AUTH_REJECTED });
       closeConn(conn, 4001, 'auth-rejected');
       return;
@@ -93,18 +100,33 @@ export function createWsTransport(deps: {
     send(conn.ws, { kind: 'state', state: deps.stateSnapshot() });
   }
 
+  /** 连接级兜底:单条畸形消息只影响本连接,不得让处理异常冒泡到服务进程。 */
   function handleMessage(conn: Conn, raw: unknown): void {
-    let message: WsClientMessage;
     try {
-      message = JSON.parse(String(raw)) as WsClientMessage;
+      handleMessageInner(conn, raw);
+    } catch (err) {
+      deps.logger.warn('ws.message-handler-error', { error: String(err) });
+    }
+  }
+
+  function handleMessageInner(conn: Conn, raw: unknown): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(String(raw));
     } catch {
       deps.logger.warn('ws.message-parse-failed', {});
       return;
     }
+    if (typeof parsed !== 'object' || parsed === null || typeof (parsed as { kind?: unknown }).kind !== 'string') {
+      deps.logger.warn('ws.message-invalid', {});
+      if (conn.role === null) closeConn(conn, 4001, 'auth-required');
+      return;
+    }
+    const message = parsed as WsClientMessage;
     if (conn.role === null) {
       // 待认证阶段只接受 auth
-      if (typeof message === 'object' && message !== null && message.kind === 'auth') {
-        handleAuth(conn, message.protocolVersion, message.role, message.credential);
+      if (message.kind === 'auth') {
+        handleAuth(conn, message);
       } else {
         closeConn(conn, 4001, 'auth-required');
       }

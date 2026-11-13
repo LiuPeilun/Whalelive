@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 import { VITE_HMR_PATH } from './src/shared/protocol';
 
@@ -12,6 +13,16 @@ export default defineConfig({
     middlewareMode: true,
     ws: {
       path: VITE_HMR_PATH,
+    },
+    fs: {
+      // 页面文件服务仅允许源码目录与依赖;运行数据(data/ 含 access.json)显式排除,
+      // 防止通过 /@fs/ 路径绕过 API 凭据检查读取本机凭据。
+      allow: [
+        fileURLToPath(new URL('./src/web', import.meta.url)),
+        fileURLToPath(new URL('./src/shared', import.meta.url)),
+        fileURLToPath(new URL('./node_modules', import.meta.url)),
+      ],
+      deny: ['data/**', '.env.local', '.env'],
     },
   },
   build: {

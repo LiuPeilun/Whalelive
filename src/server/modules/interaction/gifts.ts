@@ -67,6 +67,7 @@ export function createGiftAggregator(opts: { mergeWindowMs(): number; now(): num
 
   function clear(): void {
     pending.clear();
+    ready = []; // 跨窗口待产出的旧感谢一并清理,防止停止后旧结果重新入队
   }
 
   function size(): number {

@@ -81,10 +81,25 @@ async function main() {
 
   const idleState = await evaluate(`(() => {
     const v = document.querySelector('#videos video:not(.hidden)');
-    return v ? { src: v.src.split('/').pop(), currentTime: v.currentTime, paused: v.paused, readyState: v.readyState } : null;
+    return v ? { src: v.src.split('/').pop(), currentTime: v.currentTime, paused: v.paused, readyState: v.readyState, loop: v.loop } : null;
   })()`);
   console.log('待机视频状态:', JSON.stringify(idleState));
   await screenshot('e2e-idle.png');
+
+  // WT-P0-005:待机持续循环——采样 8 秒,确认媒体元素 loop 开启、播放不暂停、出现时间回绕(即完成整周期)
+  const samples = [];
+  for (let i = 0; i < 16; i++) {
+    await sleep(500);
+    const s = await evaluate(`(() => {
+      const v = document.querySelector('#videos video:not(.hidden)');
+      return v ? { t: v.currentTime, loop: v.loop, paused: v.paused } : null;
+    })()`);
+    if (s) samples.push(s);
+  }
+  const wrapped = samples.some((s, i) => i > 0 && s.t < samples[i - 1].t - 0.2);
+  const advancing = samples.some((s, i) => i > 0 && s.t !== samples[i - 1].t);
+  const idleLoopOk = samples[0]?.loop === true && samples.every((s) => !s.paused) && advancing;
+  console.log(`待机循环: loop=${samples[0]?.loop === true} 持续播放=${advancing && samples.every((s) => !s.paused)} 回绕(整周期)=${wrapped} → ${idleLoopOk ? '通过' : '未通过'}`);
 
   // 提交"跳个舞"(用 node fetch,避免控制台中文编码问题)
   const chat = await fetch(`http://127.0.0.1:${port}/api/mock/events`, {
@@ -124,7 +139,7 @@ async function main() {
 
   ws.close();
   edge.kill();
-  const ok = sawDance && sawCaption && danceEnded;
+  const ok = sawDance && sawCaption && danceEnded && idleLoopOk;
   console.log(ok ? '浏览器端到端:通过' : '浏览器端到端:未完全通过');
   process.exit(ok ? 0 : 1);
 }

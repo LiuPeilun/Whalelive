@@ -10,7 +10,8 @@ export type PreparedClip = {
 };
 
 export type VideoTrack = {
-  prepare(url: string, loop: boolean): Promise<PreparedClip>;
+  /** @param indefinite true 时媒体元素自身持续循环(待机),ended 仅经 stop() 兑现 */
+  prepare(url: string, loop: boolean, indefinite?: boolean): Promise<PreparedClip>;
   hideAll(): void;
 };
 
@@ -23,7 +24,7 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
     slot.classList.add('hidden');
   }
 
-  function prepare(url: string, loop: boolean): Promise<PreparedClip> {
+  function prepare(url: string, loop: boolean, indefinite = false): Promise<PreparedClip> {
     const slot = slots.find((_, index) => index !== activeSlot) ?? slots[0]!;
     const nextActive = slots.indexOf(slot);
     return new Promise<PreparedClip>((resolve, reject) => {
@@ -32,7 +33,7 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
         if (settled) return;
         settled = true;
         cleanup();
-        resolve(makeClip(slot, nextActive, loop));
+        resolve(makeClip(slot, nextActive, loop, indefinite));
       };
       const onError = () => {
         if (settled) return;
@@ -49,7 +50,8 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
       slot.addEventListener('loadeddata', onLoaded);
       slot.addEventListener('canplay', onLoaded);
       slot.addEventListener('error', onError);
-      slot.loop = false; // 循环由 ended() 自行判定,便于“一轮即结束”的语义
+      // indefinite 由媒体元素自身循环(待机);表演循环仍按“一轮即结束”由 ended() 判定
+      slot.loop = indefinite;
       slot.muted = true;
       slot.playsInline = true;
       slot.src = url;
@@ -57,7 +59,7 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
     });
   }
 
-  function makeClip(slot: HTMLVideoElement, slotIndex: number, loop: boolean): PreparedClip {
+  function makeClip(slot: HTMLVideoElement, slotIndex: number, loop: boolean, indefinite: boolean): PreparedClip {
     let endedResolve: (() => void) | null = null;
     let ended = false;
     const endedPromise = new Promise<void>((resolve) => {
@@ -68,8 +70,12 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
       ended = true;
       endedResolve?.();
     };
-    const onEnded = () => finish();
+    const onEnded = () => {
+      if (indefinite) return; // 媒体元素循环,ended 不兑现
+      finish();
+    };
     const onTime = () => {
+      if (indefinite) return;
       if (loop && slot.duration > 0 && slot.currentTime >= slot.duration - 0.08) finish();
     };
     const onError = () => finish(); // 播放中途出错按结束处理,避免悬挂

@@ -52,11 +52,11 @@ export function createAccessControl(deps: { paths: AppPaths; logger: Logger; por
     return credentials;
   }
 
-  /** 常时比较:双方 sha256 后 timingSafeEqual,避免时序侧信道。 */
+  /** 常时比较:双方 sha256 后 timingSafeEqual,避免时序侧信道。凭据必须是非空字符串。 */
   function verify(credential: string, scope: ClientRole): boolean {
     if (!credentials) return false;
+    if (typeof credential !== 'string' || credential.length === 0) return false;
     const expected = scope === 'control' ? credentials.control : credentials.playback;
-    if (credential.length === 0) return false;
     return crypto.timingSafeEqual(digest(credential), digest(expected));
   }
 
