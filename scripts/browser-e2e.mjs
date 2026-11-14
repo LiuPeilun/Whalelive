@@ -2,7 +2,7 @@
 // 用法:先启动服务,再执行 node scripts/browser-e2e.mjs
 // 依赖 Edge(路径见下)与 npm 依赖 ws(CDP 协议)。
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,9 +20,28 @@ const edgeCandidates = [
 const edgePath = edgeCandidates.find((p) => fs.existsSync(p));
 if (!edgePath) throw new Error('未找到 Edge');
 
+const EDGE_PROFILE_TAG = 'browsere2e';
+
+function killEdgeTree(pid) {
+  // taskkill /T 在部分环境杀不干净 Chromium 进程树,再用 profile 过滤兜底,
+  // 否则残留页面会重连 /ws 并持续续租,干扰后续验证(WT-P0-007/009 验证环境)。
+  try {
+    spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore' });
+  } catch { /* ignore */ }
+  try {
+    spawnSync('powershell', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"name='msedge.exe'\" | " +
+      "Where-Object { $_.CommandLine -match 'edge-profile-browsere2e' } | " +
+      "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"], { stdio: 'ignore' });
+  } catch { /* ignore */ }
+}
+
+
 const debugPort = 9333;
 const edge = spawn(edgePath, [
   '--headless', '--disable-gpu', '--no-sandbox',
+  `--user-data-dir=${root}\.tools\edge-profile-browsere2e`,
+  '--no-first-run', '--no-default-browser-check',
   `--remote-debugging-port=${debugPort}`,
   '--window-size=760,560',
   overlayUrl,
@@ -79,15 +98,22 @@ async function main() {
   await send('Runtime.enable');
   await sleep(2500); // 等待认证、登记、租约与待机视频起播
 
-  const idleState = await evaluate(`(() => {
-    const v = document.querySelector('#videos video:not(.hidden)');
-    return v ? { src: v.src.split('/').pop(), currentTime: v.currentTime, paused: v.paused, readyState: v.readyState, loop: v.loop } : null;
-  })()`);
+  // 等待待机起播(冷启动首载较慢),再开始循环采样
+  let idleState = null;
+  for (let i = 0; i < 30; i++) {
+    await sleep(500);
+    idleState = await evaluate(`(() => {
+      const v = document.querySelector('#videos video:not(.hidden)');
+      return v ? { src: v.src.split('/').pop(), currentTime: v.currentTime, paused: v.paused, readyState: v.readyState, loop: v.loop } : null;
+    })()`);
+    if (idleState) break;
+  }
+  if (!idleState) throw new Error('待机未起播');
   console.log('待机视频状态:', JSON.stringify(idleState));
   await screenshot('e2e-idle.png');
 
   // WT-P0-005:待机持续循环——采样 8 秒,确认媒体元素 loop 开启、播放不暂停、出现时间回绕(即完成整周期)
-  const samples = [];
+  const samples = [idleState];
   for (let i = 0; i < 16; i++) {
     await sleep(500);
     const s = await evaluate(`(() => {
@@ -138,7 +164,7 @@ async function main() {
     .then((s) => console.log(`服务端:current=${s.current ? s.current.action : '空闲'} playback=${s.playback.status} renderers=${s.renderers.count}`));
 
   ws.close();
-  edge.kill();
+  killEdgeTree(edge.pid);
   const ok = sawDance && sawCaption && danceEnded && idleLoopOk;
   console.log(ok ? '浏览器端到端:通过' : '浏览器端到端:未完全通过');
   process.exit(ok ? 0 : 1);
@@ -146,6 +172,6 @@ async function main() {
 
 main().catch((err) => {
   console.error('E2E 失败:', err);
-  edge.kill();
+  killEdgeTree(edge.pid);
   process.exit(1);
 });
