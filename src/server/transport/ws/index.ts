@@ -199,6 +199,7 @@ export function createWsTransport(deps: {
     wss.on('connection', (ws: WebSocket) => {
       const conn: Conn = { ws, role: null, connectionId: null, rendererId: null, authTimer: null };
       conns.add(conn);
+      deps.logger.info('ws.connection-open', { count: conns.size });
       conn.authTimer = setTimeout(() => {
         deps.logger.info('ws.auth-timeout', {});
         closeConn(conn, 4001, 'auth-timeout');

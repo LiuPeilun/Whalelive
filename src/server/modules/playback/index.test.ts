@@ -98,6 +98,51 @@ describe('playback 租约失效联动(WT-P0-007)', () => {
     expect(await pendingB).toEqual({ performanceId: 'pf-b', status: 'ended' });
   });
 
+  it('租约失效后自动推进的下一项以空租约派发,回执按派发身份被接受(WT-P0-007)', async () => {
+    let t = 0;
+    const sent: WsServerMessage[] = [];
+    const playback = createPlayback({
+      runId: 'run-1',
+      settings,
+      logger: silentLogger,
+      now: () => t,
+      urlForAsset: () => null,
+    });
+    playback.registerRenderer('r1', (m) => {
+      sent.push(m);
+      return true;
+    });
+    const lease1 = playback.requestLease('r1');
+    expect(lease1.ok).toBe(true);
+    if (!lease1.ok) throw new Error('unreachable');
+
+    // dance 播放中(wave 在租约失效前已由 interaction 排队,此处直接模拟其自动推进)
+    const pendingA = playback.play({ performance: makePerformance('pf-a', 'dance'), asset: null, signal: new AbortController().signal });
+    expect(
+      playback.report({ runId: 'run-1', leaseId: lease1.leaseId, performanceId: 'pf-a', rendererId: 'r1', track: 'animation', status: 'started', at: 0 }, 'r1'),
+    ).toBe('accepted');
+
+    // 租约过期回收:dance 立即结算,不重新取租约(interaction 自动推进的真实空窗)
+    t += 4_000;
+    playback.tick();
+    expect(await pendingA).toEqual({ performanceId: 'pf-a', status: 'failed', code: 'LEASE_LOST' });
+
+    const pendingB = playback.play({ performance: makePerformance('pf-b', 'wave'), asset: null, signal: new AbortController().signal });
+    const dispatchB = dispatchedActions(sent).at(-1);
+    expect(dispatchB).toMatchObject({ performanceId: 'pf-b', leaseId: null, action: 'wave' });
+
+    // 页面按派发身份(空租约)回执 → 被接受并正常完成,不再依赖旧租约或预加载看门狗
+    expect(
+      playback.report({ runId: 'run-1', leaseId: null, performanceId: 'pf-b', rendererId: 'r1', track: 'animation', status: 'ended', at: 0 }, 'r1'),
+    ).toBe('accepted');
+    expect(await pendingB).toEqual({ performanceId: 'pf-b', status: 'ended' });
+
+    // 旧租约下的回执保持失效
+    expect(
+      playback.report({ runId: 'run-1', leaseId: lease1.leaseId, performanceId: 'pf-b', rendererId: 'r1', track: 'animation', status: 'started', at: 0 }, 'r1'),
+    ).toBe('stale');
+  });
+
   it('持有者主动释放租约同样立即结算归属表演', async () => {
     const sent: WsServerMessage[] = [];
     const playback = createPlayback({

@@ -97,10 +97,22 @@ export function createPlayer(deps: {
       showPlaceholder(idle ? `待机(${idle.url ? '素材未配置' : '无待机素材'})` : '待机(无待机素材)', deps.placeholder, deps.placeholderLabel);
       return;
     }
-    // 同一待机素材且片段仍可用:沿用缓存;否则(首次/失败后/更换素材)准备
-    if (idleClipPromise === null || !unchanged) {
-      startIdlePrepare();
+    if (idleClipPromise !== null && unchanged) {
+      // 缓存复用(断线重连/重新登记):占位可见时恢复待机画面与循环播放(WT-P0-010);
+      // 表演进行中(占位隐藏)不动,保留 WT-P0-009 的“迟到待机不覆盖动作”约束。
+      if (deps.placeholder.style.display !== 'none') {
+        const gen = idleGeneration;
+        void idleClipPromise.then((clip) => {
+          if (gen !== idleGeneration) return;
+          if (deps.placeholder.style.display === 'none') return; // 已有可见画面
+          clip.show();
+          clip.play();
+        });
+      }
+      return;
     }
+    // 首次/失败后/更换素材:准备
+    startIdlePrepare();
   }
 
   function play(dispatch: PerformanceDispatch): void {

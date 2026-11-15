@@ -1,7 +1,7 @@
 // WT-P0-007 协议级验证:租约到期后服务端立即结算归属表演并补发停止,
-// 队列继续调度,重新取得播放权后下一表演可执行,旧回执保持失效。
+// 下一项在租约失效前已排入,自动推进时以新派发身份(空租约)回执并被接受,
+// 模拟页面续租失败后重新取得租约;旧回执保持失效。结束后恢复原用户设置。
 // 用法:先启动服务,再执行 node scripts/lease-lost-e2e.mjs [port]
-// 会临时修改租约设置(ttl 3000 / 续租 1000),结束后恢复原用户设置。
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,17 +28,6 @@ function check(name, ok, detail = '') {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function requestLeaseWithRetry(maxMs = 12000) {
-  const deadline = Date.now() + maxMs;
-  for (;;) {
-    const mark = received.length; // 只匹配本次请求之后的新 lease-result,避免命中旧租约消息
-    socket.send(JSON.stringify({ kind: 'lease-request' }));
-    const r = await waitFor((m) => (m.kind === 'lease-result' ? m : undefined), 3000, mark);
-    if (r?.ok) return r;
-    if (Date.now() > deadline) return r ?? null;
-  }
-}
-
 async function http(pathname, init) {
   const response = await fetch(`${base}${pathname}`, init);
   let body = null;
@@ -46,9 +35,7 @@ async function http(pathname, init) {
   return { status: response.status, body };
 }
 
-// 恢复调度(此前端到端可能留下暂停态),并等待遗留任务自愈清空:
-// 其他脚本遗留的礼物感谢/未回执表演会挡住本场景的派发时序;
-// 无渲染端(NO_RENDERER 3 秒)或预加载超时(8 秒)后服务端自行结算。
+// 恢复调度并等待遗留任务自愈清空(NO_RENDERER 3 秒 / 预加载超时 8 秒)
 await http('/api/control/resume', { method: 'POST', headers: { authorization: `Bearer ${access.control}` } });
 {
   const deadline = Date.now() + 25_000;
@@ -56,17 +43,17 @@ await http('/api/control/resume', { method: 'POST', headers: { authorization: `B
     const s = await http('/api/state', { headers: { authorization: `Bearer ${access.control}` } });
     if (s.body.current === null && s.body.queue?.length === 0) break;
     if (Date.now() > deadline) {
-      console.log(`WARN: 遗留任务未在 25 秒内清空(current=${JSON.stringify(s.body.current)}),继续执行`);
+      console.log('WARN: 遗留任务未在 25 秒内清空,继续执行');
       break;
     }
     await sleep(500);
   }
 }
+
+// 读取原设置并临时收紧租约(ttl 3000 / 续租 1000,处于现有校验范围)
 const original = await http('/api/settings', { headers: { authorization: `Bearer ${access.control}` } });
 const originalVersion = original.body.savedVersion;
 const originalSettings = original.body.user;
-
-// 临时收紧租约:ttl 3000 / 续租 1000(处于现有校验范围)
 const tightened = JSON.parse(JSON.stringify(originalSettings));
 tightened.lease = { ttlMs: 3000, renewIntervalMs: 1000 };
 const tightenResult = await http('/api/settings', {
@@ -76,10 +63,12 @@ const tightenResult = await http('/api/settings', {
 });
 check('临时租约设置生效', tightenResult.status === 200, JSON.stringify(tightenResult.body));
 
-// 播放端:认证 → 登记 → 取租约 → 接收 dance → 回 ready/started → 停止续租
+// ---------- 播放端模拟:认证 → 登记 → 租约 → 表演回执(绑定派发身份)→ 续租失败处理 ----------
 const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, { origin: `http://127.0.0.1:${port}` });
 const received = [];
-let assignedRendererId = null; // 服务端分配,回执必须携带
+let assignedRendererId = null;
+let pageLeaseId = null; // 页面当前持有的租约
+let currentDispatchLeaseId = null; // 当前表演派发时的租约快照(回执与停止的归属依据,WT-P0-007)
 const waiters = [];
 
 function waitFor(predicate, timeoutMs, fromIndex = 0) {
@@ -94,26 +83,62 @@ function waitFor(predicate, timeoutMs, fromIndex = 0) {
   });
 }
 
-let dancePerformanceId = null; // 由 dance 派发回调登记:该表演不自动结束,等待租约失效
+async function requestLeaseWithRetry(maxMs = 12000) {
+  const deadline = Date.now() + maxMs;
+  for (;;) {
+    const mark = received.length; // 只匹配本次请求之后的新 lease-result,避免命中旧租约消息
+    socket.send(JSON.stringify({ kind: 'lease-request' }));
+    const r = await waitFor((m) => (m.kind === 'lease-result' ? m : undefined), 3000, mark);
+    if (r?.ok) return r;
+    if (Date.now() > deadline) return r ?? null;
+  }
+}
+
+let renewTimer = null;
+function startRenewLoop(leaseIdForRenew, renewIntervalMs) {
+  if (renewTimer) clearInterval(renewTimer);
+  renewTimer = setInterval(() => {
+    if (pageLeaseId === leaseIdForRenew) socket.send(JSON.stringify({ kind: 'lease-renew', leaseId: leaseIdForRenew }));
+  }, renewIntervalMs);
+}
+function stopRenewLoop() {
+  if (renewTimer) {
+    clearInterval(renewTimer);
+    renewTimer = null;
+  }
+}
 
 socket.on('message', (data) => {
   const msg = JSON.parse(String(data));
   received.push(msg);
   if (msg.kind === 'performance') {
-    // 像真实播放页一样对所有派发回执;非 dance 的遗留表演 300ms 内自愈结束,
-    // dance 保持进行中以便观察租约失效(WT-P0-007 场景)。
+    // 像真实播放页一样回执所有派发,租约使用派发身份快照(WT-P0-007)
     const dispatch = msg.dispatch;
+    currentDispatchLeaseId = dispatch.leaseId;
     const sendReport = (status) => socket.send(JSON.stringify({
       kind: 'playback-report',
-      report: { runId: dispatch.runId, leaseId: dispatch.leaseId, performanceId: dispatch.performance.id, rendererId: assignedRendererId, track: 'animation', status, at: Date.now() },
+      report: { runId: dispatch.runId, leaseId: currentDispatchLeaseId, performanceId: dispatch.performance.id, rendererId: assignedRendererId, track: 'animation', status, at: Date.now() },
     }));
     sendReport('ready');
     sendReport('started');
     if (dispatch.performance.action !== 'dance') {
+      // 非 dance 的派发(自动推进/遗留表演)按真实页面行为自愈结束
       setTimeout(() => sendReport('ended'), 300);
-    } else if (dancePerformanceId === null) {
-      dancePerformanceId = dispatch.performance.id;
     }
+  }
+  if (msg.kind === 'lease-result' && msg.ok === false) {
+    // 续租失败:失效租约=pageLeaseId;按派发身份过滤,空租约/新租约派发的表演继续播放
+    const lostLeaseId = pageLeaseId;
+    pageLeaseId = null;
+    stopRenewLoop();
+    const affected = currentDispatchLeaseId !== null && currentDispatchLeaseId === lostLeaseId;
+    console.log(`续租失败(${msg.code}):失效租约=${lostLeaseId ?? '-'} 当前表演派发身份=${currentDispatchLeaseId ?? '-'} → ${affected ? '停止归属表演' : '不停止(派发身份已更新)'}`);
+    void requestLeaseWithRetry().then((r) => {
+      if (r?.ok) {
+        pageLeaseId = r.leaseId;
+        startRenewLoop(r.leaseId, 1000);
+      }
+    });
   }
   for (const w of [...waiters]) {
     if (w.predicate(msg) !== undefined) {
@@ -141,7 +166,16 @@ async function submitChat(text, userId) {
   return null;
 }
 
-// 1. 认证结果与租约
+async function waitForIdle(maxMs = 12_000) {
+  const deadline = Date.now() + maxMs;
+  for (;;) {
+    const st = await http('/api/state', { headers: { authorization: `Bearer ${access.control}` } });
+    if (st.body.current === null || Date.now() > deadline) return st;
+    await sleep(300);
+  }
+}
+
+// ---------- 场景执行 ----------
 const authOk = await waitFor((m) => (m.kind === 'auth-result' ? m : undefined), 5000);
 check('播放端认证成功', authOk?.ok === true, JSON.stringify(authOk));
 socket.send(JSON.stringify({ kind: 'renderer-register' }));
@@ -149,63 +183,69 @@ const registered = await waitFor((m) => (m.kind === 'renderer-registered' ? m : 
 assignedRendererId = registered?.rendererId ?? null;
 const lease1 = await requestLeaseWithRetry();
 check('取得初始租约', lease1?.ok === true, JSON.stringify(lease1));
-
-// 2. 派发 dance,回 ready/started,然后停止续租
-const danceSubmit = await submitChat('大肥鱼跳个舞', 'lease-dance');
-check('dance 事件入队', danceSubmit !== null, JSON.stringify(danceSubmit?.body));
-const dance = await waitFor((m) => (m.kind === 'performance' && m.dispatch.performance.action === 'dance' ? m : undefined), 8000);
-check('dance 已派发且携带租约', dance?.dispatch?.leaseId != null, JSON.stringify(dance?.dispatch?.leaseId));
-
-// 3. 不续租:等待服务端租约回收 → stop 下发 + 会话结算
-const stopMsg = await waitFor((m) => (m.kind === 'stop' && m.performanceId === dancePerformanceId ? m : undefined), 10000);
-check('租约到期后服务端下发 stop(WT-P0-007)', stopMsg !== undefined, '等待 stop 超时');
-// 轮询等待:遗留礼物等表演会紧随其后自愈派发并结算,断言“最终不被阻塞”而非瞬时快照
-const leaseLostLog = await (async () => {
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    const st = await http('/api/state', { headers: { authorization: `Bearer ${access.control}` } });
-    if (st.body.current === null || Date.now() > deadline) return st;
-    await sleep(300);
-  }
-})();
-check('会话已结束,队列不被阻塞', leaseLostLog.body.current === null, JSON.stringify(leaseLostLog.body.current));
-
-// 4. 重新取得播放权(服务端此刻已空闲),再派发下一表演:派发携带新租约
-const lease2 = await requestLeaseWithRetry();
-check('重新取得新租约', lease2?.ok === true, JSON.stringify(lease2));
-
-// 5. 队列未被旧会话阻塞:下一表演立即派发并以新租约完成
-const waveSubmit = await submitChat('挥挥手', 'lease-wave');
-check('wave 事件入队', waveSubmit !== null, JSON.stringify(waveSubmit?.body));
-const wave = await waitFor((m) => (m.kind === 'performance' && m.dispatch.performance.action === 'wave' ? m : undefined), 8000);
-check('下一表演(wave)被继续调度(WT-P0-007)', wave !== undefined, '等待 wave 派发超时');
-if (wave && lease2?.ok) {
-  // 通用回执已随派发上报;轮询等待服务端结算
-  const stateAfter = await (async () => {
-    const deadline = Date.now() + 8_000;
-    for (;;) {
-      const st = await http('/api/state', { headers: { authorization: `Bearer ${access.control}` } });
-      if (st.body.current === null || Date.now() > deadline) return st;
-      await sleep(300);
-    }
-  })();
-  check('新租约下的 wave 会话正常完成', stateAfter.body.current === null, JSON.stringify(stateAfter.body.current));
+if (lease1?.ok) {
+  pageLeaseId = lease1.leaseId;
+  startRenewLoop(lease1.leaseId, 1000);
 }
 
-// 6. 旧会话的迟到回执保持失效:发送后服务仍正常响应
+// dance 派发并回执(绑定派发身份)
+await submitChat('大肥鱼跳个舞', 'lease-dance');
+const dance = await waitFor((m) => (m.kind === 'performance' && m.dispatch.performance.action === 'dance' ? m : undefined), 8000);
+check('dance 已派发且携带租约', dance?.dispatch?.leaseId != null, JSON.stringify(dance?.dispatch?.leaseId));
+const dancePerformanceId = dance?.dispatch?.performance?.id ?? null;
+
+// 模拟页面本地截止看门狗(ttl+1500ms):按派发身份过滤,仅停止归属表演,并重新申请租约
+setTimeout(() => {
+  const lostLeaseId = pageLeaseId;
+  if (lostLeaseId === null) return;
+  pageLeaseId = null;
+  stopRenewLoop();
+  const affected = currentDispatchLeaseId !== null && currentDispatchLeaseId === lostLeaseId;
+  console.log(`本地看门狗触发:失效租约=${lostLeaseId} 当前表演派发身份=${currentDispatchLeaseId ?? '-'} → ${affected ? '停止归属表演' : '不停止(派发身份已更新)'}`);
+  void requestLeaseWithRetry().then((r) => {
+    if (r?.ok) {
+      pageLeaseId = r.leaseId;
+      startRenewLoop(r.leaseId, 1000);
+    }
+  });
+}, 3000 + 1500);
+
+// wave 在租约失效之前入队(审核要求的顺序:自动推进的真实空窗)
+const waveSubmit = await submitChat('挥挥手', 'lease-wave');
+check('wave 在租约失效前入队', waveSubmit !== null, JSON.stringify(waveSubmit?.body));
+
+// 停止续租(模拟页面 renew 被拦截):等待租约回收 → dance LEASE_LOST + stop 下发
+stopRenewLoop();
+const stopMsg = await waitFor((m) => (m.kind === 'stop' && m.performanceId === dancePerformanceId ? m : undefined), 10000);
+check('租约到期后服务端下发 stop(WT-P0-007)', stopMsg !== undefined, '等待 stop 超时');
+
+// 自动推进:wave 派发,携带新派发身份(空租约)
+const wave = await waitFor((m) => (m.kind === 'performance' && m.dispatch.performance.action === 'wave' ? m : undefined), 10000);
+check('wave 自动推进且派发身份为空租约(WT-P0-007)', wave?.dispatch?.leaseId === null, JSON.stringify(wave?.dispatch?.leaseId));
+
+// wave 以派发身份回执,正常完成(不再依赖旧租约或预加载看门狗)
+const stateAfter = await waitForIdle(8000);
+check('wave 回执按派发身份被接受并完成(WT-P0-007)', stateAfter.body.current === null, JSON.stringify(stateAfter.body.current));
+
+// 页面续租失败链路已在消息处理中发生;确认页面重新取得租约
+const reacquired = await waitFor((m) => (m.kind === 'lease-result' && m.ok === true && m.leaseId !== lease1?.leaseId ? m : undefined), 8000);
+check('页面续租失败后重新取得新租约', reacquired?.ok === true, JSON.stringify(reacquired));
+
+// 旧会话的迟到回执保持失效:发送后服务仍正常响应
 if (dance) {
   socket.send(JSON.stringify({
     kind: 'playback-report',
     report: { runId: dance.dispatch.runId, leaseId: dance.dispatch.leaseId, performanceId: dancePerformanceId, rendererId: assignedRendererId, track: 'animation', status: 'ended', at: Date.now() },
   }));
   socket.send(JSON.stringify({ kind: 'ping' }));
-  const pong = await waitFor((m) => (m.kind === 'pong' ? m : undefined), 4000);
+  const pong = await waitFor((m) => (m.kind === 'pong' ? m : undefined), 4000, received.length);
   check('迟到回执被忽略,服务保持可用(WT-P0-007)', pong !== undefined, '未收到 pong');
 }
 
+stopRenewLoop();
 socket.close();
 
-// 7. 恢复原用户设置
+// 恢复原用户设置
 const fresh = await http('/api/settings', { headers: { authorization: `Bearer ${access.control}` } });
 const restore = await http('/api/settings', {
   method: 'PUT',

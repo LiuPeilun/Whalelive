@@ -185,6 +185,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
       socket.destroy();
       return;
     }
+    logger.info('ws.upgrade', { pathname, origin: typeof req.headers.origin === 'string' ? redactUrl(req.headers.origin) : '(缺失)', host: typeof req.headers.host === 'string' ? req.headers.host : '(缺失)' });
     if (pathname === WS_PATH) {
       const check = access.checkUpgrade(req.headers, req.socket.remoteAddress);
       if (!check.ok) {

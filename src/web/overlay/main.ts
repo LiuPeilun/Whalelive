@@ -7,6 +7,8 @@ import { createPlayer } from './player.js';
 // 连接、播放端注册与页面生命周期(PROJECT_STRUCTURE 目标目录注释):
 // 认证 → renderer-register → 申请/续租播放租约 → 接收表演并回执;
 // 断线时本地停止音频,重连后重新登记;收到新 runId 后清理旧播放状态。
+// 回执与本地停止绑定“派发身份”:每个表演使用派发时的租约快照
+// (WT-P0-007),服务端租约回收后自动推进的下一项以新身份回执,不被旧租约判失效。
 
 function main(): void {
   const statusEl = document.getElementById('status') as HTMLElement;
@@ -25,6 +27,8 @@ function main(): void {
   let runId: string | null = null;
   let rendererId: string | null = null;
   let leaseId: string | null = null;
+  let currentPerformanceId: string | null = null;
+  let currentDispatchLeaseId: string | null = null; // 当前表演派发时的租约快照(回执与停止的归属依据)
   let leaseTimer: number | null = null;
   let leaseDeadlineTimer: number | null = null;
   let statusHideTimer: number | null = null;
@@ -55,7 +59,7 @@ function main(): void {
         kind: 'playback-report',
         report: {
           runId,
-          leaseId,
+          leaseId: currentDispatchLeaseId,
           performanceId: currentPerformanceId ?? 'unknown',
           rendererId,
           track,
@@ -66,8 +70,6 @@ function main(): void {
       });
     },
   });
-
-  let currentPerformanceId: string | null = null;
 
   function clearLeaseTimer(): void {
     if (leaseTimer !== null) {
@@ -83,30 +85,32 @@ function main(): void {
     }
   }
 
-  /** 本地截止看门狗:超过租约时长仍未成功续租,即认定播放权失效,停止当前播放并重新申请。 */
+  /** 失去播放权(lostLeaseId 为失效的租约):仅当进行中的表演以该租约派发时才本地停止;
+   *  服务端租约回收后自动推进的表演携带新派发身份(null / 新租约),继续播放(WT-P0-007)。
+   *  重申请由调用点负责(续租失败按 retryAfterMs 延迟,看门狗立即)。 */
+  function dropLeaseAndStopIfHeld(lostLeaseId: string | null): void {
+    const affected = lostLeaseId !== null && currentDispatchLeaseId === lostLeaseId;
+    leaseId = null;
+    clearLeaseTimer();
+    clearLeaseDeadline();
+    if (affected) {
+      setStatus('播放权已失效,本端停止', false, true);
+      player.stop(currentPerformanceId);
+    }
+  }
+
+  /** 本地截止看门狗:超过租约时长仍未成功续租,认定当前全局租约失效,
+   *  按派发身份过滤后停止归属表演,并立即重新申请租约。 */
   function armLeaseDeadline(ttlMs: number): void {
     clearLeaseDeadline();
     leaseDeadlineTimer = window.setTimeout(() => {
       leaseDeadlineTimer = null;
       if (leaseId === null) return;
-      leaseId = null;
-      clearLeaseTimer();
-      setStatus('播放租约已失效,已停止声音', false, true);
-      player.stop(currentPerformanceId);
+      const lostLeaseId = leaseId;
+      setStatus('播放租约已失效', false, true);
+      dropLeaseAndStopIfHeld(lostLeaseId);
       ws.send({ kind: 'lease-request' });
     }, ttlMs + 1500);
-  }
-
-  /** 失去播放权时停止本端表演;无租约在身(如首次申请被拒)只需重试。 */
-  function dropLeaseAndStopIfHeld(): void {
-    const hadLease = leaseId !== null;
-    leaseId = null;
-    clearLeaseTimer();
-    clearLeaseDeadline();
-    if (hadLease) {
-      setStatus('播放权已转交,本端停止', false, true);
-      player.stop(currentPerformanceId);
-    }
   }
 
   const ws = createWsClient({
@@ -143,20 +147,24 @@ function main(): void {
             }, message.renewIntervalMs);
             armLeaseDeadline(message.ttlMs);
           } else {
-            dropLeaseAndStopIfHeld();
-            window.setTimeout(() => ws.send({ kind: 'lease-request' }), message.retryAfterMs ?? 2000);
+            // 续租失败:失效的是页面当前持有的租约;归属过滤在 dropLeaseAndStopIfHeld 内
+            dropLeaseAndStopIfHeld(leaseId);
           }
           return;
         }
         case 'performance': {
           const dispatch: PerformanceDispatch = message.dispatch;
           currentPerformanceId = dispatch.performance.id;
+          currentDispatchLeaseId = dispatch.leaseId; // 回执与本地停止绑定派发身份(WT-P0-007)
           player.play(dispatch);
           return;
         }
         case 'stop': {
           player.stop(message.performanceId);
-          if (message.performanceId === currentPerformanceId) currentPerformanceId = null;
+          if (message.performanceId === currentPerformanceId) {
+            currentPerformanceId = null;
+            currentDispatchLeaseId = null;
+          }
           return;
         }
         case 'state': {
@@ -174,6 +182,7 @@ function main(): void {
         clearLeaseTimer();
         clearLeaseDeadline();
         leaseId = null;
+        currentDispatchLeaseId = null;
         rendererId = null;
       } else if (status === 'connected') {
         setStatus('已连接', true);
