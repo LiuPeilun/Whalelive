@@ -85,6 +85,30 @@ function main(): void {
     }
   }
 
+  // 租约申请恢复(WT-P0-007):lease-result 失败(续租被拒 / 首次被拒)后
+  // 以唯一计时器受控重试,指数退避;成功或断线时复位。首次尝试立即发送。
+  let leaseRetryTimer: number | null = null;
+  let leaseRetryAttempt = 0;
+
+  function clearLeaseRetry(): void {
+    if (leaseRetryTimer !== null) {
+      window.clearTimeout(leaseRetryTimer);
+      leaseRetryTimer = null;
+    }
+    leaseRetryAttempt = 0;
+  }
+
+  function scheduleLeaseRequest(): void {
+    if (leaseRetryTimer !== null) return; // 唯一待执行重申请
+    const delay = leaseRetryAttempt === 0 ? 0 : Math.min(2000 * 2 ** (leaseRetryAttempt - 1), 15_000);
+    leaseRetryAttempt += 1;
+    leaseRetryTimer = window.setTimeout(() => {
+      leaseRetryTimer = null;
+      if (leaseId !== null) return; // 等待期间已取得租约
+      ws.send({ kind: 'lease-request' });
+    }, delay);
+  }
+
   /** 失去播放权(lostLeaseId 为失效的租约):仅当进行中的表演以该租约派发时才本地停止;
    *  服务端租约回收后自动推进的表演携带新派发身份(null / 新租约),继续播放(WT-P0-007)。
    *  重申请由调用点负责(续租失败按 retryAfterMs 延迟,看门狗立即)。 */
@@ -100,7 +124,7 @@ function main(): void {
   }
 
   /** 本地截止看门狗:超过租约时长仍未成功续租,认定当前全局租约失效,
-   *  按派发身份过滤后停止归属表演,并立即重新申请租约。 */
+   *  按派发身份过滤后停止归属表演,并重新申请租约。 */
   function armLeaseDeadline(ttlMs: number): void {
     clearLeaseDeadline();
     leaseDeadlineTimer = window.setTimeout(() => {
@@ -109,7 +133,7 @@ function main(): void {
       const lostLeaseId = leaseId;
       setStatus('播放租约已失效', false, true);
       dropLeaseAndStopIfHeld(lostLeaseId);
-      ws.send({ kind: 'lease-request' });
+      scheduleLeaseRequest();
     }, ttlMs + 1500);
   }
 
@@ -135,20 +159,23 @@ function main(): void {
         case 'renderer-registered': {
           rendererId = message.rendererId;
           player.setIdle(message.idle);
+          clearLeaseRetry();
           ws.send({ kind: 'lease-request' });
           return;
         }
         case 'lease-result': {
           if (message.ok) {
             leaseId = message.leaseId;
+            clearLeaseRetry();
             clearLeaseTimer();
             leaseTimer = window.setInterval(() => {
               if (leaseId) ws.send({ kind: 'lease-renew', leaseId });
             }, message.renewIntervalMs);
             armLeaseDeadline(message.ttlMs);
           } else {
-            // 续租失败:失效的是页面当前持有的租约;归属过滤在 dropLeaseAndStopIfHeld 内
+            // 续租/首次申请被拒:失效租约归属过滤后停止,并进入受控重申请(WT-P0-007)
             dropLeaseAndStopIfHeld(leaseId);
+            scheduleLeaseRequest();
           }
           return;
         }
@@ -181,6 +208,7 @@ function main(): void {
         player.stopAll();
         clearLeaseTimer();
         clearLeaseDeadline();
+        clearLeaseRetry();
         leaseId = null;
         currentDispatchLeaseId = null;
         rendererId = null;
@@ -193,6 +221,7 @@ function main(): void {
   window.addEventListener('beforeunload', () => {
     clearLeaseTimer();
     clearLeaseDeadline();
+    clearLeaseRetry();
     if (leaseId && rendererId) {
       ws.send({ kind: 'lease-release', leaseId });
     }

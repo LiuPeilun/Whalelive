@@ -39,10 +39,12 @@ export function createWsClient(opts: {
     return true;
   }
 
-  let connectSeq = 0; // 连接会话编号:守卫超时与事件的归属判定,防双重重连循环
+  let connectSeq = 0; // 连接会话编号:被替换连接的全部事件失效(WT-P0-011)
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null; // 唯一待执行重连
 
   function scheduleReconnect(): void {
     if (closedByUser) return;
+    if (reconnectTimer !== null) return; // 同一次失败只进入一次重连调度
     probe.status = 'disconnected';
     probe.reconnects = reconnects;
     try {
@@ -53,12 +55,33 @@ export function createWsClient(opts: {
     }
     const wait = retryMs;
     retryMs = Math.min(retryMs * 2, 5000);
-    setTimeout(connect, wait);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, wait);
   }
 
   function connect(): void {
     if (closedByUser) return;
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     const myId = ++connectSeq;
+    // 使被替换连接的全部事件失效,并关闭残存 socket(避免同页多业务连接)
+    if (ws !== null) {
+      const stale = ws;
+      stale.onopen = null;
+      stale.onmessage = null;
+      stale.onerror = null;
+      stale.onclose = null;
+      try {
+        if (stale.readyState !== WebSocket.CLOSED) stale.close();
+      } catch {
+        /* 忽略 */
+      }
+      ws = null;
+    }
     let socket: WebSocket;
     try {
       probe.status = 'connecting';
@@ -70,15 +93,41 @@ export function createWsClient(opts: {
       return;
     }
     ws = socket;
+    // 悬挂守卫:CONNECTING 超过 10 秒(半开网络等)按失败处理并重排;
+    // 立即使本连接全部事件失效(含竞态窗口内迟到的 open),浏览器随后的
+    // 异步 close 也因代数失效,不会产生第二次调度(WT-P0-011)。
+    const guard = setTimeout(() => {
+      if (connectSeq !== myId) return;
+      if (socket.readyState === WebSocket.CONNECTING) {
+        probe.lastError = 'connecting-timeout';
+        reconnects += 1;
+        connectSeq += 1; // 失效竞态窗口内迟到的 open/onclose
+        try {
+          socket.close();
+        } catch {
+          /* 忽略 */
+        }
+        scheduleReconnect();
+      }
+    }, 10_000);
     socket.onopen = () => {
       clearTimeout(guard);
-      if (connectSeq !== myId) return;
+      if (connectSeq !== myId) {
+        // 迟到的成功连接属于已被替换的会话:直接关闭,避免同页第二连接
+        try {
+          socket.close();
+        } catch {
+          /* 忽略 */
+        }
+        return;
+      }
       retryMs = 800;
       probe.status = 'connected';
       opts.onStatus('connected');
       send({ kind: 'auth', protocolVersion: PROTOCOL_VERSION, role: opts.role, credential: opts.credential });
     };
     socket.onmessage = (event) => {
+      if (connectSeq !== myId) return; // 旧连接消息不更新页面状态(WT-P0-011)
       try {
         opts.onMessage(JSON.parse(String(event.data)) as WsServerMessage);
       } catch (err) {
@@ -88,29 +137,16 @@ export function createWsClient(opts: {
     };
     socket.onclose = () => {
       clearTimeout(guard);
-      if (connectSeq !== myId) return;
+      if (connectSeq !== myId) return; // 守卫已处理(浏览器异步 close 迟到)
       reconnects += 1;
       scheduleReconnect();
     };
     socket.onerror = () => {
+      if (connectSeq !== myId) return;
       // 仅记录;CONNECTING 状态主动 close() 会吞掉后续 close 事件,
       // 连接失败时浏览器会自行派发 error + close(WT-P0-010 重连链死亡根因)
       probe.lastError = 'socket-error';
     };
-    // 悬挂守卫:CONNECTING 超过 10 秒(半开网络等)按失败处理并重排
-    const guard = setTimeout(() => {
-      if (connectSeq !== myId) return;
-      if (socket.readyState === WebSocket.CONNECTING) {
-        try {
-          socket.close();
-        } catch {
-          /* 忽略 */
-        }
-        probe.lastError = 'connecting-timeout';
-        reconnects += 1;
-        scheduleReconnect();
-      }
-    }, 10_000);
   }
 
   connect();
@@ -119,6 +155,10 @@ export function createWsClient(opts: {
     send,
     close() {
       closedByUser = true;
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       try {
         ws?.close();
       } catch {
