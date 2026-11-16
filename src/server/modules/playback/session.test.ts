@@ -148,6 +148,41 @@ describe('playback 会话单次完成', () => {
     expect(sendStop).toHaveBeenCalledWith('pf-test');
   });
 
+  it('租约失效:leaseLost 结算 failed(LEASE_LOST)并补发停止,迟到回执失效(WT-P0-007)', async () => {
+    const sendStop = vi.fn();
+    const deps = makeDeps({
+      sendStop,
+      tryDispatch: (entry: { dispatchedRendererId: string | null; leaseId: string | null }) => {
+        entry.dispatchedRendererId = 'rnd-1';
+        entry.leaseId = 'lease-1';
+        return true;
+      },
+    });
+    const sessions = createSessionManager(deps);
+    const pending = sessions.start({ performance: makePerformance(), asset: null, signal: new AbortController().signal });
+    expect(sessions.report(makeReport({ leaseId: 'lease-1', status: 'started' }))).toBe('accepted');
+    sessions.leaseLost('lease-1');
+    expect(await pending).toEqual({ performanceId: 'pf-test', status: 'failed', code: 'LEASE_LOST' });
+    expect(sendStop).toHaveBeenCalledWith('pf-test');
+    // 结算后的旧回执保持失效
+    expect(sessions.report(makeReport({ leaseId: 'lease-1', status: 'ended' }))).toBe('stale-performance');
+  });
+
+  it('租约失效与会话无关时不结算(WT-P0-007)', async () => {
+    const deps = makeDeps({
+      tryDispatch: (entry: { dispatchedRendererId: string | null; leaseId: string | null }) => {
+        entry.dispatchedRendererId = 'rnd-1';
+        entry.leaseId = 'lease-1';
+        return true;
+      },
+    });
+    const sessions = createSessionManager(deps);
+    const pending = sessions.start({ performance: makePerformance(), asset: null, signal: new AbortController().signal });
+    sessions.leaseLost('lease-other');
+    expect(sessions.report(makeReport({ leaseId: 'lease-1', status: 'ended' }))).toBe('accepted');
+    expect(await pending).toEqual({ performanceId: 'pf-test', status: 'ended' });
+  });
+
   it('并发 start 被拒绝为失败,不悬挂调度', async () => {
     const deps = makeDeps();
     const sessions = createSessionManager(deps);

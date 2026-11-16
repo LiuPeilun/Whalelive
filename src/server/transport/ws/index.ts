@@ -157,6 +157,7 @@ export function createWsTransport(deps: {
         if (result.ok) {
           send(conn.ws, { kind: 'lease-result', ok: true, leaseId: result.leaseId, ttlMs: result.ttlMs, renewIntervalMs: result.renewIntervalMs });
         } else {
+          deps.logger.info('ws.lease-denied', { rendererId: conn.rendererId, code: result.code });
           const msg: WsServerMessage = { kind: 'lease-result', ok: false, code: result.code };
           send(conn.ws, msg);
         }
@@ -199,6 +200,7 @@ export function createWsTransport(deps: {
     wss.on('connection', (ws: WebSocket) => {
       const conn: Conn = { ws, role: null, connectionId: null, rendererId: null, authTimer: null };
       conns.add(conn);
+      deps.logger.info('ws.connection-open', { count: conns.size });
       conn.authTimer = setTimeout(() => {
         deps.logger.info('ws.auth-timeout', {});
         closeConn(conn, 4001, 'auth-timeout');

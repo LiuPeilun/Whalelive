@@ -1,6 +1,7 @@
 // 视频轨道:预加载、双缓冲与切换(PROJECT_STRUCTURE《模块职责》/ARCHITECTURE §8)。
-// 两个 video 元素交替使用:新片段在隐藏位预加载到可播放帧后再切换,避免黑屏。
-// loop 素材在完成“一个循环”后视为 ended(说话动作循环到音频/字幕结束的 P0 近似)。
+// 缓冲位按角色固定(WT-P0-009):位 0 恒为待机、位 1 恒为表演动作,
+// 待机预加载与动作派发交错时互不覆盖,回到待机的资源与循环配置始终正确。
+// 待机由媒体元素自身持续循环;表演循环按“一轮即结束”判定(P0 无语音的近似)。
 
 export type PreparedClip = {
   show(): void;
@@ -10,13 +11,15 @@ export type PreparedClip = {
 };
 
 export type VideoTrack = {
-  /** @param indefinite true 时媒体元素自身持续循环(待机),ended 仅经 stop() 兑现 */
-  prepare(url: string, loop: boolean, indefinite?: boolean): Promise<PreparedClip>;
+  prepareIdle(url: string, loop: boolean): Promise<PreparedClip>;
+  prepareAction(url: string, loop: boolean): Promise<PreparedClip>;
   hideAll(): void;
 };
 
 export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElement, placeholder: HTMLElement, placeholderLabel: HTMLElement): VideoTrack {
-  let slots: HTMLVideoElement[] = [videoA, videoB];
+  const slots: HTMLVideoElement[] = [videoA, videoB];
+  const IDLE_SLOT = 0;
+  const ACTION_SLOT = 1;
   let activeSlot = -1;
 
   function hide(slot: HTMLVideoElement): void {
@@ -24,16 +27,15 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
     slot.classList.add('hidden');
   }
 
-  function prepare(url: string, loop: boolean, indefinite = false): Promise<PreparedClip> {
-    const slot = slots.find((_, index) => index !== activeSlot) ?? slots[0]!;
-    const nextActive = slots.indexOf(slot);
+  function prepareOn(slotIndex: number, url: string, loop: boolean, indefinite: boolean): Promise<PreparedClip> {
+    const slot = slots[slotIndex]!;
     return new Promise<PreparedClip>((resolve, reject) => {
       let settled = false;
       const onLoaded = () => {
         if (settled) return;
         settled = true;
         cleanup();
-        resolve(makeClip(slot, nextActive, loop, indefinite));
+        resolve(makeClip(slot, slotIndex, loop, indefinite));
       };
       const onError = () => {
         if (settled) return;
@@ -50,7 +52,7 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
       slot.addEventListener('loadeddata', onLoaded);
       slot.addEventListener('canplay', onLoaded);
       slot.addEventListener('error', onError);
-      // indefinite 由媒体元素自身循环(待机);表演循环仍按“一轮即结束”由 ended() 判定
+      // indefinite 由媒体元素自身循环(仅待机);表演循环按“一轮即结束”由 ended() 判定
       slot.loop = indefinite;
       slot.muted = true;
       slot.playsInline = true;
@@ -114,7 +116,15 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
   // 初始状态:显示占位,等待待机素材
   hideAll();
 
-  return { prepare, hideAll };
+  return {
+    prepareIdle(url, loop) {
+      return prepareOn(IDLE_SLOT, url, loop, true);
+    },
+    prepareAction(url, loop) {
+      return prepareOn(ACTION_SLOT, url, loop, false);
+    },
+    hideAll,
+  };
 }
 
 export function showPlaceholder(label: string, placeholder: HTMLElement, placeholderLabel: HTMLElement): void {

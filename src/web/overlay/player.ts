@@ -1,13 +1,15 @@
 import type { PerformanceDispatch, PlaybackTrack } from '../../shared/performance.js';
 import { ErrorCodes } from '../../shared/errors.js';
 import type { AudioTrack } from './audio-track.js';
-import type { VideoTrack } from './video-track.js';
+import type { PreparedClip, VideoTrack } from './video-track.js';
 import { showPlaceholder } from './video-track.js';
 
 // 一次表演的本机执行与回执(ARCHITECTURE §7/§8):
 // 预加载 → ready 回执 → 切换开播 → started 回执 → 轨道结束 → ended 回执;
 // 素材缺失立即回报 failed(ASSET_MISSING)并以字幕时长兜底展示后回待机。
 // playToken 使旧的停止/迟到事件令后续流程失效,与服务端版本校验对应。
+// 待机片段缓存(稳定缓冲位 + 代数):预加载完成晚于表演派发时不得覆盖
+// 进行中的表演(WT-P0-009),缓存失败后回到待机时按需重建。
 
 export type PlayerReport = (track: PlaybackTrack, status: 'ready' | 'started' | 'ended' | 'cancelled' | 'failed', reason?: string) => void;
 
@@ -27,8 +29,9 @@ export function createPlayer(deps: {
   report: PlayerReport;
 }): Player {
   let playToken = 0;
-  let idleClipPromise: Promise<import('./video-track.js').PreparedClip> | null = null;
-  let idleLoop = true;
+  let idleDescriptor: { url: string; loop: boolean } | null = null;
+  let idleClipPromise: Promise<PreparedClip> | null = null;
+  let idleGeneration = 0;
 
   function showCaption(text: string): void {
     if (text === '') return;
@@ -40,6 +43,29 @@ export function createPlayer(deps: {
     deps.caption.style.display = 'none';
   }
 
+  function startIdlePrepare(): void {
+    const desc = idleDescriptor;
+    if (!desc) return;
+    const gen = ++idleGeneration;
+    const tokenAtStart = playToken;
+    const promise = deps.video.prepareIdle(desc.url, desc.loop);
+    idleClipPromise = promise;
+    void promise
+      .then((clip) => {
+        if (gen !== idleGeneration) return; // 已被更新的 setIdle 取代
+        if (tokenAtStart !== playToken) return; // 迟到的待机不覆盖进行中的表演,缓存留待回待机使用
+        clip.show();
+        clip.play();
+      })
+      .catch(() => {
+        if (gen !== idleGeneration) return;
+        idleClipPromise = null;
+        if (tokenAtStart === playToken) {
+          showPlaceholder('待机(素材加载失败)', deps.placeholder, deps.placeholderLabel);
+        }
+      });
+  }
+
   function backToIdle(token: number): void {
     if (token !== playToken) return;
     if (idleClipPromise) {
@@ -48,9 +74,13 @@ export function createPlayer(deps: {
         clip.show();
         clip.play();
       });
-    } else {
-      showPlaceholder('待机(素材未配置)', deps.placeholder, deps.placeholderLabel);
+      return;
     }
+    if (idleDescriptor) {
+      startIdlePrepare(); // 此前加载失败:回到待机时按需重建
+      return;
+    }
+    showPlaceholder('待机(素材未配置)', deps.placeholder, deps.placeholderLabel);
   }
 
   function subtitleEstimateMs(text: string): number {
@@ -58,23 +88,31 @@ export function createPlayer(deps: {
   }
 
   function setIdle(idle: { url: string; loop: boolean; available: boolean } | null): void {
-    idleLoop = idle?.loop ?? true;
-    if (idle && idle.available) {
-      // 待机无限循环:直到表演派发或停止才离开,不做“一轮即结束”
-      idleClipPromise = deps.video.prepare(idle.url, idleLoop, true);
-      void idleClipPromise
-        .then((clip) => {
-          clip.show();
-          clip.play();
-        })
-        .catch(() => {
-          idleClipPromise = null;
-          showPlaceholder('待机(素材加载失败)', deps.placeholder, deps.placeholderLabel);
-        });
-    } else {
+    const next = idle && idle.available ? { url: idle.url, loop: idle.loop } : null;
+    const unchanged = next !== null && idleDescriptor !== null && next.url === idleDescriptor.url;
+    idleDescriptor = next;
+    if (next === null) {
+      idleGeneration += 1; // 使旧的准备过程失效
       idleClipPromise = null;
       showPlaceholder(idle ? `待机(${idle.url ? '素材未配置' : '无待机素材'})` : '待机(无待机素材)', deps.placeholder, deps.placeholderLabel);
+      return;
     }
+    if (idleClipPromise !== null && unchanged) {
+      // 缓存复用(断线重连/重新登记):占位可见时恢复待机画面与循环播放(WT-P0-010);
+      // 表演进行中(占位隐藏)不动,保留 WT-P0-009 的“迟到待机不覆盖动作”约束。
+      if (deps.placeholder.style.display !== 'none') {
+        const gen = idleGeneration;
+        void idleClipPromise.then((clip) => {
+          if (gen !== idleGeneration) return;
+          if (deps.placeholder.style.display === 'none') return; // 已有可见画面
+          clip.show();
+          clip.play();
+        });
+      }
+      return;
+    }
+    // 首次/失败后/更换素材:准备
+    startIdlePrepare();
   }
 
   function play(dispatch: PerformanceDispatch): void {
@@ -101,7 +139,7 @@ export function createPlayer(deps: {
     }
 
     deps.video
-      .prepare(asset.url, asset.loop)
+      .prepareAction(asset.url, asset.loop)
       .then((clip) => {
         if (token !== playToken) {
           clip.stop();

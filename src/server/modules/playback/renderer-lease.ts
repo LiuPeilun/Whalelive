@@ -87,12 +87,15 @@ export function createRendererRegistry(deps: { leaseTtlMs(): number; renewInterv
     return true;
   }
 
-  /** 租约过期回收;由调度循环周期调用。 */
-  function sweep(): void {
+  /** 租约过期回收;返回本次回收的租约 ID(无回收时为 null),供会话终态联动。 */
+  function sweep(): string | null {
     if (lease && lease.expiresAt <= deps.now()) {
-      deps.logger.info('playback.lease-expired', { rendererId: lease.rendererId, leaseId: lease.leaseId });
+      const lostId = lease.leaseId;
+      deps.logger.info('playback.lease-expired', { rendererId: lease.rendererId, leaseId: lostId });
       lease = null;
+      return lostId;
     }
+    return null;
   }
 
   function send(rendererId: string, message: WsServerMessage): boolean {

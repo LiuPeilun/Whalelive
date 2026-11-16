@@ -2,7 +2,7 @@
 // 请求为无体 POST,修复前会因 JSON Content-Type 被拒(400),修复后应生效。
 // 用法:先启动服务,再执行 node scripts/control-e2e.mjs
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,9 +20,28 @@ const edgeCandidates = [
 const edgePath = edgeCandidates.find((p) => fs.existsSync(p));
 if (!edgePath) throw new Error('未找到 Edge');
 
+const EDGE_PROFILE_TAG = 'controle2e';
+
+function killEdgeTree(pid) {
+  // taskkill /T 在部分环境杀不干净 Chromium 进程树,再用 profile 过滤兜底,
+  // 否则残留页面会重连 /ws 并持续续租,干扰后续验证(WT-P0-007/009 验证环境)。
+  try {
+    spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore' });
+  } catch { /* ignore */ }
+  try {
+    spawnSync('powershell', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"name='msedge.exe'\" | " +
+      "Where-Object { $_.CommandLine -match 'edge-profile-controle2e' } | " +
+      "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"], { stdio: 'ignore' });
+  } catch { /* ignore */ }
+}
+
+
 const debugPort = 9334;
 const edge = spawn(edgePath, [
   '--headless', '--disable-gpu', '--no-sandbox',
+  `--user-data-dir=${root}\.tools\edge-profile-controle2e`,
+  '--no-first-run', '--no-default-browser-check',
   `--remote-debugging-port=${debugPort}`,
   '--window-size=1280,900',
   controlUrl,
@@ -101,7 +120,7 @@ async function main() {
   const serverOk = resumedAfterStop && state.paused === false;
 
   ws.close();
-  edge.kill();
+  killEdgeTree(edge.pid);
   const ok = results.pause && results.resume && results.stop && serverOk;
   console.log(ok ? '控制台按钮端到端:通过' : '控制台按钮端到端:未通过');
   process.exit(ok ? 0 : 1);
@@ -109,6 +128,6 @@ async function main() {
 
 main().catch((err) => {
   console.error('控制台 E2E 失败:', err);
-  edge.kill();
+  killEdgeTree(edge.pid);
   process.exit(1);
 });

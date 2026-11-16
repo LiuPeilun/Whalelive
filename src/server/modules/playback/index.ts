@@ -109,9 +109,14 @@ export function createPlayback(deps: {
       notify();
     },
     requestLease(rendererId) {
+      const prev = registry.leaseView();
       const result = registry.requestLease(rendererId);
       notify();
       if (result.ok) {
+        // 新端接管了已过期的旧租约:旧租约归属的表演立即结算(WT-P0-007)
+        if (prev.leaseId !== null && prev.leaseId !== result.leaseId) {
+          sessions.leaseLost(prev.leaseId);
+        }
         return { ok: true, leaseId: result.leaseId, ttlMs: result.ttlMs, renewIntervalMs: deps.settings().lease.renewIntervalMs };
       }
       return { ok: false, code: result.code, retryAfterMs: result.retryAfterMs };
@@ -123,7 +128,10 @@ export function createPlayback(deps: {
     },
     releaseLease(rendererId, leaseId) {
       const ok = registry.releaseLease(rendererId, leaseId);
-      if (ok) notify();
+      if (ok) {
+        sessions.leaseLost(leaseId); // 持有者主动释放:归属表演立即结算
+        notify();
+      }
       return ok;
     },
     report(report, connectionRendererId) {
@@ -145,9 +153,11 @@ export function createPlayback(deps: {
       notify();
     },
     tick() {
-      const before = registry.leaseView();
-      registry.sweep();
-      if (before.expiresAt !== registry.leaseView().expiresAt) notify();
+      const lostLeaseId = registry.sweep();
+      if (lostLeaseId !== null) {
+        sessions.leaseLost(lostLeaseId); // 到期回收:归属表演立即结算,解除队列阻塞
+        notify();
+      }
     },
     view() {
       return {

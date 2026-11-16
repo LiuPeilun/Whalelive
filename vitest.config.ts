@@ -4,6 +4,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['src/server/**/*.test.ts'],
+    // 页面共享逻辑(ws-client 重连状态机)使用浏览器替身在 Node 环境做确定性回归
+    include: ['src/server/**/*.test.ts', 'src/web/**/*.test.ts'],
   },
 });

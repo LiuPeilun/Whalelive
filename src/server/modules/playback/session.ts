@@ -188,6 +188,18 @@ export function createSessionManager(deps: SessionDeps) {
     settle(current, { performanceId: current.performance.id, status: 'failed', code: ErrorCodes.RENDERER_LOST });
   }
 
+  /**
+   * 派发时依赖的租约失效(到期被回收、被释放或被新端接管):
+   * 立即结束该表演的服务端等待并通知播放端本地停止,interaction 随之继续调度。
+   * 终态校验仍基于本会话记录的 runId / leaseId / performanceId / 派发归属。
+   */
+  function leaseLost(leaseId: string): void {
+    if (!current || current.leaseId !== leaseId || current.settled) return;
+    deps.logger.warn('playback.lease-lost', { performanceId: current.performance.id, leaseId });
+    deps.sendStop(current.performance.id);
+    settle(current, { performanceId: current.performance.id, status: 'failed', code: ErrorCodes.LEASE_LOST });
+  }
+
   function status(): 'idle' | 'dispatching' | 'playing' | 'stopping' {
     if (!current) return 'idle';
     if (current.dispatchedRendererId === null) return 'dispatching';
@@ -199,5 +211,5 @@ export function createSessionManager(deps: SessionDeps) {
     return current?.performance.id ?? null;
   }
 
-  return { start, report, stop, rendererLost, status, currentPerformanceId };
+  return { start, report, stop, rendererLost, leaseLost, status, currentPerformanceId };
 }
