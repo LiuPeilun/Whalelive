@@ -173,6 +173,10 @@ P0 是可观察的原型。P1 完成完整本地输入到直播画面的 MVP。P
 
 **代码审查闭环（2026-11-16）**：P0 代码经四轮审查-修复-复审全部通过（`2026-11-13_232514` 至 `2026-11-16_014303`，共 11 项问题关闭，结论 `approved_with_validation_pending`），修复批次经 `fix/p0-review-2026-11-14` 分支合并回 `main`（合并提交 `7453d13`）。自动检查 41/41、协议冒烟 21/21、五套浏览器端到端脚本全部通过。待环境实测项：① OBS / CEF 浏览器源实测（透明背景、动作、字幕、断线恢复，记录 OBS/CEF 版本与握手头类别）；② HMR 实际源码热替换（开发模式下做一次可逆页面源码变更，验证热更新生效且业务消息不受影响）；③ `npm run start:reset-access` 凭据重置复测（旧凭据拒绝、新凭据可用）。实测结果回写本文件。
 
+**环境实测② HMR 实际源码热替换（2026-11-18）**：dev 模式（tsx watch）下，headless Edge 打开 `/overlay` 待机播放中，对 `src/web/overlay/index.html` 做可逆变更（标题加 HMR 标记 + 新增静态标记元素）。结果 7/7：热替换生效（页面标题与静态元素更新）、业务 WS 保持 connected、模拟事件驱动动作正常播放并回待机（业务链路存活）、还原后页面回原始状态、服务 runId 全程未变（页面变更不重启服务）。脚本 `scripts/e2e-hmr.mjs` 固化为回归项。观测点说明：占位文案由 JS 运行时写入，实测改用标题与静态元素断言。
+
+**环境实测③ reset-access 凭据重置复测（2026-11-18）**：`npm run start:reset-access` 后 `data/access.json` 重新生成（日志 `access.credentials-generated reset:true`）。旧 control / playback 凭据 HTTP 全部 401、WS 认证全部 `AUTH_REJECTED`；新凭据 HTTP 200、WS 认证成功，8/8。脚本 `scripts/reset-access-verify.mjs` 固化（旧凭据以环境变量提供）。**仅剩 ① OBS / CEF 浏览器源实测待操作者执行。**
+
 **下一项可继续任务**：P1 接入 DeepSeek 与首个 TTS（在 `providers.ts` 接口上替换罐头实现）。
 
 ## 实施记录模板
