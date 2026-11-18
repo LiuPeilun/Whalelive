@@ -175,7 +175,16 @@ P0 是可观察的原型。P1 完成完整本地输入到直播画面的 MVP。P
 
 **环境实测② HMR 实际源码热替换（2026-11-18）**：dev 模式（tsx watch）下，headless Edge 打开 `/overlay` 待机播放中，对 `src/web/overlay/index.html` 做可逆变更（标题加 HMR 标记 + 新增静态标记元素）。结果 7/7：热替换生效（页面标题与静态元素更新）、业务 WS 保持 connected、模拟事件驱动动作正常播放并回待机（业务链路存活）、还原后页面回原始状态、服务 runId 全程未变（页面变更不重启服务）。脚本 `scripts/e2e-hmr.mjs` 固化为回归项。观测点说明：占位文案由 JS 运行时写入，实测改用标题与静态元素断言。
 
-**环境实测③ reset-access 凭据重置复测（2026-11-18）**：`npm run start:reset-access` 后 `data/access.json` 重新生成（日志 `access.credentials-generated reset:true`）。旧 control / playback 凭据 HTTP 全部 401、WS 认证全部 `AUTH_REJECTED`；新凭据 HTTP 200、WS 认证成功，8/8。脚本 `scripts/reset-access-verify.mjs` 固化（旧凭据以环境变量提供）。**仅剩 ① OBS / CEF 浏览器源实测待操作者执行。**
+**环境实测③ reset-access 凭据重置复测（2026-11-18）**：`npm run start:reset-access` 后 `data/access.json` 重新生成（日志 `access.credentials-generated reset:true`）。旧 control / playback 凭据 HTTP 全部 401、WS 认证全部 `AUTH_REJECTED`；新凭据 HTTP 200、WS 认证成功，8/8。脚本 `scripts/reset-access-verify.mjs` 固化（旧凭据以环境变量提供）。
+
+**环境实测① OBS / CEF 浏览器源实测（2026-11-18，操作者配合完成）**：环境为 OBS 33.0.1、Windows。结果：
+
+- **握手类别（实测修正文档假设）**：OBS 33 的 CEF 升级业务 `/ws` 时**携带标准 Origin 头**（`http://127.0.0.1:3210`），走"允许来源精确匹配"路径；早前"CEF 可能缺失 Origin"的假设在本版本不成立，回环兼容路径未被触发但保留。
+- **透明背景**：CEF 解码 VP9-alpha 素材丢失透明通道（画面黑底）——真实 Edge 同素材透明正常，差异在 CEF 解码路径。修复：播放页新增 `?blend=screen` 参数（`mix-blend-mode: screen` 兜底，黑色像素变透明），普通浏览器预览不受影响。实测：场景添加颜色源后，角色直接浮于背景色上、无黑框。
+- **动作与字幕**：模拟弹幕"大肥鱼跳个舞"→ OBS 内 dance 动画播放、字幕"看好啦，鱼生巅峰舞步!"显示、播完回到循环待机，全部人工确认。业务 WS 认证、渲染端登记、租约授予均正常（服务端日志 `rnd-*` 全链路）。
+- 注意事项回写：OBS 场景必须有非黑色背景（空场景本身为黑，先用颜色源验证透明）；GETTING_STARTED §4 与常见问题已更新 OBS URL 写法。
+
+**P0 全部验收项（代码审查 + 三项环境实测）至此完成。**
 
 **下一项可继续任务**：P1 接入 DeepSeek 与首个 TTS（在 `providers.ts` 接口上替换罐头实现）。
 
