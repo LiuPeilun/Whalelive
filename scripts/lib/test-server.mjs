@@ -50,11 +50,12 @@ export function commandLineOwnsEntry(cmdLine, entry = entryPath()) {
   return upper.includes(entry.toUpperCase()) || upper.includes(entry.replaceAll('\\', '/').toUpperCase());
 }
 
-/** 端口当前监听者 PID(无监听时 null) */
+/** 端口在健康 URL 同一地址(127.0.0.1)上的监听者 PID(无监听时 null)。
+ * 只筛端口会先命中 IPv6(::1)监听者,与健康地址不符导致误判未就绪(WT-P1-009)。 */
 function listenerPidFor(port) {
   try {
     const out = String(execFileSync('powershell', ['-NoProfile', '-Command',
-      `(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess`], { encoding: 'utf8' }));
+      `(Get-NetTCPConnection -LocalPort ${port} -LocalAddress 127.0.0.1 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess`], { encoding: 'utf8' }));
     const pid = Number(out.trim());
     return Number.isFinite(pid) && pid > 0 ? pid : null;
   } catch {
@@ -62,22 +63,54 @@ function listenerPidFor(port) {
   }
 }
 
+// 启动互斥锁(WT-P1-009):陈旧登记的"读-校验-删除-重新占用"不是原子的——
+// 删除与重新占用之间可能被并发启动器插占,双方都创建服务子进程。把整个
+// 启动临界区(陈旧回收 → 独占登记 → 日志 → spawn → 写 PID)放进同一把
+// 跨进程锁串行化,所有启动竞态归零。锁超时兜底:持有者崩溃残留时按 mtime
+// 超时(60s)视为陈旧可抢。
+const START_LOCK = path.join(root, '.tools', 'e2e-server-start.lock');
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function acquireStartLock(timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const fd = fs.openSync(START_LOCK, 'wx');
+      fs.writeSync(fd, `${process.pid} ${Date.now()}`);
+      return fd;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      try {
+        const stat = fs.statSync(START_LOCK);
+        if (Date.now() - stat.mtimeMs > 60_000) fs.rmSync(START_LOCK, { force: true }); // 陈旧锁
+      } catch { /* 竞态中被释放:下轮 wx 即可成功 */ }
+      if (Date.now() > deadline) throw new Error('启动锁获取超时(并发启动过多或存在陈旧锁 .tools/e2e-server-start.lock)');
+      await sleepMs(300);
+    }
+  }
+}
+
+function releaseStartLock(fd) {
+  try { fs.closeSync(fd); } catch { /* 已关闭 */ }
+  try { fs.rmSync(START_LOCK, { force: true }); } catch { /* 已释放 */ }
+}
+
 /**
  * 启动测试服务并登记 PID。返回 { child, pid, waitHealthy }:
  * 调用方保持自身存活(child 的管道挂在其上),退出前调用 child.kill()。
  */
-export function startTestServer(opts) {
+export async function startTestServer(opts) {
   // 单进程启动:node --import tsx <绝对入口> —— tsx cli 方式会 fork 出真正的
   // 服务子进程,端口监听者与 child.pid 不一致,监听者核对无法成立。
   // 单进程下 child.pid 即监听者,命令行同样携带入口绝对路径。
   if (!fs.existsSync(path.join(root, 'node_modules', 'tsx'))) throw new Error('tsx 依赖不存在(请先 npm install)');
   const pidFile = pidFileFor(opts.port);
-  // 原子占用登记(WT-P1-009):以 wx 独占创建抢占该端口的启动权——并发同时
-  // 启动时只有一个能占用,败者按"已有活跃服务/启动进行中"拒绝,不再出现
-  // 双方先后覆盖写入、败者退出时误删胜者登记的竞态。陈旧登记清理后重试。
   fs.mkdirSync(path.dirname(pidFile), { recursive: true });
-  let occupied = false;
-  for (let attempt = 0; attempt < 3 && !occupied; attempt += 1) {
+  const lockFd = await acquireStartLock();
+  let occupied = false; // 本次启动是否已持有端口登记(任一步失败时释放)
+  let logFd = null;
+  try {
+    // --- 临界区:陈旧回收 + 独占登记(互斥锁内,无插占窗口) ---
     try {
       fs.closeSync(fs.openSync(pidFile, 'wx')); // 创建即独占(空文件 = 占用中)
       occupied = true;
@@ -91,55 +124,60 @@ export function startTestServer(opts) {
       if (raw === '') {
         throw new Error(`端口 ${opts.port} 的测试服务启动进行中,请稍候`);
       }
-      fs.rmSync(pidFile, { force: true }); // 陈旧登记(进程已退出/PID 被复用)
+      // 锁内无并发:读出的陈旧登记不可能已被换主,可安全回收后重占
+      fs.rmSync(pidFile, { force: true });
+      fs.closeSync(fs.openSync(pidFile, 'wx'));
+      occupied = true;
     }
-  }
-  if (!occupied) throw new Error(`端口 ${opts.port} 登记占用失败(并发竞争),请重试`);
-  const logFile = opts.logFile ?? logFileFor(opts.port);
-  fs.mkdirSync(path.dirname(logFile), { recursive: true });
-  const logFd = fs.openSync(logFile, 'w');
-  const redactor = createRedactingWriter(logFd, opts.extraSecrets ?? []);
-  let child;
-  try {
-    child = spawn(process.execPath, ['--import', 'tsx', entryPath()], {
+    // --- 日志打开(失败释放登记,不留空文件卡死后续启动) ---
+    const logFile = opts.logFile ?? logFileFor(opts.port);
+    fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    logFd = fs.openSync(logFile, 'w');
+    const redactor = createRedactingWriter(logFd, opts.extraSecrets ?? []);
+    // --- spawn 单进程服务 ---
+    const child = spawn(process.execPath, ['--import', 'tsx', entryPath()], {
       cwd: root,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, PORT: String(opts.port) },
     });
-  } catch (err) {
-    fs.rmSync(pidFile, { force: true }); // 释放本次占用,避免空文件卡死后续启动
-    try { fs.closeSync(logFd); } catch { /* 已关闭 */ }
-    throw err;
-  }
-  child.stdout.on('data', (d) => redactor.push(d));
-  child.stderr.on('data', (d) => redactor.push(d));
-  const childPidStr = String(child.pid);
-  fs.writeFileSync(pidFile, childPidStr); // 覆写自己占用的文件(writeFileSync 截断)
-  let childExited = false;
-  child.on('exit', () => { childExited = true;
-    redactor.flush();
-    try { fs.closeSync(logFd); } catch { /* 已关闭 */ }
-    // 仅清理本次启动持有的登记(内容仍是自己的 PID);被陈旧清理换主的文件不动
-    try { if (fs.readFileSync(pidFile, 'utf8').trim() === childPidStr) fs.rmSync(pidFile, { force: true }); } catch { /* 无文件 */ }
-  });
-  const waitHealthy = async (timeoutMs = 30_000) => {
-    // 就绪判定绑定本次实例(WT-P1-009):端口监听者必须是本子进程且健康 200。
-    // 普通实例占用端口时本子进程 EADDRINUSE 退出,监听者永远不是它——
-    // 原实例的 200 不再被误判为本次启动成功;并发竞争的败者同理。
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (childExited) return false;
-      if (listenerPidFor(opts.port) === child.pid) {
-        try {
-          const res = await fetch(`http://127.0.0.1:${opts.port}/api/health`);
-          if (res.ok && !childExited) return true;
-        } catch { /* 未就绪 */ }
+    child.stdout.on('data', (d) => redactor.push(d));
+    child.stderr.on('data', (d) => redactor.push(d));
+    const childPidStr = String(child.pid);
+    fs.writeFileSync(pidFile, childPidStr); // 覆写自己占用的文件(writeFileSync 截断)
+    let childExited = false;
+    child.on('exit', () => { childExited = true;
+      redactor.flush();
+      try { fs.closeSync(logFd); } catch { /* 已关闭 */ }
+      logFd = null;
+      // 仅清理本次启动持有的登记(内容仍是自己的 PID);被陈旧清理换主的文件不动
+      try { if (fs.readFileSync(pidFile, 'utf8').trim() === childPidStr) fs.rmSync(pidFile, { force: true }); } catch { /* 无文件 */ }
+    });
+    const waitHealthy = async (timeoutMs = 30_000) => {
+      // 就绪判定绑定本次实例(WT-P1-009):健康 URL 同地址(127.0.0.1)的端口
+      // 监听者必须是本子进程且健康 200——普通实例占用端口时本子进程
+      // EADDRINUSE 退出,监听者永远不是它;IPv6(::1)上的其他监听者不再干扰。
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (childExited) return false;
+        if (listenerPidFor(opts.port) === child.pid) {
+          try {
+            const res = await fetch(`http://127.0.0.1:${opts.port}/api/health`);
+            if (res.ok && !childExited) return true;
+          } catch { /* 未就绪 */ }
+        }
+        await sleepMs(400);
       }
-      await new Promise((r) => setTimeout(r, 400));
-    }
-    return false;
-  };
-  return { child, pid: child.pid, waitHealthy };
+      return false;
+    };
+    return { child, pid: child.pid, waitHealthy };
+  } catch (err) {
+    // 占用后的任一步失败都释放本次启动拥有的记录(WT-P1-009)
+    if (occupied) fs.rmSync(pidFile, { force: true });
+    if (logFd !== null) { try { fs.closeSync(logFd); } catch { /* 已关闭 */ } }
+    throw err;
+  } finally {
+    releaseStartLock(lockFd);
+  }
 }
 
 /** 停止由 startTestServer 启动的指定端口服务;归属校验不通过时抛错且不动任何进程 */

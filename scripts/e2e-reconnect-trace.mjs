@@ -87,7 +87,7 @@ log(`杀后探针: ${JSON.stringify(probe1)}`);
 // 跨块分割与自定义数据目录均由 redact-log 处理;经 startTestServer 启动并登记
 // PID(WT-P1-009),后续 --stop 可管理)
 const access = JSON.parse(fs.readFileSync(path.join(root, 'data', 'access.json'), 'utf8'));
-const { child: server, waitHealthy } = startTestServer({ port, extraSecrets: [access.playback, access.control] }); // 日志默认 logFileFor(port)
+const { child: server, waitHealthy } = await startTestServer({ port, extraSecrets: [access.playback, access.control] }); // 日志默认 logFileFor(port)
 log(`服务重启中(pid=${server.pid}),观察 40s…`);
 void waitHealthy();
 

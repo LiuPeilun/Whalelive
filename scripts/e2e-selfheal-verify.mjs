@@ -39,7 +39,7 @@ const log = (m) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(0)}s] ${m
 const port = Number(process.argv[2] ?? process.env.PORT ?? 3210);
 // 经 startTestServer 启动并登记(WT-P1-009):不再直接 spawn npm——那会在本脚本
 // 退出后留下无主 tsx 服务进程;日志按端口脱敏落盘
-const server = startTestServer({ port });
+const server = await startTestServer({ port });
 log(`服务启动(pid=${server.pid}),开始观察…`);
 void server.waitHealthy();
 

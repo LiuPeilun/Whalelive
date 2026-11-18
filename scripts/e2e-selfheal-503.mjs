@@ -52,7 +52,7 @@ const log = (m) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(0)}s] ${m
 // 起服务:经 startTestServer 启动并登记 PID(WT-P1-009,日志行缓冲脱敏由其内部
 // redact-log 处理),本脚本退出前显式停止,不留无主服务进程
 const access = JSON.parse(fs.readFileSync(path.join(root, 'data', 'access.json'), 'utf8'));
-const server = startTestServer({ port, extraSecrets: [access.playback, access.control] }); // 日志默认 logFileFor(port)
+const server = await startTestServer({ port, extraSecrets: [access.playback, access.control] }); // 日志默认 logFileFor(port)
 log(`服务启动(pid=${server.pid})`);
 const healthy = await server.waitHealthy(30_000);
 if (!healthy) {
