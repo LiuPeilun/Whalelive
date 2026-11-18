@@ -53,7 +53,7 @@ async function attach() {
 function killServer() {
   // WT-P1-009:只停止由 scripts/e2e-server.mjs 登记的测试服务(PID + 命令行
   // 含本项目入口绝对路径双重校验),不再按进程名/端口匹配全机进程。
-  const r = spawnSync('node', [path.join(root, 'scripts', 'e2e-server.mjs'), '--stop'], { encoding: 'utf8' });
+  const r = spawnSync('node', [path.join(root, 'scripts', 'e2e-server.mjs'), '--stop', '--port', String(port)], { encoding: 'utf8' });
   if (r.status !== 0) {
     throw new Error('杀服务失败:测试服务须由 node scripts/e2e-server.mjs 启动');
   }

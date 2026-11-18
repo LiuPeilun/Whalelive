@@ -38,6 +38,10 @@ function main(): void {
   // 断线时仍持有的租约(WT-P1-004):本地 stopAll 已停声但服务端无从得知;
   // 重连登记后补发释放作为真实停止确认,解除新端的接管安全等待。
   let pendingReleaseLeaseId: string | null = null;
+  // 最近一次状态广播中的租约持有者(undefined=尚未见过):候补重评只在
+  // 可用性发生变化时触发(WT-P1-012),持续"无持有者"的重复广播不再触发
+  // 立即重申请——多候补在断线安全等待内按服务端等待建议退避,不相互风暴。
+  let lastHolderSeen: string | null | undefined = undefined;
 
   function setStatus(text: string, ok: boolean, sticky = false): void {
     statusEl.textContent = text;
@@ -218,10 +222,18 @@ function main(): void {
           return;
         }
         case 'state': {
-          // 候补重评(WT-P1-012):服务端已无租约持有者(如旧端停止确认后显式释放)
-          // 时,按长等待建议计时的候补本端立即重新申请——紧随的有声任务得以有声派发。
-          // 断线安全期限仍在时,申请会被服务端拒绝并给出新的等待建议,受控不受影响。
-          if (audioMode && leaseId === null && leaseRetryTimer !== null && message.state.renderers.leaseHolderRendererId === null) {
+          // 候补重评(WT-P1-012):仅在租约可用性发生变化时提前重试——
+          // 持有者出现→消失(显式释放/断线清除)时,按长等待建议计时的候补
+          // 立即重新申请;持续"无持有者"的重复广播不再触发,多候补在断线
+          // 安全等待内按服务端等待建议退避,不相互触发高频申请风暴。
+          // 断线安全期限仍在时,申请会被服务端拒绝并给出新的等待建议,受控不变。
+          const holderNow = message.state.renderers.leaseHolderRendererId;
+          // 可用性变化 = 本次无持有者,而此前见到的不是"无持有者"(undefined 表示
+          // 尚未见过任何状态——候补登记后服务端拒绝不广播,首次见到的无持有者
+          // 状态往往就是释放/清除事件本身,同样需要立即重评)
+          const becameAvailable = holderNow === null && lastHolderSeen !== null;
+          lastHolderSeen = holderNow;
+          if (audioMode && leaseId === null && leaseRetryTimer !== null && becameAvailable) {
             clearLeaseRetry();
             scheduleLeaseRequest();
           }
@@ -242,6 +254,7 @@ function main(): void {
         leaseId = null;
         currentDispatchLeaseId = null;
         rendererId = null;
+        lastHolderSeen = undefined; // 断线后重新学习租约状态,避免跨会话误判可用性变化
       } else if (status === 'connected') {
         setStatus('已连接', true);
       }

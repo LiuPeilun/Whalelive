@@ -47,6 +47,7 @@ export function createWsClient(opts: {
   let connectSeq = 0; // 连接会话编号:被替换连接的全部事件失效(WT-P0-011)
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null; // 唯一待执行重连
   let connectTimeoutStreak = 0; // 连续握手悬挂次数,成功 open 归零
+  let healCycle = 0; // 自愈周期:每次连接成功(open)推进,使上一周期的探测失效(WT-P1-010)
 
   // 自愈重载:服务进程被硬杀后,Edge/Chromium 对该地址的 WS socket 层可能整体
   // 卡死 —— HTTP 正常、其它端口 WS 立即失败,唯独本地址新 WS 永久 CONNECTING
@@ -60,6 +61,7 @@ export function createWsClient(opts: {
     connectTimeoutStreak += 1;
     if (connectTimeoutStreak < 3) return;
     connectTimeoutStreak = 0;
+    const cycleAtProbe = healCycle; // 探测属于发起时的悬挂周期
     let docOk = false;
     try {
       const docProbe = await fetch(location.pathname + location.search, { cache: 'no-store' });
@@ -67,9 +69,10 @@ export function createWsClient(opts: {
     } catch {
       docOk = false; // 文档请求失败(服务不可达):同样不重载
     }
-    // 探测悬置期间连接可能已自行恢复(WT-P1-010):已恢复/已退出的页面不再需要
-    // 重建网络栈,迟到的探测结果(即使 200)不刷新正在播放的页面。
-    if (closedByUser || probe.status === 'connected' || !docOk) return;
+    // 探测结果绑定发起时的周期与退出状态(WT-P1-010):悬置期间只要连接成功过
+    // (周期已推进),旧探测即作废——即便随后再次断线、新一轮恢复尚未达到重试
+    // 阈值,也不得提前刷新,中断页面自身的恢复过程。
+    if (closedByUser || healCycle !== cycleAtProbe || probe.status === 'connected' || !docOk) return;
     try {
       const last = Number(sessionStorage.getItem('wtWsReloadAt') ?? '0');
       if (Date.now() - last < 30_000) return; // 防重载风暴:30s 内已重载过则退回纯重试
@@ -167,6 +170,7 @@ export function createWsClient(opts: {
       }
       retryMs = 800;
       connectTimeoutStreak = 0;
+      healCycle += 1; // 连接恢复:上一自愈周期的探测作废(WT-P1-010)
       probe.status = 'connected';
       opts.onStatus('connected');
       send({ kind: 'auth', protocolVersion: PROTOCOL_VERSION, role: opts.role, credential: opts.credential });

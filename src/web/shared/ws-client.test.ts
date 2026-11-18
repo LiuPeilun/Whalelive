@@ -208,12 +208,38 @@ describe('ws-client 自愈重载时序(WT-P1-010)', () => {
     recovered.emitOpen(); // 探测尚未返回时连接已恢复
     expect(recovered.readyState).toBe(FakeWebSocket.OPEN);
 
-    // TS 控制流看不到回调内的赋值,显式还原可空类型后调用
+    // 迟到的探测返回 200:已恢复的页面不得刷新
     const lateResolve = resolveFetch as null | ((v: { ok: boolean }) => void);
     lateResolve?.({ ok: true }); // 迟到的探测 200
     await Promise.resolve();
     await Promise.resolve();
     expect(reload).not.toHaveBeenCalled(); // 已恢复的页面不得刷新
+  });
+
+  it('恢复后再次断线时,旧周期的探测不触发刷新(WT-P1-010)', async () => {
+    create();
+    let resolveFetch: ((v: { ok: boolean }) => void) | null = null;
+    fetchMock.mockImplementationOnce(() => new Promise((resolve) => { resolveFetch = resolve; }));
+
+    await advance(10_000); await advance(800);
+    await advance(10_000); await advance(1_600);
+    await advance(10_000); // 第 3 次守卫 → 探测发起并悬置
+    await advance(3_200); // connect#4
+    const recovered = FakeWebSocket.instances.at(-1)!;
+    recovered.emitOpen(); // 连接恢复(周期推进)
+
+    // 恢复后再次断线:新一轮失败开始(悬挂计数重新累计,尚未达到自愈阈值)
+    recovered.emitClose();
+    await advance(500); // connect#5 开始尝试(新周期,悬挂计数 0)
+
+    // 旧周期的探测此刻才返回 200:不得刷新——新一轮恢复刚开始,提前刷新会中断它
+    const lateResolve = resolveFetch as null | ((v: { ok: boolean }) => void);
+    lateResolve?.({ ok: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(reload).not.toHaveBeenCalled();
+    // 新周期自身尚未达到重试阈值,也不应有其他刷新来源
+    expect(reload).not.toHaveBeenCalled();
   });
 
   it('探测 503 时不重载,原页保留重连能力继续重试', async () => {

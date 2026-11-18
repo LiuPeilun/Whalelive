@@ -1,6 +1,6 @@
 // 测试服务启动/停止 CLI(WT-P1-009):
 //   node scripts/e2e-server.mjs [--port 3210]   启动并登记 PID,保持前台运行(Ctrl+C 退出)
-//   node scripts/e2e-server.mjs --stop          停止登记的服务(校验命令行含本项目入口)
+//   node scripts/e2e-server.mjs --stop [--port N] 停止该端口登记的服务(校验命令行含本项目入口)
 // 重连类 e2e(e2e-reconnect-idle / e2e-reconnect-trace)的杀服务步骤
 // 只接受本工具登记的 PID,不再按进程名/端口匹配全机进程。
 
@@ -13,8 +13,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 
 if (args[0] === '--stop') {
+  // 停止目标按端口区分(WT-P1-009):--stop [--port N],默认 PORT/3210
+  const stopPortFlag = args.indexOf('--port');
+  const stopPort = Number(stopPortFlag >= 0 ? args[stopPortFlag + 1] : (process.env.PORT ?? 3210));
   try {
-    console.log(stopTestServer());
+    console.log(stopTestServer(stopPort));
     process.exit(0);
   } catch (err) {
     console.error(String(err.message ?? err));

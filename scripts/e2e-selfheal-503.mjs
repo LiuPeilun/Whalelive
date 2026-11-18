@@ -110,6 +110,6 @@ for (let i = 0; i < 20; i++) {
 check('文档恢复后自动重载并恢复循环待机(WT-P1-010)', restored);
 
 cdp.ws.close();
-try { stopTestServer(); } catch { /* 已退出 */ }
+try { stopTestServer(port); } catch { /* 已退出 */ }
 console.log(failures === 0 ? '503 自愈闭环:全部通过' : `503 自愈闭环:${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

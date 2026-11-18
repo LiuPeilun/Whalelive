@@ -15,7 +15,12 @@ import { spawn, execFileSync } from 'node:child_process';
 import { createRedactingWriter } from './redact-log.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const PID_FILE = path.join(root, '.tools', 'e2e-server.pid');
+
+// 按端口登记(WT-P1-009):同一工作区可在不同端口并行启动多个测试服务,
+// 各自独立登记;停止按目标端口的登记文件核对,互不影响。
+function pidFileFor(port) {
+  return path.join(root, '.tools', `e2e-server-${port}.pid`);
+}
 
 export function entryPath() {
   return path.join(root, 'src', 'server', 'main.ts');
@@ -45,13 +50,14 @@ export function startTestServer(opts) {
   });
   child.stdout.on('data', (d) => redactor.push(d));
   child.stderr.on('data', (d) => redactor.push(d));
+  const pidFile = pidFileFor(opts.port);
   child.on('exit', () => {
     redactor.flush();
     try { fs.closeSync(logFd); } catch { /* 已关闭 */ }
-    try { if (fs.readFileSync(PID_FILE, 'utf8').trim() === String(child.pid)) fs.rmSync(PID_FILE, { force: true }); } catch { /* 无文件 */ }
+    try { if (fs.readFileSync(pidFile, 'utf8').trim() === String(child.pid)) fs.rmSync(pidFile, { force: true }); } catch { /* 无文件 */ }
   });
-  fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
-  fs.writeFileSync(PID_FILE, String(child.pid));
+  fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+  fs.writeFileSync(pidFile, String(child.pid));
   const waitHealthy = async (timeoutMs = 30_000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -66,12 +72,13 @@ export function startTestServer(opts) {
   return { child, pid: child.pid, waitHealthy };
 }
 
-/** 停止由 startTestServer 启动的服务;归属校验不通过时抛错且不动任何进程 */
-export function stopTestServer() {
-  if (!fs.existsSync(PID_FILE)) {
-    throw new Error('未找到 .tools/e2e-server.pid:测试服务须由 scripts/e2e-server.mjs(或 startTestServer)启动');
+/** 停止由 startTestServer 启动的指定端口服务;归属校验不通过时抛错且不动任何进程 */
+export function stopTestServer(port) {
+  const pidFile = pidFileFor(port);
+  if (!fs.existsSync(pidFile)) {
+    throw new Error(`未找到 ${path.basename(pidFile)}:该端口的测试服务须由 scripts/e2e-server.mjs(或 startTestServer)启动`);
   }
-  const pid = Number(fs.readFileSync(PID_FILE, 'utf8').trim());
+  const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
   if (!Number.isFinite(pid)) throw new Error('PID 文件内容损坏,请手动清理后重新启动');
   let cmdLine = '';
   try {
@@ -81,10 +88,10 @@ export function stopTestServer() {
     /* 查询失败按进程不存在处理 */
   }
   if (!commandLineOwnsEntry(cmdLine)) {
-    fs.rmSync(PID_FILE, { force: true }); // 进程已退出或 PID 被复用:仅清登记,不动进程
-    throw new Error(`PID ${pid} 的命令行不含本项目服务入口,拒绝停止(进程可能已退出或 PID 被复用)`);
+    fs.rmSync(pidFile, { force: true }); // 进程已退出或 PID 被复用:仅清登记,不动进程
+    throw new Error(`端口 ${port} 的 PID ${pid} 命令行不含本项目服务入口,拒绝停止(进程可能已退出或 PID 被复用)`);
   }
   execFileSync('powershell', ['-NoProfile', '-Command', `Stop-Process -Id ${pid} -Force`]);
-  fs.rmSync(PID_FILE, { force: true });
-  return `已停止测试服务 PID ${pid}`;
+  fs.rmSync(pidFile, { force: true });
+  return `已停止端口 ${port} 的测试服务 PID ${pid}`;
 }

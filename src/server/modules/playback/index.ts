@@ -144,7 +144,15 @@ export function createPlayback(deps: {
     requestLease(rendererId) {
       const prev = registry.leaseView();
       const result = registry.requestLease(rendererId);
-      notify();
+      // 拒绝且租约视图未变化时不广播(WT-P1-012):断线安全等待内多候补的
+      // 申请-拒绝循环若每次都广播,候补端会相互触发立即重申请,形成高频风暴;
+      // 授予或视图变化(接管/释放)照常广播,候补端据状态变化重评。
+      const next = registry.leaseView();
+      const viewChanged = result.ok
+        || prev.leaseId !== next.leaseId
+        || prev.holderRendererId !== next.holderRendererId
+        || prev.expiresAt !== next.expiresAt;
+      if (viewChanged) notify();
       if (result.ok) {
         // 新端接管了已过期的旧租约:旧租约归属的表演立即结算(WT-P0-007)
         if (prev.leaseId !== null && prev.leaseId !== result.leaseId) {
