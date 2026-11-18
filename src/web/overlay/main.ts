@@ -11,10 +11,6 @@ import { createPlayer } from './player.js';
 // (WT-P0-007),服务端租约回收后自动推进的下一项以新身份回执,不被旧租约判失效。
 
 function main(): void {
-  // OBS 等环境对 VP9-alpha 解码丢 alpha 时,播放页链接带 ?blend=screen 启用混合模式兜底
-  if (new URLSearchParams(window.location.search).get('blend') === 'screen') {
-    document.getElementById('videos')?.classList.add('blend-screen');
-  }
   const statusEl = document.getElementById('status') as HTMLElement;
   const caption = document.getElementById('caption') as HTMLElement;
   const videoA = document.getElementById('video-a') as HTMLVideoElement;
