@@ -135,18 +135,14 @@ async function stage1() {
 }
 
 function spawnSyncKillServer() {
-  // WT-P1-009:不按进程名全机匹配(会误停其他项目的 tsx 服务)。
-  // 归属依据 = 监听本脚本操作的测试端口,且命令行含本项目路径;
-  // 两者同时满足才终止,端口撞车或同名进程均不会波及。
-  spawnSync('powershell', ['-NoProfile', '-Command',
-    `$conn = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; ` +
-    'if ($conn) { ' +
-    '$proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($conn.OwningProcess)"; ' +
-    // 端口监听者即测试服务归属(同端口仅一个监听者);再校验 node 进程与
-    // 服务入口名,连端口撞车下的误杀也排除。其他项目的 tsx 进程不监听
-    // 本端口,不会被选中。
-    `if ($proc -and $proc.Name -eq 'node.exe' -and $proc.CommandLine -match 'server[\/]main\.ts') { ` +
-    'Stop-Process -Id $conn.OwningProcess -Force } }'], { stdio: 'ignore' });
+  // WT-P1-009:只停止由 scripts/e2e-server.mjs 登记的测试服务(PID + 命令行
+  // 含本项目入口绝对路径双重校验),不再按进程名/端口匹配全机进程。
+  const r = spawnSync('node', [path.join(root, 'scripts', 'e2e-server.mjs'), '--stop'], { encoding: 'utf8' });
+  if (r.status !== 0) {
+    console.error(String(r.stderr ?? r.stdout ?? '').trim());
+    throw new Error('杀服务失败:测试服务须由 node scripts/e2e-server.mjs 启动');
+  }
+  console.log(String(r.stdout ?? '').trim());
 }
 
 async function stage2() {

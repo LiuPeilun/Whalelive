@@ -60,12 +60,16 @@ export function createWsClient(opts: {
     connectTimeoutStreak += 1;
     if (connectTimeoutStreak < 3) return;
     connectTimeoutStreak = 0;
+    let docOk = false;
     try {
-      const probe = await fetch(location.pathname + location.search, { cache: 'no-store' });
-      if (!probe.ok) return; // 文档暂不可用:不重载,原页保留重连能力
+      const docProbe = await fetch(location.pathname + location.search, { cache: 'no-store' });
+      docOk = docProbe.ok;
     } catch {
-      return; // 文档请求失败(服务不可达):同样不重载
+      docOk = false; // 文档请求失败(服务不可达):同样不重载
     }
+    // 探测悬置期间连接可能已自行恢复(WT-P1-010):已恢复/已退出的页面不再需要
+    // 重建网络栈,迟到的探测结果(即使 200)不刷新正在播放的页面。
+    if (closedByUser || probe.status === 'connected' || !docOk) return;
     try {
       const last = Number(sessionStorage.getItem('wtWsReloadAt') ?? '0');
       if (Date.now() - last < 30_000) return; // 防重载风暴:30s 内已重载过则退回纯重试

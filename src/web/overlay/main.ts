@@ -218,7 +218,13 @@ function main(): void {
           return;
         }
         case 'state': {
-          // 播放页仅用于状态展示调试;表演与停止以专用消息驱动。
+          // 候补重评(WT-P1-012):服务端已无租约持有者(如旧端停止确认后显式释放)
+          // 时,按长等待建议计时的候补本端立即重新申请——紧随的有声任务得以有声派发。
+          // 断线安全期限仍在时,申请会被服务端拒绝并给出新的等待建议,受控不受影响。
+          if (audioMode && leaseId === null && leaseRetryTimer !== null && message.state.renderers.leaseHolderRendererId === null) {
+            clearLeaseRetry();
+            scheduleLeaseRequest();
+          }
           return;
         }
         default:

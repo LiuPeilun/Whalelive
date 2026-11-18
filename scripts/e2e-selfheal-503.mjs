@@ -7,10 +7,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
+import { startTestServer, stopTestServer } from './lib/test-server.mjs';
 import WebSocket from 'ws';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const port = Number(process.argv[2] ?? process.env.PORT ?? 3210);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
 function check(name, ok, detail = '') {
@@ -48,28 +49,41 @@ async function attach() {
 const t0 = Date.now();
 const log = (m) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(0)}s] ${m}`);
 
-// 起服务(日志落盘前过滤凭据,WT-P1-011)
+// 起服务:经 startTestServer 启动并登记 PID(WT-P1-009,日志行缓冲脱敏由其内部
+// redact-log 处理),本脚本退出前显式停止,不留无主服务进程
 const access = JSON.parse(fs.readFileSync(path.join(root, 'data', 'access.json'), 'utf8'));
-const serverLog = fs.openSync(path.join(root, '.tools', 'selfheal503-server.log'), 'w');
-const redact = (chunk) => String(chunk).replaceAll(access.playback, '[playback-cred]').replaceAll(access.control, '[control-cred]');
-const server = spawn('npm', ['start'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], shell: true });
-server.stdout.on('data', (d) => { try { fs.writeSync(serverLog, redact(d)); } catch { /* ignore */ } });
-server.stderr.on('data', (d) => { try { fs.writeSync(serverLog, redact(d)); } catch { /* ignore */ } });
+const server = startTestServer({ port, logFile: path.join(root, '.tools', 'selfheal503-server.log'), extraSecrets: [access.playback, access.control] });
 log(`服务启动(pid=${server.pid})`);
-await sleep(8000);
+const healthy = await server.waitHealthy(30_000);
+if (!healthy) {
+  console.error('服务 30 秒内未就绪');
+  server.child.kill();
+  process.exit(1);
+}
 
 const cdp = await attach();
 log('已 attach');
 
 // 注入 503:拦截 /overlay 文档与同路径探测请求
-await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*127.0.0.1*overlay*' }] });
+// 注入策略(WT-P1-010):按 resourceType 分流——
+// - Fetch/XHR(自愈的文档探测 fetch)→ 503:自愈不得重载,原页保留重连能力;
+// - Document(导航/Vite 全量重载)→ 放行:文档真实可用时任何重载都应成功,
+//   把文档导航拦成 503 只会把页面刷死在错误文档上(包括非本修复管辖的 Vite)。
+// 说明:通配 urlPattern 的中间 * 在 CDP 不生效,拦截用前缀 pattern 全量开启,
+// 再在 handler 内按类型分流。
+await cdp.send('Fetch.enable', { patterns: [{ urlPattern: 'http://127.0.0.1:*' }] });
 const pausedHandler = (msg) => {
   if (msg.method === 'Fetch.requestPaused') {
-    void cdp.send('Fetch.fulfillRequest', { requestId: msg.params.requestId, responseCode: 503, body: '' }).catch(() => {});
+    const p = msg.params;
+    const isDoc = p.resourceType === 'Document';
+    const req = isDoc
+      ? cdp.send('Fetch.continueRequest', { requestId: p.requestId })
+      : cdp.send('Fetch.fulfillRequest', { requestId: p.requestId, responseCode: 503, body: '' });
+    void req.catch(() => {});
   }
 };
 cdp.ws.on('message', (d) => pausedHandler(JSON.parse(String(d))));
-log('503 注入开启(文档与探测均 503),观察 65s(覆盖一次完整自愈周期)…');
+log('503 注入开启(探测请求 503,文档导航放行),观察 65s(覆盖一次完整自愈周期)…');
 
 let probeAliveDuring503 = false;
 let reloadDuring503 = false;
@@ -96,6 +110,6 @@ for (let i = 0; i < 20; i++) {
 check('文档恢复后自动重载并恢复循环待机(WT-P1-010)', restored);
 
 cdp.ws.close();
-server.kill();
+try { stopTestServer(); } catch { /* 已退出 */ }
 console.log(failures === 0 ? '503 自愈闭环:全部通过' : `503 自愈闭环:${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

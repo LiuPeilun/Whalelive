@@ -5,7 +5,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
+import { startTestServer } from './lib/test-server.mjs';
 import WebSocket from 'ws';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -50,18 +51,12 @@ async function attach() {
 }
 
 function killServer() {
-  // WT-P1-009:不按进程名全机匹配(会误停其他项目的 tsx 服务)。
-  // 归属依据 = 监听本脚本操作的测试端口,且命令行含本项目路径;
-  // 两者同时满足才终止,端口撞车或同名进程均不会波及。
-  spawnSync('powershell', ['-NoProfile', '-Command',
-    `$conn = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; ` +
-    'if ($conn) { ' +
-    '$proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($conn.OwningProcess)"; ' +
-    // 端口监听者即测试服务归属(同端口仅一个监听者);再校验 node 进程与
-    // 服务入口名,连端口撞车下的误杀也排除。其他项目的 tsx 进程不监听
-    // 本端口,不会被选中。
-    `if ($proc -and $proc.Name -eq 'node.exe' -and $proc.CommandLine -match 'server[\/]main\.ts') { ` +
-    'Stop-Process -Id $conn.OwningProcess -Force } }'], { stdio: 'ignore' });
+  // WT-P1-009:只停止由 scripts/e2e-server.mjs 登记的测试服务(PID + 命令行
+  // 含本项目入口绝对路径双重校验),不再按进程名/端口匹配全机进程。
+  const r = spawnSync('node', [path.join(root, 'scripts', 'e2e-server.mjs'), '--stop'], { encoding: 'utf8' });
+  if (r.status !== 0) {
+    throw new Error('杀服务失败:测试服务须由 node scripts/e2e-server.mjs 启动');
+  }
 }
 
 async function listTargets() {
@@ -88,17 +83,13 @@ await sleep(6000);
 const probe1 = await evaluate('window.__wtWs ? {status: window.__wtWs.status, r: window.__wtWs.reconnects, ev: window.__wtWs.events} : null');
 log(`杀后探针: ${JSON.stringify(probe1)}`);
 
-// 后台重启服务(独立日志;落盘前过滤凭据,WT-P1-011 —— 启动横幅含完整凭据链接)
+// 后台重启服务(独立日志;行缓冲脱敏,WT-P1-011 —— 启动横幅含完整凭据链接,
+// 跨块分割与自定义数据目录均由 redact-log 处理;经 startTestServer 启动并登记
+// PID(WT-P1-009),后续 --stop 可管理)
 const access = JSON.parse(fs.readFileSync(path.join(root, 'data', 'access.json'), 'utf8'));
-const serverLog = fs.openSync(path.join(root, '.tools', 'trace-server.log'), 'w');
-const redact = (chunk) => String(chunk)
-  .replaceAll(access.playback, '[playback-cred]')
-  .replaceAll(access.control, '[control-cred]');
-const server = spawn('npm', ['start'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], shell: true, detached: false });
-server.stdout.on('data', (d) => { try { fs.writeSync(serverLog, redact(d)); } catch { /* 关闭后忽略 */ } });
-server.stderr.on('data', (d) => { try { fs.writeSync(serverLog, redact(d)); } catch { /* 关闭后忽略 */ } });
-server.on('exit', () => { try { fs.closeSync(serverLog); } catch { /* 已关闭 */ } });
+const { child: server, waitHealthy } = startTestServer({ port, logFile: path.join(root, '.tools', 'trace-server.log'), extraSecrets: [access.playback, access.control] });
 log(`服务重启中(pid=${server.pid}),观察 40s…`);
+void waitHealthy();
 
 let lastSnapshot = '';
 for (let i = 0; i < 40; i++) {

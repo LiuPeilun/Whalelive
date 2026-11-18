@@ -113,6 +113,7 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
 // 6. 全链路:播放端认证 → 登记 → 租约 → 弹幕 → 派发 → 回执 → 会话完成
 {
   let rendererId = null;
+  let leaseId = null;
   let sawCurrent = false;
   const outcome = await withSocket(
     connectWs(),
@@ -129,6 +130,7 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
       }
       if (msg.kind === 'lease-result') {
         if (msg.ok) {
+          leaseId = msg.leaseId;
           void http('/api/mock/events', {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...controlAuth },
@@ -163,7 +165,12 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
           sawCurrent = true;
           return undefined;
         }
-        if (sawCurrent) return 'completed';
+        if (sawCurrent) {
+          // 清理对齐新的转交条件:显式释放(停止确认)即时清零安全期限,
+          // 下一轮冒烟的全链路租约申请无需等待上一轮留下的窗口
+          if (leaseId && rendererId) socket.send(JSON.stringify({ kind: 'lease-release', leaseId }));
+          return 'completed';
+        }
       }
       return undefined;
     },
