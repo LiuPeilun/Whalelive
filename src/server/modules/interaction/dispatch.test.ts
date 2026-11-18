@@ -1,0 +1,175 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { LiveEvent } from '../../../shared/live-event.js';
+import type { EffectiveSettings } from '../../../shared/settings.js';
+import type { Performance } from '../../../shared/performance.js';
+import type { Logger } from '../../infrastructure/logger.js';
+import type { CharactersModule } from '../characters/index.js';
+import type { PlaybackModule } from '../playback/index.js';
+import type { ReplyProvider, SpeechProvider } from './providers.js';
+import { createInteraction } from './index.js';
+
+// P1 第一批:生成移到出队后 —— 指令短路、语义弹幕经回复提供方、
+// 提供方超时/空回复走保底、语音合成挂到表演、人工停止丢弃迟到结果。
+
+const silentLogger: Logger = {
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  child: () => ({ ...silentLogger, child: () => silentLogger }),
+};
+
+function settings(): EffectiveSettings {
+  return {
+    petId: 'main',
+    queue: { capacity: 20, chatTtlMs: 30_000, userCooldownMs: 0 },
+    gift: { mergeWindowMs: 2_000 },
+    playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
+    lease: { ttlMs: 15_000, renewIntervalMs: 5_000 },
+    server: { host: '127.0.0.1', port: 3210 },
+    platform: 'mock',
+    auth: { timeoutMs: 5_000 },
+    generation: { llmTimeoutMs: 60, ttsTimeoutMs: 60 },
+  };
+}
+
+function fakeCharacters(): CharactersModule {
+  return {
+    reload: () => {},
+    petId: () => 'main',
+    view: () => ({ petId: 'main', name: 'x', licenseName: 'x', actions: [] }),
+    resolveAction: (id: string) => (['idle', 'talk', 'wave', 'dance'].includes(id) ? { actionId: id, file: `animations/${id}.webm`, loop: id === 'talk', available: true } : null),
+    resolveAsset: () => null,
+    missingActions: () => [],
+  };
+}
+
+type PlayCapture = { performance: Performance; signal: AbortSignal };
+
+function fakePlayback(): { module: PlaybackModule; plays: PlayCapture[]; results: Map<string, Promise<{ status: 'ended' | 'cancelled' | 'failed' }>> } {
+  const plays: PlayCapture[] = [];
+  const results = new Map<string, Promise<{ status: 'ended' | 'cancelled' | 'failed' }>>();
+  const module: PlaybackModule = {
+    registerRenderer: () => {},
+    unregisterRenderer: () => {},
+    requestLease: () => ({ ok: true, leaseId: 'l', ttlMs: 1, renewIntervalMs: 1 }),
+    renewLease: () => true,
+    releaseLease: () => true,
+    report: () => 'stale',
+    play: (input) => {
+      plays.push({ performance: input.performance, signal: input.signal });
+      const p = new Promise<{ performanceId: string; status: 'ended' | 'cancelled' }>((resolve) => {
+        input.signal.addEventListener('abort', () => resolve({ performanceId: input.performance.id, status: 'cancelled' }), { once: true });
+      });
+      results.set(input.performance.id, p);
+      return p;
+    },
+    stop: () => {},
+    tick: () => {},
+    view: () => ({ status: 'idle', performanceId: null, action: null }),
+    renderersView: () => ({ count: 0, primaryRendererId: null, leaseHolderRendererId: null, leaseExpiresAt: null }),
+    onChange: () => () => {},
+  };
+  return { module, plays, results };
+}
+
+function chatEvent(text: string, user = 'u1'): LiveEvent {
+  return {
+    id: `evt-${text}`,
+    sourceKey: `sk-${text}-${user}`,
+    source: 'mock',
+    roomId: 'r',
+    type: 'chat',
+    user: { id: user, name: user },
+    text,
+    receivedAt: Date.now(),
+  };
+}
+
+const persona = { name: '大肥鱼', fallbackReplies: ['保底回复A', '保底回复B'], commandReplies: { dance: '看好啦!' } };
+const giftRules = { thanksTemplate: '谢谢 {user} 的 {gift} ×{count}!', celebrateText: '{kind}!' };
+
+function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechProvider> }) {
+  const playback = fakePlayback();
+  const reply: ReplyProvider = { generate: opts.reply?.generate ?? (async () => ({ say: '生成的话', action: null })) };
+  const speech: SpeechProvider = { synthesize: opts.speech?.synthesize ?? (async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' })) };
+  const interaction = createInteraction({
+    settings,
+    characters: fakeCharacters(),
+    playback: playback.module,
+    replyProvider: reply,
+    speechProvider: speech,
+    persona,
+    giftRules,
+    logger: silentLogger,
+    now: () => Date.now(),
+  });
+  return { interaction, playback };
+}
+
+const settle = () => new Promise((r) => setTimeout(r, 25));
+
+describe('interaction 生成链路(P1 第一批)', () => {
+  it('语义弹幕:出队后经回复提供方,动作白名单校验,语音挂到表演', async () => {
+    const generate = vi.fn(async () => ({ say: '今天吃火锅呀', action: 'dance' }));
+    const { interaction, playback } = build({ reply: { generate } });
+    interaction.enqueue(chatEvent('今晚想去哪玩'));
+    await settle();
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(playback.plays.length).toBe(1);
+    const perf = playback.plays[0]!.performance;
+    expect(perf.say).toBe('今天吃火锅呀');
+    expect(perf.action).toBe('dance'); // 白名单内采纳
+    expect(perf.audioUrl).toBe('/media/audio/t.wav');
+  });
+
+  it('提供方建议白名单外动作时回退 talk,不采纳', async () => {
+    const { interaction, playback } = build({ reply: { generate: async () => ({ say: '嗯', action: '不存在动作' }) } });
+    interaction.enqueue(chatEvent('随便聊聊'));
+    await settle();
+    expect(playback.plays[0]!.performance.action).toBe('talk');
+  });
+
+  it('指令弹幕短路提供方:直接使用规则文本', async () => {
+    const generate = vi.fn(async () => ({ say: '不应调用', action: null }));
+    const { interaction, playback } = build({ reply: { generate } });
+    interaction.enqueue(chatEvent('大肥鱼跳个舞'));
+    await settle();
+    expect(generate).not.toHaveBeenCalled();
+    expect(playback.plays[0]!.performance.say).toBe('看好啦!');
+    expect(playback.plays[0]!.performance.action).toBe('dance');
+  });
+
+  it('提供方超时:回落保底文本,表演仍成立并带语音', async () => {
+    const generate: ReplyProvider['generate'] = () => new Promise(() => { /* 永不返回 */ });
+    const { interaction, playback } = build({ reply: { generate } });
+    interaction.enqueue(chatEvent('慢慢想'));
+    await new Promise((r) => setTimeout(r, 120));
+    expect(playback.plays.length).toBe(1);
+    expect(playback.plays[0]!.performance.say).toBe('保底回复A');
+    expect(playback.plays[0]!.performance.audioUrl).toBeDefined();
+  });
+
+  it('合成失败:降级为无声表演(audioUrl 缺省),文本与动作保留', async () => {
+    const { interaction, playback } = build({ speech: { synthesize: async () => null } });
+    interaction.enqueue(chatEvent('随便聊聊'));
+    await settle();
+    const perf = playback.plays[0]!.performance;
+    expect(perf.say).toBe('生成的话');
+    expect(perf.audioUrl).toBeUndefined();
+  });
+
+  it('紧急停止:生成中的任务被丢弃,不再派发', async () => {
+    let release!: (v: { say: string; action: string | null }) => void;
+    const generate: ReplyProvider['generate'] = () => new Promise((resolve) => { release = resolve; });
+    const { interaction, playback } = build({ reply: { generate } });
+    interaction.enqueue(chatEvent('慢速生成'));
+    await settle();
+    expect(playback.plays.length).toBe(0); // 生成中
+    interaction.stop();
+    release({ say: '迟到的话', action: null });
+    await settle();
+    expect(playback.plays.length).toBe(0); // 迟到结果被丢弃
+    expect(interaction.state().paused).toBe(true);
+  });
+});

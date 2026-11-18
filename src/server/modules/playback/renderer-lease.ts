@@ -114,9 +114,15 @@ export function createRendererRegistry(deps: { leaseTtlMs(): number; renewInterv
     return { holderRendererId: lease.rendererId, leaseId: lease.leaseId, expiresAt: lease.expiresAt };
   }
 
+  /** 租约持有者句柄(持有者已登记时);带音频的表演只派发给该目标。 */
+  function leaseHolderHandle(): RendererHandle | null {
+    if (!lease) return null;
+    return renderers.get(lease.rendererId) ?? null;
+  }
+
   function count(): number {
     return renderers.size;
   }
 
-  return { register, unregister, primaryTarget, requestLease, renewLease, releaseLease, sweep, send, leaseView, count };
+  return { register, unregister, primaryTarget, leaseHolderHandle, requestLease, renewLease, releaseLease, sweep, send, leaseView, count };
 }

@@ -13,6 +13,10 @@ export type QueueItem = {
   expiresAt: number;
   say: string;
   action: string;
+  /** 语义弹幕的原始文本(指令/礼物为 null,文本在出队后生成)。 */
+  text: string | null;
+  /** true = 出队时不再调用回复提供方(指令/礼物/人工已确定文本)。 */
+  isCommand: boolean;
   userKey: string | null;
 };
 

@@ -119,11 +119,18 @@ export function createPlayer(deps: {
     playToken += 1;
     const token = playToken;
     const { performance, asset } = dispatch;
-    const hasAudio = typeof performance.audioUrl === 'string' && performance.audioUrl !== '';
+    const audioUrl = typeof performance.audioUrl === 'string' ? performance.audioUrl : '';
+    const hasAudio = audioUrl !== '';
+    // 服务端只向租约持有者派发音频;此处再守一层 —— 无租约的派发(降级/异常)静音播放
+    const audible = hasAudio && dispatch.leaseId !== null;
 
     const finishAnimationOnly = (reason: string) => {
-      // 素材缺失:立即回报 failed,字幕按估算时长展示后回待机。
+      // 素材缺失:立即回报 failed,字幕按估算时长展示后回待机;音频同步取消。
       deps.report('animation', 'failed', reason);
+      if (hasAudio) {
+        deps.audio.stop();
+        deps.report('audio', 'cancelled');
+      }
       showCaption(performance.say);
       window.setTimeout(() => {
         if (token !== playToken) return;
@@ -138,49 +145,112 @@ export function createPlayer(deps: {
       return;
     }
 
-    deps.video
-      .prepareAction(asset.url, asset.loop)
-      .then((clip) => {
-        if (token !== playToken) {
-          clip.stop();
-          return;
-        }
-        deps.report('animation', 'ready');
-        clip.show();
-        clip.play();
-        deps.report('animation', 'started');
-        showCaption(performance.say);
-        return clip.ended().then(() => {
-          if (token !== playToken) return;
-          deps.report('animation', 'ended');
-          hideCaption();
-          backToIdle(token);
-        });
-      })
-      .catch(() => {
-        if (token !== playToken) return;
-        showPlaceholder(`动作 ${performance.action}(素材加载失败)`, deps.placeholder, deps.placeholderLabel);
-        finishAnimationOnly(ErrorCodes.ASSET_MISSING);
-      });
-
-    if (hasAudio && performance.audioUrl) {
-      deps.audio
-        .prepare(performance.audioUrl)
-        .then(() => {
-          if (token !== playToken) return;
-          deps.report('audio', 'ready');
-          deps.report('audio', 'started');
-          return deps.audio.play().then(() => {
+    if (!hasAudio) {
+      // 纯动画(P0 语义):非循环一轮即结束,循环动作一轮结束
+      deps.video
+        .prepareAction(asset.url, asset.loop)
+        .then((clip) => {
+          if (token !== playToken) {
+            clip.stop();
+            return;
+          }
+          deps.report('animation', 'ready');
+          clip.show();
+          clip.play();
+          deps.report('animation', 'started');
+          showCaption(performance.say);
+          return clip.ended().then(() => {
             if (token !== playToken) return;
-            deps.report('audio', 'ended');
+            deps.report('animation', 'ended');
+            hideCaption();
+            backToIdle(token);
           });
         })
         .catch(() => {
           if (token !== playToken) return;
-          // P0 无语音,音频失败不阻塞动画/字幕;P1 起按 ARCHITECTURE §7 处理降级。
-          deps.report('audio', 'failed', 'AUDIO_LOAD_FAILED');
+          showPlaceholder(`动作 ${performance.action}(素材加载失败)`, deps.placeholder, deps.placeholderLabel);
+          finishAnimationOnly(ErrorCodes.ASSET_MISSING);
         });
+      return;
     }
+
+    // 带音频:动画持续循环,由音频结束驱动整场表演结束(ARCHITECTURE §7)
+    void (async () => {
+      let clip: import('./video-track.js').PreparedClip | null = null;
+      let audioOk = false;
+      try {
+        audioOk = await deps.audio.prepare(audioUrl).then(
+          () => true,
+          () => false,
+        );
+        if (token !== playToken) return;
+        clip = await deps.video.prepareAction(asset.url, asset.loop, true); // endless
+      } catch {
+        clip = null;
+      }
+      if (token !== playToken) {
+        clip?.stop();
+        deps.audio.stop();
+        return;
+      }
+
+      if (clip === null) {
+        // 动画素材失败:保留字幕与音频(可听),动画回报失败
+        showPlaceholder(`动作 ${performance.action}(素材加载失败)`, deps.placeholder, deps.placeholderLabel);
+        deps.report('animation', 'failed', ErrorCodes.ASSET_MISSING);
+        if (audioOk) {
+          deps.report('audio', 'ready');
+          showCaption(performance.say);
+          deps.report('audio', 'started');
+          await deps.audio.play({ audible });
+          if (token !== playToken) return;
+          deps.report('audio', 'ended');
+        } else {
+          deps.report('audio', 'failed', 'AUDIO_LOAD_FAILED');
+        }
+        window.setTimeout(() => {
+          if (token !== playToken) return;
+          hideCaption();
+          backToIdle(token);
+        }, subtitleEstimateMs(performance.say));
+        return;
+      }
+
+      deps.report('animation', 'ready');
+      if (!audioOk) {
+        // 音频加载失败:降级为“字幕时长”驱动的无声表演(ARCHITECTURE §7)
+        deps.report('audio', 'failed', 'AUDIO_LOAD_FAILED');
+        clip.show();
+        clip.play();
+        deps.report('animation', 'started');
+        showCaption(performance.say);
+        window.setTimeout(
+          () => {
+            if (token !== playToken) return;
+            deps.report('animation', 'ended');
+            clip?.stop();
+            hideCaption();
+            backToIdle(token);
+          },
+          performance.say === '' ? 1500 : subtitleEstimateMs(performance.say),
+        );
+        return;
+      }
+
+      deps.report('audio', 'ready');
+      clip.show();
+      clip.play();
+      deps.report('animation', 'started');
+      showCaption(performance.say);
+      deps.report('audio', 'started');
+      await deps.audio.play({ audible });
+      if (token !== playToken) return;
+      deps.report('audio', 'ended');
+      deps.report('animation', 'ended');
+      clip.stop();
+      hideCaption();
+      backToIdle(token);
+    })();
   }
 
   function stop(performanceId: string | null): void {

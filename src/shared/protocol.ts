@@ -60,7 +60,7 @@ export type DropRecordView = {
 export type TaskView = {
   eventId: string;
   performanceId: string | null;
-  stage: 'waiting' | 'dispatching' | 'waiting-playback';
+  stage: 'waiting' | 'generating' | 'synthesizing' | 'dispatching' | 'waiting-playback';
   say: string;
   action: string;
   since: number;

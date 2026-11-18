@@ -142,13 +142,19 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
       }
       if (msg.kind === 'performance') {
         const dispatch = msg.dispatch;
-        const sendReport = (status) => socket.send(JSON.stringify({
+        const sendReport = (track, status) => socket.send(JSON.stringify({
           kind: 'playback-report',
-          report: { runId: dispatch.runId, leaseId: dispatch.leaseId, performanceId: dispatch.performance.id, rendererId, track: 'animation', status, at: Date.now() },
+          report: { runId: dispatch.runId, leaseId: dispatch.leaseId, performanceId: dispatch.performance.id, rendererId, track, status, at: Date.now() },
         }));
-        sendReport('ready');
-        sendReport('started');
-        setTimeout(() => sendReport('ended'), 150);
+        sendReport('animation', 'ready');
+        sendReport('animation', 'started');
+        setTimeout(() => sendReport('animation', 'ended'), 150);
+        // P1:带音频的表演需回报音频轨道,会话才完成
+        if (dispatch.performance.audioUrl) {
+          sendReport('audio', 'ready');
+          sendReport('audio', 'started');
+          setTimeout(() => sendReport('audio', 'ended'), 250);
+        }
         sawCurrent = false; // 等待状态推送:先见到 current,再见到 current 为空
         return undefined;
       }

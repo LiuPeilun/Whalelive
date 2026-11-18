@@ -58,7 +58,8 @@ export function createPlayback(deps: {
     noRendererGraceMs: () => deps.settings().playback.noRendererGraceMs,
     logger: deps.logger,
     tryDispatch(entry, performance, asset) {
-      const target = registry.primaryTarget();
+      // 带音频的表演只派发给租约持有者(单一可听语音);等待期间由 play 包装层处理宽限与降级
+      const target = performance.audioUrl ? registry.leaseHolderHandle() : registry.primaryTarget();
       if (!target) return false;
       const lease = registry.leaseView();
       const leaseId = lease.holderRendererId === target.rendererId ? lease.leaseId : null;
@@ -95,6 +96,26 @@ export function createPlayback(deps: {
       if (target) registry.send(target.rendererId, { kind: 'stop', runId: deps.runId, performanceId });
     },
   });
+
+  /** 带音频的表演:宽限期内等待租约持有者出现;超时降级为无声动画(不整单失败)。 */
+  async function playWithAudioOwnership(input: PlayInput): Promise<PlaybackResult> {
+    const deadline = deps.now() + deps.settings().playback.noRendererGraceMs;
+    while (deps.now() < deadline) {
+      if (input.signal.aborted) {
+        return { performanceId: input.performance.id, status: 'cancelled' };
+      }
+      if (registry.leaseHolderHandle() !== null) break;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    if (registry.leaseHolderHandle() !== null) {
+      return sessions.start(input);
+    }
+    // 降级:剥离 audioUrl,以纯动画派发给任意在线播放端
+    deps.logger.warn('playback.audio-degraded-no-lease', { performanceId: input.performance.id });
+    const { audioUrl: _dropped, ...silent } = input.performance;
+    void _dropped;
+    return sessions.start({ ...input, performance: silent });
+  }
 
   return {
     registerRenderer(rendererId, send) {
@@ -146,7 +167,10 @@ export function createPlayback(deps: {
     },
     play(input) {
       notify();
-      return sessions.start(input).finally(notify);
+      if (input.performance.audioUrl === undefined) {
+        return sessions.start(input).finally(notify);
+      }
+      return playWithAudioOwnership(input);
     },
     stop() {
       sessions.stop();

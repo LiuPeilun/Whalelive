@@ -11,6 +11,8 @@ function makeItem(id: string, priority = 40, type: QueueItem['type'] = 'chat'): 
     expiresAt: 1_000_000,
     say: `say-${id}`,
     action: 'talk',
+    text: null,
+    isCommand: true,
     userKey: null,
   };
 }

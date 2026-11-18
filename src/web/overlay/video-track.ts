@@ -11,8 +11,11 @@ export type PreparedClip = {
 };
 
 export type VideoTrack = {
+  /** 待机:媒体元素自身持续循环,ended 仅经 stop() 兑现 */
   prepareIdle(url: string, loop: boolean): Promise<PreparedClip>;
-  prepareAction(url: string, loop: boolean): Promise<PreparedClip>;
+  /** 表演动作;endless=true(带音频的说话类表演)时持续循环到音频结束,
+   *  结束由播放器手动上报,而非“一轮即结束”。 */
+  prepareAction(url: string, loop: boolean, endless?: boolean): Promise<PreparedClip>;
   hideAll(): void;
 };
 
@@ -27,7 +30,7 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
     slot.classList.add('hidden');
   }
 
-  function prepareOn(slotIndex: number, url: string, loop: boolean, indefinite: boolean): Promise<PreparedClip> {
+  function prepareOn(slotIndex: number, url: string, loop: boolean, endless: boolean): Promise<PreparedClip> {
     const slot = slots[slotIndex]!;
     return new Promise<PreparedClip>((resolve, reject) => {
       let settled = false;
@@ -35,7 +38,7 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
         if (settled) return;
         settled = true;
         cleanup();
-        resolve(makeClip(slot, slotIndex, loop, indefinite));
+        resolve(makeClip(slot, slotIndex, loop, endless));
       };
       const onError = () => {
         if (settled) return;
@@ -52,8 +55,8 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
       slot.addEventListener('loadeddata', onLoaded);
       slot.addEventListener('canplay', onLoaded);
       slot.addEventListener('error', onError);
-      // indefinite 由媒体元素自身循环(仅待机);表演循环按“一轮即结束”由 ended() 判定
-      slot.loop = indefinite;
+      // endless(待机/带音频的说话)由媒体元素自身循环;否则表演循环按“一轮即结束”
+      slot.loop = endless;
       slot.muted = true;
       slot.playsInline = true;
       slot.src = url;
@@ -61,7 +64,7 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
     });
   }
 
-  function makeClip(slot: HTMLVideoElement, slotIndex: number, loop: boolean, indefinite: boolean): PreparedClip {
+  function makeClip(slot: HTMLVideoElement, slotIndex: number, loop: boolean, endless: boolean): PreparedClip {
     let endedResolve: (() => void) | null = null;
     let ended = false;
     const endedPromise = new Promise<void>((resolve) => {
@@ -73,11 +76,11 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
       endedResolve?.();
     };
     const onEnded = () => {
-      if (indefinite) return; // 媒体元素循环,ended 不兑现
+      if (endless) return; // 元素持续循环(待机或音频驱动的说话),ended 不自行兑现
       finish();
     };
     const onTime = () => {
-      if (indefinite) return;
+      if (endless) return;
       if (loop && slot.duration > 0 && slot.currentTime >= slot.duration - 0.08) finish();
     };
     const onError = () => finish(); // 播放中途出错按结束处理,避免悬挂
@@ -120,8 +123,8 @@ export function createVideoTrack(videoA: HTMLVideoElement, videoB: HTMLVideoElem
     prepareIdle(url, loop) {
       return prepareOn(IDLE_SLOT, url, loop, true);
     },
-    prepareAction(url, loop) {
-      return prepareOn(ACTION_SLOT, url, loop, false);
+    prepareAction(url, loop, endless = false) {
+      return prepareOn(ACTION_SLOT, url, loop || endless, endless);
     },
     hideAll,
   };

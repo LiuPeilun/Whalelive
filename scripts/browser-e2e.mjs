@@ -40,6 +40,7 @@ function killEdgeTree(pid) {
 const debugPort = 9333;
 const edge = spawn(edgePath, [
   '--headless', '--disable-gpu', '--no-sandbox',
+  '--autoplay-policy=no-user-gesture-required',
   `--user-data-dir=${root}\.tools\edge-profile-browsere2e`,
   '--no-first-run', '--no-default-browser-check',
   `--remote-debugging-port=${debugPort}`,

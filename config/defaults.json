@@ -20,5 +20,9 @@
   },
   "auth": {
     "timeoutMs": 5000
+  },
+  "generation": {
+    "llmTimeoutMs": 8000,
+    "ttsTimeoutMs": 10000
   }
 }

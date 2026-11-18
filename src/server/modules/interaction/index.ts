@@ -6,13 +6,15 @@ import type { EffectiveSettings } from '../../../shared/settings.js';
 import type { Logger } from '../../infrastructure/logger.js';
 import type { CharactersModule } from '../characters/index.js';
 import type { PlaybackModule } from '../playback/index.js';
+import type { ReplyProvider, SpeechProvider } from './providers.js';
 import { createGiftAggregator } from './gifts.js';
 import { createQueue, type DropRecord, type QueueItem } from './queue.js';
 import { createRules, type GiftRuleConfig, type PersonaConfig } from './rules.js';
 
 // 互动编排:唯一待播队列、冷却、礼物合并、任务生命周期与紧急停止。
-// 任务串行执行:出队 → 固定动作与素材 → playback.play 的唯一终态 → 核对任务版本 → 下一条。
-// 迟到的终态经版本校验后丢弃,防止停止后旧结果重新驱动调度。
+// 任务串行执行:出队 → 生成(指令短路/回复提供方)→ 语音合成 → playback.play 唯一终态
+// → 核对任务版本 → 下一条。迟到的终态与生成结果经版本校验后丢弃。
+// 提供方超时只取消当次调用(派生 signal),任务回落保底文本继续;
 
 export type EnqueueResult =
   | { accepted: true; eventId: string }
@@ -38,11 +40,57 @@ export type InteractionModule = {
 const HISTORY_LIMIT = 30;
 const COOLDOWN_LIMIT = 1000;
 const REJECT_LOG_LIMIT = 20;
+const SAY_MAX_LENGTH = 120;
+
+type CurrentTask = {
+  eventId: string;
+  performanceId: string | null;
+  stage: 'generating' | 'synthesizing' | 'waiting-playback';
+  say: string;
+  action: string;
+  since: number;
+  version: number;
+  controller: AbortController;
+};
+
+/** 派生 signal:父任务中止传导给提供方调用;超时只取消调用本身,不杀任务。 */
+function derivedSignal(parent: AbortSignal): { signal: AbortSignal; cancel(): void } {
+  const ctl = new AbortController();
+  const onAbort = () => ctl.abort();
+  if (parent.aborted) ctl.abort();
+  else parent.addEventListener('abort', onAbort, { once: true });
+  return {
+    signal: ctl.signal,
+    cancel: () => {
+      ctl.abort();
+      parent.removeEventListener('abort', onAbort);
+    },
+  };
+}
+
+async function withTimeoutMs<T>(promise: Promise<T>, ms: number, onTimeout: () => void): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => {
+          onTimeout();
+          resolve(null);
+        }, ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 export function createInteraction(deps: {
   settings(): EffectiveSettings;
   characters: CharactersModule;
   playback: PlaybackModule;
+  replyProvider: ReplyProvider;
+  speechProvider: SpeechProvider;
   persona: PersonaConfig;
   giftRules: GiftRuleConfig;
   logger: Logger;
@@ -57,16 +105,7 @@ export function createInteraction(deps: {
   const cooldowns = new Map<string, number>();
   let rejectLog: DropRecord[] = [];
   let history: { eventId: string; performanceId: string | null; status: string; at: number }[] = [];
-  let current: {
-    eventId: string;
-    performanceId: string;
-    stage: 'dispatching' | 'waiting-playback';
-    say: string;
-    action: string;
-    since: number;
-    version: number;
-    controller: AbortController;
-  } | null = null;
+  let current: CurrentTask | null = null;
   let taskVersion = 0;
   let paused = false;
 
@@ -109,15 +148,16 @@ export function createInteraction(deps: {
       return { accepted: true, eventId };
     }
     if (event.type === 'guard' || event.type === 'superchat') {
-      const say = rules.celebrate(event.user.name, event.type === 'guard' ? '大航海' : '醒目留言');
       const item: QueueItem = {
         eventId,
         type: event.type,
         priority: 80,
         enqueuedAt: now(),
         expiresAt: now() + 60_000,
-        say,
+        say: rules.celebrate(event.user.name, event.type === 'guard' ? '大航海' : '醒目留言'),
         action: 'celebrate',
+        text: null,
+        isCommand: true,
         userKey: `${event.source}:${event.user.id}`,
       };
       const pushed = queue.push(item);
@@ -134,15 +174,18 @@ export function createInteraction(deps: {
       recordReject(eventId, 'user-cooldown');
       return { accepted: false, eventId, reason: 'user-cooldown' };
     }
-    const parsed = rules.parseChat(event.text ?? '');
+    // 指令在入队时即确定(确定性规则);语义弹幕延迟到出队后由回复提供方生成。
+    const command = rules.detectCommand(event.text ?? '');
     const item: QueueItem = {
       eventId,
       type: 'chat',
       priority: 40,
       enqueuedAt: now(),
       expiresAt: now() + settings.queue.chatTtlMs,
-      say: parsed.say,
-      action: parsed.action ?? 'talk',
+      say: command?.say ?? '',
+      action: command?.action ?? 'talk',
+      text: command ? null : event.text ?? '',
+      isCommand: command !== null,
       userKey,
     };
     const pushed = queue.push(item);
@@ -167,6 +210,8 @@ export function createInteraction(deps: {
       expiresAt: now() + 60_000,
       say: '',
       action: actionId,
+      text: null,
+      isCommand: true,
       userKey: null,
     };
     const pushed = queue.push(item);
@@ -176,9 +221,9 @@ export function createInteraction(deps: {
     return pushed.ok ? { accepted: true, eventId } : { accepted: false, eventId, reason: pushed.reason };
   }
 
-  function buildPerformance(item: QueueItem): { performance: Performance; asset: { assetId: string; loop: boolean; available: boolean } | null } {
-    const resolved = characters.resolveAction(item.action);
-    let actionId = item.action;
+  function buildPerformance(item: QueueItem, say: string, action: string, audioUrl: string | undefined): { performance: Performance; asset: { assetId: string; loop: boolean; available: boolean } | null } {
+    const resolved = characters.resolveAction(action);
+    let actionId = action;
     let asset: { assetId: string; loop: boolean; available: boolean } | null = null;
     if (resolved) {
       actionId = resolved.actionId;
@@ -191,37 +236,90 @@ export function createInteraction(deps: {
       const idle = characters.resolveAction('idle');
       actionId = idle?.actionId ?? 'idle';
       asset = idle && idle.available ? { assetId: idle.file, loop: idle.loop, available: true } : null;
-      logger.warn('interaction.action-not-whitelisted', { eventId: item.eventId, requested: item.action, fallback: actionId });
+      logger.warn('interaction.action-not-whitelisted', { eventId: item.eventId, requested: action, fallback: actionId });
     }
     const performance: Performance = {
       id: `pf-${randomUUID().slice(0, 8)}`,
       sourceEventId: item.eventId,
       priority: item.priority,
-      say: item.say,
+      say,
       action: actionId,
       expiresAt: now() + 60_000,
+      ...(audioUrl !== undefined ? { audioUrl } : {}),
     };
     return { performance, asset };
   }
 
-  function dispatch(item: QueueItem): void {
+  async function dispatch(item: QueueItem): Promise<void> {
     taskVersion += 1;
     const version = taskVersion;
-    const { performance, asset } = buildPerformance(item);
     const controller = new AbortController();
-    current = {
+    // 版本仍归属本任务(未被停止/替换)才允许推进与写入 current
+    const alive = () => current !== null && current.version === version && !controller.signal.aborted;
+
+    let say = item.say;
+    let action = item.action;
+    current = { eventId: item.eventId, performanceId: null, stage: 'generating', say: '', action, since: now(), version, controller };
+    notify();
+
+    // 生成:语义弹幕调用回复提供方;指令/礼物等确定性文本跳过
+    if (!item.isCommand && item.text !== null) {
+      const call = derivedSignal(controller.signal);
+      const result = await withTimeoutMs(
+        deps.replyProvider.generate({ text: item.text, userKey: item.userKey ?? '', signal: call.signal }),
+        deps.settings().generation.llmTimeoutMs,
+        () => call.cancel(),
+      );
+      call.cancel(); // 释放派生监听
+      if (current === null || current.version !== version) return; // 停止后的迟到结果丢弃
+      if (result !== null && typeof result.say === 'string' && result.say.trim() !== '') {
+        say = result.say.trim().slice(0, SAY_MAX_LENGTH);
+        const suggested = typeof result.action === 'string' && result.action !== '' ? result.action : null;
+        if (suggested !== null && characters.resolveAction(suggested) !== null) {
+          action = suggested;
+        } else if (suggested !== null) {
+          logger.warn('interaction.action-not-whitelisted', { eventId: item.eventId, requested: suggested, fallback: action });
+        }
+      } else {
+        say = rules.fallbackReply();
+        logger.warn('interaction.reply-fallback', { eventId: item.eventId, why: result === null ? 'timeout' : 'empty-or-invalid' });
+      }
+      if (!alive()) return;
+      current = { ...current, say, action, stage: 'synthesizing' };
+      notify();
+    }
+
+    // 合成:非空文本请求语音;失败/超时降级为无声表演(字幕与动作保留)
+    let audioUrl: string | undefined;
+    if (say !== '' && !controller.signal.aborted) {
+      const call = derivedSignal(controller.signal);
+      const synth = await withTimeoutMs(
+        deps.speechProvider.synthesize({ text: say, signal: call.signal }),
+        deps.settings().generation.ttsTimeoutMs,
+        () => call.cancel(),
+      );
+      call.cancel();
+      if (current === null || current.version !== version) return;
+      if (synth !== null && typeof synth.audioUrl === 'string' && synth.audioUrl !== '') {
+        audioUrl = synth.audioUrl;
+      } else {
+        logger.warn('interaction.tts-unavailable', { eventId: item.eventId, why: synth === null ? 'timeout' : 'no-audio' });
+      }
+    }
+    if (current === null || current.version !== version) return;
+
+    const { performance, asset } = buildPerformance(item, say, action, audioUrl);
+    current = { eventId: item.eventId, performanceId: performance.id, stage: 'waiting-playback', say, action: performance.action, since: current.since, version, controller };
+    logger.info('interaction.dispatch', {
       eventId: item.eventId,
       performanceId: performance.id,
-      stage: 'waiting-playback',
-      say: performance.say,
       action: performance.action,
-      since: now(),
-      version,
-      controller,
-    };
-    logger.info('interaction.dispatch', { eventId: item.eventId, performanceId: performance.id, action: performance.action, priority: item.priority });
+      priority: item.priority,
+      audio: audioUrl !== undefined,
+      generated: !item.isCommand,
+    });
     notify();
-    playback
+    await playback
       .play({ performance, asset, signal: controller.signal })
       .then((result) => {
         if (current === null || current.version !== version) {
@@ -257,6 +355,8 @@ export function createInteraction(deps: {
         expiresAt: now() + 60_000,
         say: rules.thanks(emission.userName, emission.giftName, emission.totalQuantity),
         action: 'gift',
+        text: null,
+        isCommand: true,
         userKey: emission.userKey,
       };
       const pushed = queue.push(item);
@@ -265,7 +365,7 @@ export function createInteraction(deps: {
     if (emissions.length > 0) notify();
     if (paused || current !== null) return;
     const next = queue.popBest();
-    if (next) dispatch(next);
+    if (next) void dispatch(next);
   }
 
   function pause(): void {
@@ -311,6 +411,8 @@ export function createInteraction(deps: {
           expiresAt: item.expiresAt,
           say: item.say,
           action: item.action,
+          text: item.text,
+          isCommand: item.isCommand,
           userKey: item.userKey,
         })),
         drops: [...queue.dropLog(), ...rejectLog].sort((a, b) => a.at - b.at).slice(-20),

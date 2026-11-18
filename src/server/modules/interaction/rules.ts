@@ -12,11 +12,6 @@ export type GiftRuleConfig = {
   celebrateText: string;
 };
 
-export type ParsedChat = {
-  action: string | null;
-  say: string;
-};
-
 const COMMAND_PATTERNS: { action: string; pattern: RegExp }[] = [
   { action: 'dance', pattern: /(跳个舞|跳舞|跳一支舞|来段舞)/ },
   { action: 'wave', pattern: /(挥手|打个招呼|say hi|嗨|哈喽|你好呀|大家好)/ },
@@ -28,15 +23,21 @@ const COMMAND_PATTERNS: { action: string; pattern: RegExp }[] = [
 export function createRules(persona: PersonaConfig, giftRules: GiftRuleConfig) {
   let fallbackCursor = 0;
 
-  function parseChat(text: string): ParsedChat {
+  /** 确定性指令检测:命中返回动作与固定回复,语义弹幕返回 null(出队后走回复提供方)。 */
+  function detectCommand(text: string): { action: string; say: string } | null {
     for (const cmd of COMMAND_PATTERNS) {
       if (cmd.pattern.test(text)) {
         return { action: cmd.action, say: persona.commandReplies[cmd.action] ?? `${persona.name}收到!` };
       }
     }
+    return null;
+  }
+
+  /** 兜底回复(提供方失败/超时时使用),按序轮换。 */
+  function fallbackReply(): string {
     const reply = persona.fallbackReplies[fallbackCursor % persona.fallbackReplies.length] ?? `${persona.name}看到你的弹幕啦~`;
     fallbackCursor += 1;
-    return { action: null, say: reply };
+    return reply;
   }
 
   function thanks(user: string, gift: string, count: number): string {
@@ -47,5 +48,5 @@ export function createRules(persona: PersonaConfig, giftRules: GiftRuleConfig) {
     return giftRules.celebrateText.replaceAll('{user}', user).replaceAll('{kind}', kind);
   }
 
-  return { parseChat, thanks, celebrate };
+  return { detectCommand, fallbackReply, thanks, celebrate };
 }

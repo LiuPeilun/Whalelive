@@ -8,6 +8,7 @@ import { createAccessControl } from './transport/auth.js';
 import { registerHttpRoutes } from './transport/http/index.js';
 import { createWsTransport } from './transport/ws/index.js';
 import { createLogger, redactUrl, type Logger } from './infrastructure/logger.js';
+import { createAudioCache } from './infrastructure/audio-cache.js';
 import { createPaths, ensureDir, type AppPaths } from './infrastructure/paths.js';
 import { createSettings, type SettingsModule } from './modules/settings/index.js';
 import { createCharacters, type CharactersModule } from './modules/characters/index.js';
@@ -15,6 +16,8 @@ import { createEvents } from './modules/events/index.js';
 import { createInteraction, type InteractionModule } from './modules/interaction/index.js';
 import { createPlayback, type PlaybackModule } from './modules/playback/index.js';
 import { mockEvent, type MockEventInput } from './integrations/platforms/mock.js';
+import { createFixedReplyProvider } from './integrations/llm/fixed.js';
+import { createFixedLocalSpeech } from './integrations/tts/fixed-local.js';
 import type { GiftRuleConfig, PersonaConfig } from './modules/interaction/rules.js';
 
 // 依赖组装与资源关闭(PROJECT_STRUCTURE《依赖方向》):
@@ -75,7 +78,12 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   const persona = readJson<PersonaConfig>(path.join(paths.versionedConfigDir, 'persona.json'), personaFallback, logger, 'persona');
   const giftRulesCfg = readJson<GiftRuleConfig>(path.join(paths.versionedConfigDir, 'gift-rules.json'), giftFallback, logger, 'gift-rules');
 
-  const interaction = createInteraction({ settings: effective, characters, playback, persona, giftRules: giftRulesCfg, logger, now });
+  // P1 第一批提供方:固定回复 + 本地 WAV 合成(后续替换为 DeepSeek / edge-tts 适配器)
+  const audioCache = createAudioCache({ audioDir: paths.audioCacheDir, logger, now });
+  const replyProvider = createFixedReplyProvider({ fallbackReplies: persona.fallbackReplies });
+  const speechProvider = createFixedLocalSpeech({ cache: audioCache });
+
+  const interaction = createInteraction({ settings: effective, characters, playback, replyProvider, speechProvider, persona, giftRules: giftRulesCfg, logger, now });
 
   // 平台适配器 → events → app 连接的回调 → interaction(PROJECT_STRUCTURE《依赖方向》)
   let mockSeq = 0;
@@ -142,6 +150,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
     stateSnapshot,
     submitMock,
     overlayUrl: () => access.overlayUrl(),
+    audioCache,
     logger,
   });
 

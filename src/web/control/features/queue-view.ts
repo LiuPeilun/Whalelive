@@ -38,7 +38,14 @@ export function mountQueueView(context: ControlContext): void {
   context.onState((state) => {
     lenTag.textContent = `${state.queue.length} / ${state.queue.capacity}`;
     if (state.current) {
-      const stage = state.current.stage === 'waiting-playback' ? '播放中' : '派发中';
+      const stageLabels: Record<string, string> = {
+        waiting: '排队中',
+        generating: '生成中',
+        synthesizing: '合成中',
+        dispatching: '派发中',
+        'waiting-playback': '播放中',
+      };
+      const stage = stageLabels[state.current.stage] ?? state.current.stage;
       current.textContent = `${stage} ${state.current.action}(${state.current.performanceId ?? '-'}) ${state.current.say}`.trim();
     } else {
       current.textContent = state.paused ? '已暂停,等待恢复' : '空闲';

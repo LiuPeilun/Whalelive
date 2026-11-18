@@ -23,6 +23,7 @@ export type HttpDeps = {
   stateSnapshot(): StateSnapshot;
   submitMock(input: MockEventInput): { eventId: string; ingest: string; enqueue: { accepted: boolean; reason: string | null } | null };
   overlayUrl(): string;
+  audioCache: { resolve(audioId: string): { file: string; mime: string } | null };
   logger: Logger;
 };
 
@@ -220,9 +221,21 @@ export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): vo
     handler: async (request, reply) => petAsset(request, reply, request.method === 'HEAD' ? 'HEAD' : 'GET'),
   });
 
-  fastify.get('/media/audio/:audioId', async (request, reply) => {
+  const audioHandler = async (request: FastifyRequest, reply: FastifyReply, method: 'GET' | 'HEAD') => {
     if (!mediaGuard(request, reply)) return;
-    // P0 无语音合成缓存,保留契约路由;P1 接入 audio-cache 后提供内容。
-    reply.code(404).send(apiError(ErrorCodes.NOT_FOUND, 'P0 阶段无音频缓存', 'media'));
+    const audioId = (request.params as { audioId?: string }).audioId ?? '';
+    const resolved = deps.audioCache.resolve(audioId);
+    if (!resolved) {
+      reply.code(404).send(apiError(ErrorCodes.NOT_FOUND, '音频不存在或已过期', 'media'));
+      return;
+    }
+    serveFile(request, reply, resolved.file, resolved.mime, method);
+  };
+
+  // 单一路由同时声明 GET/HEAD(fastify.get 会隐式占用 HEAD,显式 head 会冲突)
+  fastify.route({
+    method: ['GET', 'HEAD'],
+    url: '/media/audio/:audioId',
+    handler: async (request, reply) => audioHandler(request, reply, request.method === 'HEAD' ? 'HEAD' : 'GET'),
   });
 }

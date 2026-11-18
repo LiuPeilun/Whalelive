@@ -115,15 +115,22 @@ socket.on('message', (data) => {
     // 像真实播放页一样回执所有派发,租约使用派发身份快照(WT-P0-007)
     const dispatch = msg.dispatch;
     currentDispatchLeaseId = dispatch.leaseId;
-    const sendReport = (status) => socket.send(JSON.stringify({
+    const sendReport = (track, status) => socket.send(JSON.stringify({
       kind: 'playback-report',
-      report: { runId: dispatch.runId, leaseId: currentDispatchLeaseId, performanceId: dispatch.performance.id, rendererId: assignedRendererId, track: 'animation', status, at: Date.now() },
+      report: { runId: dispatch.runId, leaseId: currentDispatchLeaseId, performanceId: dispatch.performance.id, rendererId: assignedRendererId, track, status, at: Date.now() },
     }));
-    sendReport('ready');
-    sendReport('started');
+    sendReport('animation', 'ready');
+    sendReport('animation', 'started');
+    if (dispatch.performance.audioUrl) {
+      sendReport('audio', 'ready');
+      sendReport('audio', 'started');
+      if (dispatch.performance.action !== 'dance') {
+        setTimeout(() => sendReport('audio', 'ended'), 350);
+      }
+    }
     if (dispatch.performance.action !== 'dance') {
       // 非 dance 的派发(自动推进/遗留表演)按真实页面行为自愈结束
-      setTimeout(() => sendReport('ended'), 300);
+      setTimeout(() => sendReport('animation', 'ended'), 300);
     }
   }
   if (msg.kind === 'lease-result' && msg.ok === false) {
@@ -219,9 +226,12 @@ stopRenewLoop();
 const stopMsg = await waitFor((m) => (m.kind === 'stop' && m.performanceId === dancePerformanceId ? m : undefined), 10000);
 check('租约到期后服务端下发 stop(WT-P0-007)', stopMsg !== undefined, '等待 stop 超时');
 
-// 自动推进:wave 派发,携带新派发身份(空租约)
+// 自动推进:wave 派发。P1 起 wave 带音频,派发身份取决于持有者出现时机:
+// 页面看门狗已重取得新租约时携带该租约(持有者派发),否则为空租约(无声降级)。
+// 硬断言由后续“按派发身份回执被接受并完成”承担。
 const wave = await waitFor((m) => (m.kind === 'performance' && m.dispatch.performance.action === 'wave' ? m : undefined), 10000);
-check('wave 自动推进且派发身份为空租约(WT-P0-007)', wave?.dispatch?.leaseId === null, JSON.stringify(wave?.dispatch?.leaseId));
+check('wave 自动推进(WT-P0-007)', wave !== undefined, '等待 wave 派发超时');
+console.log('wave 派发身份:', wave?.dispatch?.leaseId ?? 'null(无声降级)');
 
 // wave 以派发身份回执,正常完成(不再依赖旧租约或预加载看门狗)
 const stateAfter = await waitForIdle(8000);

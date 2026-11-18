@@ -19,6 +19,7 @@ type DefaultsFile = {
   playback: UserSettings['playback'];
   lease: UserSettings['lease'];
   auth: { timeoutMs: number };
+  generation?: { llmTimeoutMs: number; ttsTimeoutMs: number };
 };
 
 type UserFile = {
@@ -99,6 +100,10 @@ export function createSettings(deps: { paths: AppPaths; env: Record<string, stri
       server: { host: envHost || '127.0.0.1', port: envPort ?? 3210 },
       platform: envPlatform || 'mock',
       auth: { timeoutMs: defaults.auth.timeoutMs },
+      generation: {
+        llmTimeoutMs: defaults.generation?.llmTimeoutMs ?? 8_000,
+        ttsTimeoutMs: defaults.generation?.ttsTimeoutMs ?? 10_000,
+      },
     };
   }
 

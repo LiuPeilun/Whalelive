@@ -36,6 +36,8 @@ export type EffectiveSettings = UserSettings & {
   server: { host: string; port: number };
   platform: string;
   auth: { timeoutMs: number };
+  /** 生成链路超时(ARCHITECTURE §8:LLM 8s / TTS 10s),默认值只读,不进用户覆盖。 */
+  generation: { llmTimeoutMs: number; ttsTimeoutMs: number };
 };
 
 export type SettingsView = {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Performance } from '../../../shared/performance.js';
 import type { EffectiveSettings } from '../../../shared/settings.js';
 import type { WsServerMessage } from '../../../shared/protocol.js';
@@ -26,6 +26,7 @@ function settings(): EffectiveSettings {
     server: { host: '127.0.0.1', port: 3210 },
     platform: 'mock',
     auth: { timeoutMs: 5_000 },
+    generation: { llmTimeoutMs: 8_000, ttsTimeoutMs: 10_000 },
   };
 }
 
@@ -33,13 +34,13 @@ function makePerformance(id: string, action: string): Performance {
   return { id, sourceEventId: 'evt-x', priority: 40, say: '', action, expiresAt: Number.MAX_SAFE_INTEGER };
 }
 
-type DispatchView = { performanceId: string; leaseId: string | null; action: string };
+type DispatchView = { performanceId: string; leaseId: string | null; action: string; audioUrl: string | undefined };
 
 function dispatchedActions(sent: WsServerMessage[]): DispatchView[] {
   const views: DispatchView[] = [];
   for (const m of sent) {
     if (m.kind === 'performance') {
-      views.push({ performanceId: m.dispatch.performance.id, leaseId: m.dispatch.leaseId, action: m.dispatch.performance.action });
+      views.push({ performanceId: m.dispatch.performance.id, leaseId: m.dispatch.leaseId, action: m.dispatch.performance.action, audioUrl: m.dispatch.performance.audioUrl });
     }
   }
   return views;
@@ -141,6 +142,73 @@ describe('playback 租约失效联动(WT-P0-007)', () => {
     expect(
       playback.report({ runId: 'run-1', leaseId: lease1.leaseId, performanceId: 'pf-b', rendererId: 'r1', track: 'animation', status: 'started', at: 0 }, 'r1'),
     ).toBe('stale');
+  });
+
+  it('带音频的表演只派发给租约持有者并携带租约(P1)', async () => {
+    const sent: WsServerMessage[] = [];
+    const fast = () => ({ ...settings(), playback: { ...settings().playback, noRendererGraceMs: 150 } });
+    const playback = createPlayback({
+      runId: 'run-1',
+      settings: fast,
+      logger: silentLogger,
+      now: () => Date.now(),
+      urlForAsset: () => null,
+    });
+    playback.registerRenderer('r-holder', (m) => {
+      sent.push(m);
+      return true;
+    });
+    playback.registerRenderer('r-preview', (m) => {
+      sent.push(m);
+      return true;
+    });
+    const lease = playback.requestLease('r-holder');
+    expect(lease.ok).toBe(true);
+    const leaseId = lease.ok ? lease.leaseId : null;
+
+    const pending = playback.play({
+      performance: { ...makePerformance('pf-a', 'talk'), audioUrl: '/media/audio/a.wav' },
+      asset: null,
+      signal: new AbortController().signal,
+    });
+    const dispatch = dispatchedActions(sent).at(-1);
+    expect(dispatch).toMatchObject({ performanceId: 'pf-a', leaseId, action: 'talk' });
+    expect(
+      playback.report({ runId: 'run-1', leaseId, performanceId: 'pf-a', rendererId: 'r-holder', track: 'animation', status: 'ended', at: 0 }, 'r-holder'),
+    ).toBe('accepted');
+    expect(
+      playback.report({ runId: 'run-1', leaseId, performanceId: 'pf-a', rendererId: 'r-holder', track: 'audio', status: 'ended', at: 0 }, 'r-holder'),
+    ).toBe('accepted');
+    expect(await pending).toEqual({ performanceId: 'pf-a', status: 'ended' });
+  });
+
+  it('无租约持有者时带音频表演宽限后降级无声,不整单失败(P1)', async () => {
+    const sent: WsServerMessage[] = [];
+    const fast = () => ({ ...settings(), playback: { ...settings().playback, noRendererGraceMs: 150 } });
+    const playback = createPlayback({
+      runId: 'run-1',
+      settings: fast,
+      logger: silentLogger,
+      now: () => Date.now(),
+      urlForAsset: () => null,
+    });
+    playback.registerRenderer('r1', (m) => {
+      sent.push(m);
+      return true;
+    });
+    // 不申请租约 → 无持有者
+    const pending = playback.play({
+      performance: { ...makePerformance('pf-b', 'talk'), audioUrl: '/media/audio/b.wav' },
+      asset: null,
+      signal: new AbortController().signal,
+    });
+    await new Promise((r) => setTimeout(r, 450)); // 超过宽限(150ms)
+    const dispatch = dispatchedActions(sent).at(-1);
+    expect(dispatch).toMatchObject({ performanceId: 'pf-b', action: 'talk', leaseId: null });
+    // 降级:派发到任意在线播放端,且剥离 audioUrl
+    expect(dispatch?.audioUrl).toBeUndefined();
+    expect(playback.report({ runId: 'run-1', leaseId: null, performanceId: 'pf-b', rendererId: 'r1', track: 'animation', status: 'ended', at: 0 }, 'r1')).toBe('accepted');
+    expect(await pending).toEqual({ performanceId: 'pf-b', status: 'ended' });
   });
 
   it('持有者主动释放租约同样立即结算归属表演', async () => {
