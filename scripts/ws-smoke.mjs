@@ -243,7 +243,14 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
   check('JSON null 消息不致崩溃,后续 ping 仍得到 pong', outcome === 'pong-after-null', String(outcome));
 }
 
-// 12. Vite 文件服务范围(WT-P0-003):运行数据被拒,源码目录可服务
+// 12. 页面入口重定向保留查询参数(WT-P0-012)
+{
+  const r = await fetch(`${base}/overlay?blend=screen`, { redirect: 'manual' });
+  const loc = r.headers.get('location') ?? '';
+  check('/overlay 重定向保留查询参数', r.status === 308 && loc === '/overlay/?blend=screen', `status=${r.status} location=${loc}`);
+}
+
+// 13. Vite 文件服务范围(WT-P0-003):运行数据被拒,源码目录可服务
 {
   const toFsUrl = (p) => `${base}/@fs/${p.replace(/\\/g, '/')}`;
   const denied = await fetch(toFsUrl(path.join(root, 'data', 'access.json')));

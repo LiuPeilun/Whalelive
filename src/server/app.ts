@@ -145,9 +145,15 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
     logger,
   });
 
-  // 页面入口统一尾斜杠形式;浏览器重定向时保留 URL fragment 中的凭据。
-  fastify.get('/control', async (_request, reply) => reply.code(308).redirect('/control/'));
-  fastify.get('/overlay', async (_request, reply) => reply.code(308).redirect('/overlay/'));
+  // 页面入口统一尾斜杠形式;重定向保留查询参数(如 ?blend=screen,WT-P0-012),
+  // fragment 不随请求发送、由浏览器重定向后自动带回,凭据不丢失。
+  const redirectToTrailingSlash = (request: import('fastify').FastifyRequest, target: string, reply: import('fastify').FastifyReply) => {
+    const raw = request.raw.url ?? '';
+    const search = raw.includes('?') ? raw.slice(raw.indexOf('?')) : '';
+    return reply.code(308).redirect(`${target}/${search}`);
+  };
+  fastify.get('/control', async (request, reply) => redirectToTrailingSlash(request, '/control', reply));
+  fastify.get('/overlay', async (request, reply) => redirectToTrailingSlash(request, '/overlay', reply));
 
   // P0 源码运行:页面经 Vite 开发中间件同源提供,业务 /ws 与 HMR 共用同一 HTTP server。
   // 全部路由(含本代理路由)必须在 ready/listen 之前注册;Vite 实例在监听建立后创建并绑定。
