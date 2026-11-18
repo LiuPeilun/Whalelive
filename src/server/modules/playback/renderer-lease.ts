@@ -37,7 +37,10 @@ export function createRendererRegistry(deps: { leaseTtlMs(): number; renewInterv
   function unregister(rendererId: string): void {
     renderers.delete(rendererId);
     if (lease?.rendererId === rendererId) {
-      deps.logger.info('playback.lease-released-by-disconnect', { rendererId, leaseId: lease.leaseId });
+      // 断线属于“未确认停声”(WT-P1-004):旧页要到本地 onclose 才停声,存在处理延迟;
+      // 与定时回收走同一转交约束——记录安全期限再清除,新端须等安全时刻才可发声。
+      lastExpiredSafeUntil = Math.max(lastExpiredSafeUntil, deps.now() + deps.takeoverSafetyMs());
+      deps.logger.info('playback.lease-released-by-disconnect', { rendererId, leaseId: lease.leaseId, safeUntil: lastExpiredSafeUntil });
       lease = null;
     }
   }

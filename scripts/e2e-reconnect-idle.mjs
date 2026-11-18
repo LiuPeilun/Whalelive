@@ -144,10 +144,13 @@ function spawnSyncKillServer() {
 
 async function stage2() {
   const { ws, evaluate, screenshot } = await attach();
-  // 服务已由外部重启;无任何新互动:轮询观察画面自动恢复
+  // 服务已由外部重启;无任何新互动:轮询观察画面自动恢复。
+  // 窗口需覆盖 socket 层卡死自愈时序:3 次悬挂守卫(约 30s,退避拉长)→ 防风暴
+  // 重载 → 新页面握手与待机起播(实测 2026-11-18:Edge 服务硬杀后 WS 全挂,
+  // 仅 HTTP 正常,页面不重载则 65s+ 不恢复;重载后立即恢复)。
   let after = null;
   let restored = false;
-  const deadline = Date.now() + 25_000;
+  const deadline = Date.now() + 70_000;
   for (;;) {
     await sleep(500);
     after = await readState(evaluate);

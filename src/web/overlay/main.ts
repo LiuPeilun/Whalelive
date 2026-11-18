@@ -230,6 +230,7 @@ function main(): void {
     clearLeaseTimer();
     clearLeaseDeadline();
     clearLeaseRetry();
+    player.stopAll(); // 先完成本地停声,释放才对应“停止确认”(WT-P1-004 契约)
     if (leaseId && rendererId) {
       ws.send({ kind: 'lease-release', leaseId });
     }

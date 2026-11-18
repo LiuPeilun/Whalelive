@@ -4,7 +4,8 @@ import { PROTOCOL_VERSION } from '../../shared/protocol.js';
 // 两个页面共用的 WS 客户端:认证握手、断线自动重连与状态回调。
 // 凭据来自 URL fragment(不随 HTTP 请求发送),页面关闭时自动释放。
 // 重连链必须永不中断:状态回调与构造异常都被捕获并计入探针(window.__wtWs),
-// 供断线重连类问题(WT-P0-010)实测观察。
+// 供断线重连类问题(WT-P0-010)实测观察。连续握手悬挂时自愈重载页面,
+// 穿透浏览器 socket 层在服务进程硬杀后可能的整体卡死(见 maybeReloadForStuckSockets)。
 
 export type WsStatus = 'connecting' | 'connected' | 'disconnected';
 
@@ -29,9 +30,13 @@ export function createWsClient(opts: {
   let retryMs = 800;
   let reconnects = 0;
 
-  // 页面可观测探针(诊断用,不含敏感信息)
-  const probe = { status: 'connecting' as WsStatus, reconnects: 0, lastError: null as string | null };
+  // 页面可观测探针(诊断用,不含敏感信息);events 为最近状态机事件环形缓冲
+  const probe = { status: 'connecting' as WsStatus, reconnects: 0, lastError: null as string | null, events: [] as string[] };
   (window as unknown as { __wtWs?: typeof probe }).__wtWs = probe;
+  function trace(event: string): void {
+    probe.events.push(`${Date.now() % 100000}:${event}`);
+    if (probe.events.length > 40) probe.events.shift();
+  }
 
   function send(message: WsClientMessage): boolean {
     if (ws === null || ws.readyState !== WebSocket.OPEN) return false;
@@ -41,9 +46,30 @@ export function createWsClient(opts: {
 
   let connectSeq = 0; // 连接会话编号:被替换连接的全部事件失效(WT-P0-011)
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null; // 唯一待执行重连
+  let connectTimeoutStreak = 0; // 连续握手悬挂次数,成功 open 归零
+
+  // 自愈重载:服务进程被硬杀后,Edge/Chromium 对该地址的 WS socket 层可能整体
+  // 卡死 —— HTTP 正常、其它端口 WS 立即失败,唯独本地址新 WS 永久 CONNECTING
+  // (e2e-reconnect 实测,页面不重载则 65s+ 不恢复)。业务重试无法穿透 socket
+  // 层,连续多次握手悬挂时重载页面重建网络栈;凭据在 URL fragment,重载即恢复。
+  // 服务真宕机时握手是快速 error(被拒),不会累计悬挂,不会误触发。
+  function maybeReloadForStuckSockets(): void {
+    connectTimeoutStreak += 1;
+    if (connectTimeoutStreak < 3) return;
+    connectTimeoutStreak = 0;
+    try {
+      const last = Number(sessionStorage.getItem('wtWsReloadAt') ?? '0');
+      if (Date.now() - last < 30_000) return; // 防重载风暴:30s 内已重载过则退回纯重试
+      sessionStorage.setItem('wtWsReloadAt', String(Date.now()));
+    } catch {
+      /* sessionStorage 不可用(隐私模式等)仍执行重载 */
+    }
+    location.reload();
+  }
 
   function scheduleReconnect(): void {
     if (closedByUser) return;
+    trace('scheduleReconnect');
     if (reconnectTimer !== null) return; // 同一次失败只进入一次重连调度
     probe.status = 'disconnected';
     probe.reconnects = reconnects;
@@ -93,12 +119,14 @@ export function createWsClient(opts: {
       return;
     }
     ws = socket;
+    trace(`connect id=${myId}`);
     // 悬挂守卫:CONNECTING 超过 10 秒(半开网络等)按失败处理并重排;
     // 立即使本连接全部事件失效(含竞态窗口内迟到的 open),浏览器随后的
     // 异步 close 也因代数失效,不会产生第二次调度(WT-P0-011)。
     const guard = setTimeout(() => {
       if (connectSeq !== myId) return;
       if (socket.readyState === WebSocket.CONNECTING) {
+        trace(`guard-fire id=${myId} CONNECTING`);
         probe.lastError = 'connecting-timeout';
         reconnects += 1;
         connectSeq += 1; // 失效竞态窗口内迟到的 open/onclose
@@ -107,12 +135,15 @@ export function createWsClient(opts: {
         } catch {
           /* 忽略 */
         }
+        maybeReloadForStuckSockets();
         scheduleReconnect();
       }
     }, 10_000);
     socket.onopen = () => {
       clearTimeout(guard);
+      trace(`open id=${myId} seq=${connectSeq}`);
       if (connectSeq !== myId) {
+        trace(`late-open-close id=${myId}`);
         // 迟到的成功连接属于已被替换的会话:直接关闭,避免同页第二连接
         try {
           socket.close();
@@ -122,6 +153,7 @@ export function createWsClient(opts: {
         return;
       }
       retryMs = 800;
+      connectTimeoutStreak = 0;
       probe.status = 'connected';
       opts.onStatus('connected');
       send({ kind: 'auth', protocolVersion: PROTOCOL_VERSION, role: opts.role, credential: opts.credential });
@@ -137,11 +169,13 @@ export function createWsClient(opts: {
     };
     socket.onclose = () => {
       clearTimeout(guard);
+      trace(`close id=${myId} ready=${socket.readyState}`);
       if (connectSeq !== myId) return; // 守卫已处理(浏览器异步 close 迟到)
       reconnects += 1;
       scheduleReconnect();
     };
     socket.onerror = () => {
+      trace(`error id=${myId} ready=${socket.readyState}`);
       if (connectSeq !== myId) return;
       // 仅记录;CONNECTING 状态主动 close() 会吞掉后续 close 事件,
       // 连接失败时浏览器会自行派发 error + close(WT-P0-010 重连链死亡根因)

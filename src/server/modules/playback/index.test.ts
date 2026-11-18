@@ -279,6 +279,26 @@ describe('playback 租约失效联动(WT-P0-007)', () => {
     }
   });
 
+  it('持有端断线注销进入安全等待,安全时刻后新端才可接管(WT-P1-004)', async () => {
+    const sent: WsServerMessage[] = [];
+    let t = 1_000;
+    const cfg = () => ({ ...settings(), lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 800 } });
+    const playback = createPlayback({ runId: 'run-1', settings: cfg, logger: silentLogger, now: () => t, urlForAsset: () => null });
+    playback.registerRenderer('A', (m) => { sent.push(m); return true; });
+    playback.registerRenderer('B', (m) => { sent.push(m); return true; });
+    expect(playback.requestLease('A').ok).toBe(true); // 租约远未到期
+
+    // A 断线(未确认停声):注销后 B 立即申请仍被拒
+    playback.unregisterRenderer('A');
+    const early = playback.requestLease('B');
+    expect(early.ok).toBe(false);
+
+    // 安全时刻(断线检测时刻 + 800ms)之后接管成功
+    t = 1_801;
+    const granted = playback.requestLease('B');
+    expect(granted.ok).toBe(true);
+  });
+
   it('租约转交后停止指令发给实际派发端,而非新持有者(WT-P1-004)', async () => {
     const sentA: WsServerMessage[] = [];
     const sentB: WsServerMessage[] = [];
