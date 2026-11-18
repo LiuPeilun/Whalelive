@@ -190,6 +190,18 @@ P0 是可观察的原型。P1 完成完整本地输入到直播画面的 MVP。P
 
 **下一项可继续任务**：P1 接入 DeepSeek 与首个 TTS（在 `providers.ts` 接口上替换罐头实现）。
 
+## 实施记录（P1）
+
+### 2026-11-18 · P1 第一批：固定回复 + 本地音频打通全链路（提交 `872c57e`）
+
+**实现**：providers 瘦身为纯接口并注入编排器；fixed 回复提供方与本地 WAV 合成提供方（Node 直接合成，零外部依赖）；生成移到出队后（指令短路/白名单校验/超时保底/合成失败降无声，新增 generating/synthesizing 阶段视图与 generation 超时配置）；audio-cache 原子写+容量淘汰+防穿越，`/media/audio/:id` 真实供给（GET/HEAD/Range）；带音频表演只派发给租约持有者、宽限后降级无声；overlay 说话动画循环到音频结束、音频以 dispatch.leaseId 为发声门槛（预览静音）。
+
+**检查结果**：Vitest 52/52（新增 audio-cache 3 例、interaction 生成链路 6 例、playback 持有者/降级 2 例）；ws-smoke 22/22（含音频轨道回执）；音频媒体 GET 200 / Range 206 / 穿越 404；browser-e2e / e2e-late-idle / control-e2e / lease-lost（11/11 两连）全部通过。
+
+**OBS 实测（操作者，2026-11-18）**：① 语音链路通过——弹幕触发说话动画+字幕+合成音，**动画循环到声音结束才回待机**；③ 录制 20+ 秒回放：咕噜声可听、字幕可读、角色透明。② 紧急停止项：紧急停止按钮位于控制台网页顶部深蓝栏（红色按钮），操作者误在 OBS 内寻找——待操作者在控制台复测后回填。另：新增 `scripts/obs/organize-recordings.lua`（OBS 脚本，录制停止后按日期子目录归档到 `data/recordings/YYYY-MM-DD/`，安装说明见同目录 README），待操作者安装并验证一次归档。
+
+**尚缺与下一步**：第二批 edge-tts 真实合成（含音色与连通性）、第三批 DeepSeek、30 分钟连续录制与断线/转交音频出口实测。
+
 ## 实施记录模板
 
 每次完成任务后补充以下内容。
