@@ -50,53 +50,91 @@ export function commandLineOwnsEntry(cmdLine, entry = entryPath()) {
   return upper.includes(entry.toUpperCase()) || upper.includes(entry.replaceAll('\\', '/').toUpperCase());
 }
 
+/** 端口当前监听者 PID(无监听时 null) */
+function listenerPidFor(port) {
+  try {
+    const out = String(execFileSync('powershell', ['-NoProfile', '-Command',
+      `(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess`], { encoding: 'utf8' }));
+    const pid = Number(out.trim());
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 启动测试服务并登记 PID。返回 { child, pid, waitHealthy }:
  * 调用方保持自身存活(child 的管道挂在其上),退出前调用 child.kill()。
  */
 export function startTestServer(opts) {
-  const tsxCli = path.join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs');
-  if (!fs.existsSync(tsxCli)) throw new Error(`tsx CLI 不存在: ${tsxCli}`);
+  // 单进程启动:node --import tsx <绝对入口> —— tsx cli 方式会 fork 出真正的
+  // 服务子进程,端口监听者与 child.pid 不一致,监听者核对无法成立。
+  // 单进程下 child.pid 即监听者,命令行同样携带入口绝对路径。
+  if (!fs.existsSync(path.join(root, 'node_modules', 'tsx'))) throw new Error('tsx 依赖不存在(请先 npm install)');
   const pidFile = pidFileFor(opts.port);
-  // 重复启动守卫(WT-P1-009):该端口已有活跃登记时拒绝启动——否则第二个进程
-  // 会在 EADDRINUSE 退出时清掉自己覆盖写入的登记,原实例从此无法经 --stop 停止。
-  // 陈旧登记(进程已退出/PID 被复用)则清理后放行。
-  if (fs.existsSync(pidFile)) {
-    const registered = Number(fs.readFileSync(pidFile, 'utf8').trim());
-    if (Number.isFinite(registered) && pidAliveOwnsEntry(registered)) {
-      throw new Error(`端口 ${opts.port} 已有活跃测试服务(PID ${registered}):请先 node scripts/e2e-server.mjs --stop --port ${opts.port}`);
+  // 原子占用登记(WT-P1-009):以 wx 独占创建抢占该端口的启动权——并发同时
+  // 启动时只有一个能占用,败者按"已有活跃服务/启动进行中"拒绝,不再出现
+  // 双方先后覆盖写入、败者退出时误删胜者登记的竞态。陈旧登记清理后重试。
+  fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+  let occupied = false;
+  for (let attempt = 0; attempt < 3 && !occupied; attempt += 1) {
+    try {
+      fs.closeSync(fs.openSync(pidFile, 'wx')); // 创建即独占(空文件 = 占用中)
+      occupied = true;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      const raw = fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8').trim() : '';
+      const registered = Number(raw);
+      if (raw !== '' && Number.isFinite(registered) && pidAliveOwnsEntry(registered)) {
+        throw new Error(`端口 ${opts.port} 已有活跃测试服务(PID ${registered}):请先 node scripts/e2e-server.mjs --stop --port ${opts.port}`);
+      }
+      if (raw === '') {
+        throw new Error(`端口 ${opts.port} 的测试服务启动进行中,请稍候`);
+      }
+      fs.rmSync(pidFile, { force: true }); // 陈旧登记(进程已退出/PID 被复用)
     }
-    fs.rmSync(pidFile, { force: true }); // 陈旧登记
   }
+  if (!occupied) throw new Error(`端口 ${opts.port} 登记占用失败(并发竞争),请重试`);
   const logFile = opts.logFile ?? logFileFor(opts.port);
   fs.mkdirSync(path.dirname(logFile), { recursive: true });
   const logFd = fs.openSync(logFile, 'w');
   const redactor = createRedactingWriter(logFd, opts.extraSecrets ?? []);
-  const child = spawn(process.execPath, [tsxCli, entryPath()], {
-    cwd: root,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PORT: String(opts.port) },
-  });
+  let child;
+  try {
+    child = spawn(process.execPath, ['--import', 'tsx', entryPath()], {
+      cwd: root,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, PORT: String(opts.port) },
+    });
+  } catch (err) {
+    fs.rmSync(pidFile, { force: true }); // 释放本次占用,避免空文件卡死后续启动
+    try { fs.closeSync(logFd); } catch { /* 已关闭 */ }
+    throw err;
+  }
   child.stdout.on('data', (d) => redactor.push(d));
   child.stderr.on('data', (d) => redactor.push(d));
+  const childPidStr = String(child.pid);
+  fs.writeFileSync(pidFile, childPidStr); // 覆写自己占用的文件(writeFileSync 截断)
   let childExited = false;
   child.on('exit', () => { childExited = true;
     redactor.flush();
     try { fs.closeSync(logFd); } catch { /* 已关闭 */ }
-    try { if (fs.readFileSync(pidFile, 'utf8').trim() === String(child.pid)) fs.rmSync(pidFile, { force: true }); } catch { /* 无文件 */ }
+    // 仅清理本次启动持有的登记(内容仍是自己的 PID);被陈旧清理换主的文件不动
+    try { if (fs.readFileSync(pidFile, 'utf8').trim() === childPidStr) fs.rmSync(pidFile, { force: true }); } catch { /* 无文件 */ }
   });
-  fs.mkdirSync(path.dirname(pidFile), { recursive: true });
-  fs.writeFileSync(pidFile, String(child.pid));
   const waitHealthy = async (timeoutMs = 30_000) => {
-    // 健康检查不只看端口:子进程已退出(如端口被占 EADDRINUSE)即失败,
-    // 避免把同端口旧实例的 200 误判为新服务就绪(WT-P1-009)
+    // 就绪判定绑定本次实例(WT-P1-009):端口监听者必须是本子进程且健康 200。
+    // 普通实例占用端口时本子进程 EADDRINUSE 退出,监听者永远不是它——
+    // 原实例的 200 不再被误判为本次启动成功;并发竞争的败者同理。
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (childExited) return false;
-      try {
-        const res = await fetch(`http://127.0.0.1:${opts.port}/api/health`);
-        if (res.ok && !childExited) return true;
-      } catch { /* 未就绪 */ }
+      if (listenerPidFor(opts.port) === child.pid) {
+        try {
+          const res = await fetch(`http://127.0.0.1:${opts.port}/api/health`);
+          if (res.ok && !childExited) return true;
+        } catch { /* 未就绪 */ }
+      }
       await new Promise((r) => setTimeout(r, 400));
     }
     return false;

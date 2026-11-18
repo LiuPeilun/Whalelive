@@ -33,8 +33,11 @@ const extraSecrets = fs.existsSync(accessPath)
   : [];
 
 const { child, pid, waitHealthy } = startTestServer({ port, extraSecrets }); // 日志按端口:logFileFor(port)
-// 服务进程退出(被 --stop / 崩溃)时本保持器一并退出,不残留
-child.on('exit', () => process.exit(0));
+// 服务进程退出(被 --stop / 崩溃)时本保持器一并退出;退出码绑定启动结果——
+// 就绪失败(端口被普通实例占用/EADDRINUSE)时即使子进程退出也以非零退出,
+// 不掩盖启动失败(WT-P1-009)
+let healthyReached = false;
+child.on('exit', () => process.exit(healthyReached ? 0 : 1));
 console.log(`测试服务已启动 pid=${pid} port=${port}(登记 .tools/e2e-server-${port}.pid,日志脱敏写入 .tools/e2e-server-${port}.log)`);
 
 const healthy = await waitHealthy();
@@ -42,6 +45,7 @@ if (!healthy) {
   console.error(`服务在 30 秒内未就绪,退出(请检查 .tools/e2e-server-${port}.log)`);
   process.exit(1);
 }
+healthyReached = true;
 console.log(`健康检查通过: http://127.0.0.1:${port}/api/health`);
 // 保持前台:进程存活期间子服务存活;Ctrl+C 交由系统连带终止
 setInterval(() => {}, 1_000_000);
