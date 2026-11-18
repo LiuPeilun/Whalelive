@@ -50,16 +50,24 @@ async function attach() {
 }
 
 function killServer() {
+  // WT-P1-009:不按进程名全机匹配(会误停其他项目的 tsx 服务)。
+  // 归属依据 = 监听本脚本操作的测试端口,且命令行含本项目路径;
+  // 两者同时满足才终止,端口撞车或同名进程均不会波及。
   spawnSync('powershell', ['-NoProfile', '-Command',
-    "Get-CimInstance Win32_Process -Filter \"name='node.exe'\" | " +
-    `Where-Object { $_.ProcessId -ne ${process.pid} -and $_.CommandLine -match 'tsx' } | ` +
-    'ForEach-Object { Stop-Process -Id $_.ProcessId -Force }'], { stdio: 'ignore' });
+    `$conn = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; ` +
+    'if ($conn) { ' +
+    '$proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($conn.OwningProcess)"; ' +
+    // 端口监听者即测试服务归属(同端口仅一个监听者);再校验 node 进程与
+    // 服务入口名,连端口撞车下的误杀也排除。其他项目的 tsx 进程不监听
+    // 本端口,不会被选中。
+    `if ($proc -and $proc.Name -eq 'node.exe' -and $proc.CommandLine -match 'server[\/]main\.ts') { ` +
+    'Stop-Process -Id $conn.OwningProcess -Force } }'], { stdio: 'ignore' });
 }
 
 async function listTargets() {
   try {
     const list = await (await fetch('http://127.0.0.1:9336/json')).json();
-    return list.map((t) => `${t.type}:${(t.url || '').slice(0, 60)}`).join(' | ');
+    return list.map((t) => `${t.type}:${(t.url || '').split('#')[0].slice(0, 60)}`).join(' | ');
   } catch {
     return 'CDP 不可达';
   }
@@ -80,9 +88,16 @@ await sleep(6000);
 const probe1 = await evaluate('window.__wtWs ? {status: window.__wtWs.status, r: window.__wtWs.reconnects, ev: window.__wtWs.events} : null');
 log(`杀后探针: ${JSON.stringify(probe1)}`);
 
-// 后台重启服务(独立日志)
+// 后台重启服务(独立日志;落盘前过滤凭据,WT-P1-011 —— 启动横幅含完整凭据链接)
+const access = JSON.parse(fs.readFileSync(path.join(root, 'data', 'access.json'), 'utf8'));
 const serverLog = fs.openSync(path.join(root, '.tools', 'trace-server.log'), 'w');
-const server = spawn('npm', ['start'], { cwd: root, stdio: ['ignore', serverLog, serverLog], shell: true, detached: false });
+const redact = (chunk) => String(chunk)
+  .replaceAll(access.playback, '[playback-cred]')
+  .replaceAll(access.control, '[control-cred]');
+const server = spawn('npm', ['start'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], shell: true, detached: false });
+server.stdout.on('data', (d) => { try { fs.writeSync(serverLog, redact(d)); } catch { /* 关闭后忽略 */ } });
+server.stderr.on('data', (d) => { try { fs.writeSync(serverLog, redact(d)); } catch { /* 关闭后忽略 */ } });
+server.on('exit', () => { try { fs.closeSync(serverLog); } catch { /* 已关闭 */ } });
 log(`服务重启中(pid=${server.pid}),观察 40s…`);
 
 let lastSnapshot = '';
@@ -91,7 +106,7 @@ for (let i = 0; i < 40; i++) {
   let snap;
   try {
     snap = await evaluate(`JSON.stringify({
-      url: location.href.slice(0, 70),
+      url: location.pathname + location.search,
       nav: (performance.getEntriesByType('navigation')[0] || {}).type ?? 'none',
       probe: window.__wtWs ? { s: window.__wtWs.status, r: window.__wtWs.reconnects, le: window.__wtWs.lastError } : null,
       ph: (document.getElementById('placeholder') || {}).style?.display ?? '?',

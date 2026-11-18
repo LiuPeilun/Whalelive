@@ -53,10 +53,19 @@ export function createWsClient(opts: {
   // (e2e-reconnect 实测,页面不重载则 65s+ 不恢复)。业务重试无法穿透 socket
   // 层,连续多次握手悬挂时重载页面重建网络栈;凭据在 URL fragment,重载即恢复。
   // 服务真宕机时握手是快速 error(被拒),不会累计悬挂,不会误触发。
-  function maybeReloadForStuckSockets(): void {
+  // 重载前先探测文档可用(WT-P1-010):服务/文档暂不可用(5xx 等)时重载会把
+  // 页面留在错误文档上,探针与重连能力一并丢失;此时跳过本次,保持原页继续
+  // 重试,文档恢复后下一轮自愈条件达成时再重载。
+  async function maybeReloadForStuckSockets(): Promise<void> {
     connectTimeoutStreak += 1;
     if (connectTimeoutStreak < 3) return;
     connectTimeoutStreak = 0;
+    try {
+      const probe = await fetch(location.pathname + location.search, { cache: 'no-store' });
+      if (!probe.ok) return; // 文档暂不可用:不重载,原页保留重连能力
+    } catch {
+      return; // 文档请求失败(服务不可达):同样不重载
+    }
     try {
       const last = Number(sessionStorage.getItem('wtWsReloadAt') ?? '0');
       if (Date.now() - last < 30_000) return; // 防重载风暴:30s 内已重载过则退回纯重试
@@ -135,7 +144,7 @@ export function createWsClient(opts: {
         } catch {
           /* 忽略 */
         }
-        maybeReloadForStuckSockets();
+        void maybeReloadForStuckSockets(); // 异步探测文档,不阻塞本连接的重连调度
         scheduleReconnect();
       }
     }, 10_000);

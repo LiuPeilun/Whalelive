@@ -54,7 +54,9 @@ for (let i = 0; i < 30; i++) {
 }
 
 console.log('---- 结论 ----');
-console.log(`观察到 wtWsReloadAt 时间戳: ${sawReloadAt ? '是(自愈重载触发)' : '否'}`);
+console.log(`自愈重载路径(wtWsReloadAt): ${sawReloadAt ? '走到' : '未走到(可能 Vite 全量重载抢先恢复,属更快路径)'}`);
 console.log(`待机恢复: ${restoredAt ? `是(+${((restoredAt - t0) / 1000).toFixed(0)}s)` : '否(60s 窗口内未恢复)'}`);
 server.kill();
-process.exit(0);
+// 回归语义(WT-P1-010):门槛是恢复能力;自愈路径本身由 e2e-selfheal-503.mjs
+// 在文档不可用(Vite 无法代劳)的场景下定向验证。未恢复必须非零退出。
+process.exit(restoredAt ? 0 : 1);

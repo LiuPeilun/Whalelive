@@ -279,24 +279,56 @@ describe('playback 租约失效联动(WT-P0-007)', () => {
     }
   });
 
-  it('持有端断线注销进入安全等待,安全时刻后新端才可接管(WT-P1-004)', async () => {
+  it('持有端断线注销保留旧租约剩余生命的接管等待,不早于旧租约截止接管(WT-P1-004)', async () => {
     const sent: WsServerMessage[] = [];
     let t = 1_000;
     const cfg = () => ({ ...settings(), lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 800 } });
     const playback = createPlayback({ runId: 'run-1', settings: cfg, logger: silentLogger, now: () => t, urlForAsset: () => null });
     playback.registerRenderer('A', (m) => { sent.push(m); return true; });
     playback.registerRenderer('B', (m) => { sent.push(m); return true; });
-    expect(playback.requestLease('A').ok).toBe(true); // 租约远未到期
+    const leaseA = playback.requestLease('A');
+    expect(leaseA.ok).toBe(true); // expiresAt = 16_000,剩余 15s
 
-    // A 断线(未确认停声):注销后 B 立即申请仍被拒
+    // A 断线(未确认停声):关闭事件处理延迟可超过固定安全窗,安全期限必须
+    // 保留旧租约剩余生命(expiresAt + safety = 16_800),而不是断线时刻 + 800。
     playback.unregisterRenderer('A');
+    t = 1_801; // 旧实现的授予时刻:仍处于旧租约生命期内,必须被拒
+    const early = playback.requestLease('B');
+    expect(early.ok).toBe(false);
+    if (!early.ok) expect(early.retryAfterMs).toBeGreaterThan(14_000);
+
+    t = 16_700; // 旧租约截止 + 700ms(安全窗 800 内):仍被拒
+    const stillEarly = playback.requestLease('B');
+    expect(stillEarly.ok).toBe(false);
+
+    t = 16_801; // 旧租约截止 + 安全窗之后:接管成功
+    const granted = playback.requestLease('B');
+    expect(granted.ok).toBe(true);
+  });
+
+  it('断线端重连补发释放(停止确认)提前解除接管等待(WT-P1-004)', async () => {
+    const sent: WsServerMessage[] = [];
+    let t = 1_000;
+    const cfg = () => ({ ...settings(), lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 800 } });
+    const playback = createPlayback({ runId: 'run-1', settings: cfg, logger: silentLogger, now: () => t, urlForAsset: () => null });
+    playback.registerRenderer('A', (m) => { sent.push(m); return true; });
+    playback.registerRenderer('B', (m) => { sent.push(m); return true; });
+    const leaseA = playback.requestLease('A');
+    expect(leaseA.ok).toBe(true);
+    const oldLeaseId = leaseA.ok ? leaseA.leaseId : '';
+
+    playback.unregisterRenderer('A'); // A 断线,安全期限 = 16_800
     const early = playback.requestLease('B');
     expect(early.ok).toBe(false);
 
-    // 安全时刻(断线检测时刻 + 800ms)之后接管成功
-    t = 1_801;
-    const granted = playback.requestLease('B');
-    expect(granted.ok).toBe(true);
+    // A 重连(新连接分配新 rendererId),登记后补发断线前租约的释放:真实停止确认
+    playback.registerRenderer('A2', (m) => { sent.push(m); return true; });
+    expect(playback.releaseLease('A2', oldLeaseId)).toBe(true);
+    const immediate = playback.requestLease('B'); // 无需等安全时刻
+    expect(immediate.ok).toBe(true);
+
+    // 补发释放只匹配最近一次断线租约:无关 leaseId 不产生效果
+    expect(playback.releaseLease('A2', 'lease-not-exist')).toBe(false);
   });
 
   it('租约转交后停止指令发给实际派发端,而非新持有者(WT-P1-004)', async () => {

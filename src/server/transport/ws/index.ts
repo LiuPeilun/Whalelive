@@ -158,7 +158,8 @@ export function createWsTransport(deps: {
           send(conn.ws, { kind: 'lease-result', ok: true, leaseId: result.leaseId, ttlMs: result.ttlMs, renewIntervalMs: result.renewIntervalMs });
         } else {
           deps.logger.info('ws.lease-denied', { rendererId: conn.rendererId, code: result.code });
-          const msg: WsServerMessage = { kind: 'lease-result', ok: false, code: result.code };
+          // 带上安全期限的等待建议(WT-P1-004):页面按 retryAfterMs 重试,不做无谓轮询
+          const msg: WsServerMessage = { kind: 'lease-result', ok: false, code: result.code, retryAfterMs: result.retryAfterMs };
           send(conn.ws, msg);
         }
         return;
