@@ -41,6 +41,7 @@ export function validateLease(v: unknown): SettingsValidation {
   if (!isRecord(v)) return { ok: false, field: 'lease', reason: '必须是对象' };
   if (!isInt(v.ttlMs, 3_000, 120_000)) return { ok: false, field: 'lease.ttlMs', reason: '需为 3秒-2分钟 的毫秒数' };
   if (!isInt(v.renewIntervalMs, 500, 60_000)) return { ok: false, field: 'lease.renewIntervalMs', reason: '需为 0.5-60秒 的毫秒数' };
+  if (!isInt(v.takeoverSafetyMs, 0, 10_000)) return { ok: false, field: 'lease.takeoverSafetyMs', reason: '需为 0-10秒 的毫秒数' };
   if (typeof v.ttlMs === 'number' && typeof v.renewIntervalMs === 'number' && v.renewIntervalMs * 2 > v.ttlMs) {
     return { ok: false, field: 'lease.renewIntervalMs', reason: '续租间隔需小于租约时长的 1/2' };
   }

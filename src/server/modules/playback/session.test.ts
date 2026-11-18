@@ -183,6 +183,18 @@ describe('playback 会话单次完成', () => {
     expect(await pending).toEqual({ performanceId: 'pf-test', status: 'ended' });
   });
 
+  it('音频失败原因原样保留到服务端终态(WT-P1-006)', async () => {
+    const deps = makeDeps();
+    const sessions = createSessionManager(deps);
+    const withAudio = { ...makePerformance(), audioUrl: '/media/audio/x.wav' };
+    const pending = sessions.start({ performance: withAudio, asset: null, signal: new AbortController().signal });
+    expect(sessions.report(makeReport({ status: 'started' }))).toBe('accepted');
+    expect(sessions.report(makeReport({ track: 'audio', status: 'failed', reason: 'AUDIO_START_REJECTED' }))).toBe('accepted');
+    expect(sessions.report(makeReport({ status: 'ended' }))).toBe('accepted');
+    // 播放器上报的稳定音频错误码原样进入终态(此前被映射为 UNKNOWN,WT-P1-006)
+    expect(await pending).toEqual({ performanceId: 'pf-test', status: 'failed', code: 'AUDIO_START_REJECTED' });
+  });
+
   it('已中止的 signal 进入 start 直接兑现 cancelled,不派发(WT-P1-002)', async () => {
     const deps = makeDeps({ tryDispatch: vi.fn(() => true) as never });
     const sessions = createSessionManager(deps);

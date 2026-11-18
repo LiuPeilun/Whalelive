@@ -16,7 +16,8 @@
   },
   "lease": {
     "ttlMs": 15000,
-    "renewIntervalMs": 5000
+    "renewIntervalMs": 5000,
+    "takeoverSafetyMs": 800
   },
   "auth": {
     "timeoutMs": 5000

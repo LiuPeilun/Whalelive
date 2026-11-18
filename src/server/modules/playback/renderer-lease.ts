@@ -23,7 +23,7 @@ export type LeaseRequestResult =
 
 let leaseSeq = 0;
 
-export function createRendererRegistry(deps: { leaseTtlMs(): number; renewIntervalMs(): number; now(): number; logger: Logger }) {
+export function createRendererRegistry(deps: { leaseTtlMs(): number; renewIntervalMs(): number; takeoverSafetyMs(): number; now(): number; logger: Logger }) {
   const renderers = new Map<string, RendererHandle>();
   let lease: Lease | null = null;
 
@@ -65,6 +65,12 @@ export function createRendererRegistry(deps: { leaseTtlMs(): number; renewInterv
       if (lease.expiresAt > now) {
         const retryAfterMs = Math.max(200, lease.expiresAt - now);
         return { ok: false, code: 'LEASE_HELD', retryAfterMs };
+      }
+      // 接管安全窗(WT-P1-004):旧端本地截止(ttl+500)与 stop 消息处理尚有延迟,
+      // 过期后先等安全窗再授予,确保旧端真正静音后新端才发声(ARCHITECTURE §8 转交契约)。
+      const safeAt = lease.expiresAt + deps.takeoverSafetyMs();
+      if (now < safeAt) {
+        return { ok: false, code: 'LEASE_HELD', retryAfterMs: Math.max(200, safeAt - now) };
       }
       deps.logger.info('playback.lease-expired-takeover', { old: lease.rendererId, leaseId: lease.leaseId });
     }

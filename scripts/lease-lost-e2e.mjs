@@ -55,7 +55,7 @@ const original = await http('/api/settings', { headers: { authorization: `Bearer
 const originalVersion = original.body.savedVersion;
 const originalSettings = original.body.user;
 const tightened = JSON.parse(JSON.stringify(originalSettings));
-tightened.lease = { ttlMs: 3000, renewIntervalMs: 1000 };
+tightened.lease = { ttlMs: 3000, renewIntervalMs: 1000, takeoverSafetyMs: 0 }; // 安全窗 0:本场景专测过期回收路径
 const tightenResult = await http('/api/settings', {
   method: 'PUT',
   headers: controlAuth,

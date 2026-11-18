@@ -46,6 +46,7 @@ export function createPlayback(deps: {
   const registry = createRendererRegistry({
     leaseTtlMs: () => deps.settings().lease.ttlMs,
     renewIntervalMs: () => deps.settings().lease.renewIntervalMs,
+    takeoverSafetyMs: () => deps.settings().lease.takeoverSafetyMs,
     now: deps.now,
     logger: deps.logger,
   });

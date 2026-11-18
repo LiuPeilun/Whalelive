@@ -20,6 +20,8 @@ export type PlaybackSettings = {
 export type LeaseSettings = {
   ttlMs: number;
   renewIntervalMs: number;
+  /** 接管安全窗:旧租约过期后,再等该窗口(覆盖旧端本地截止与停止消息处理)才允许新端接管发声。 */
+  takeoverSafetyMs: number;
 };
 
 /** 界面可编辑并写入 data/config 的用户覆盖。 */

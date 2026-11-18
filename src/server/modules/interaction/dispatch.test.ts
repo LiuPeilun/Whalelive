@@ -25,7 +25,7 @@ function settings(): EffectiveSettings {
     queue: { capacity: 20, chatTtlMs: 30_000, userCooldownMs: 0 },
     gift: { mergeWindowMs: 2_000 },
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
-    lease: { ttlMs: 15_000, renewIntervalMs: 5_000 },
+    lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 0 },
     server: { host: '127.0.0.1', port: 3210 },
     platform: 'mock',
     auth: { timeoutMs: 5_000 },
