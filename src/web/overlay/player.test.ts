@@ -167,6 +167,45 @@ describe('播放器迟到回调归属(WT-P1-003)', () => {
     expect(reports.some((r) => r.track === 'animation' && r.status === 'ended')).toBe(true);
   });
 
+  it('音频准备失败不拖垮动画:无声降级且字幕显示(WT-P1-008)', async () => {
+    const { track, pendingPrepares } = makeAudioTrack();
+    const { player, reports, els, clips } = makePlayer(track);
+
+    player.play(dispatch('pf-a', 'dance', false)); // 一次性动作,动画可自然结束
+    await idle();
+    // 音频加载失败(如 404)
+    pendingPrepares[0]!.deferred.reject(new Error('audio-load-failed'));
+    await idle();
+    // 视频照常准备并起播
+    expect(clips.length).toBe(1);
+    expect(reports.some((r) => r.track === 'animation' && r.status === 'ready')).toBe(true);
+    expect(reports.some((r) => r.track === 'animation' && r.status === 'started')).toBe(true);
+    expect(reports.some((r) => r.track === 'audio' && r.status === 'failed' && r.reason === 'AUDIO_LOAD_FAILED')).toBe(true);
+    expect(reports.some((r) => r.track === 'animation' && r.status === 'failed')).toBe(false); // 动画未被连累
+    expect(els.caption.style.display).toBe('block'); // 字幕显示(无声降级仍展示)
+    expect(els.caption.textContent).toBe('say-pf-a');
+
+    // 一次性动作自然结束 → 动画 ended(服务端终态 failed(AUDIO_LOAD_FAILED) 而非 ASSET_MISSING)
+    (clips[0] as PreparedClip & { endedDeferred: { resolve: () => void } }).endedDeferred.resolve();
+    await idle();
+    expect(reports.some((r) => r.track === 'animation' && r.status === 'ended')).toBe(true);
+  });
+
+  it('双轨都失败:动画报 ASSET_MISSING、音频报 AUDIO_LOAD_FAILED,字幕仍展示(WT-P1-008)', async () => {
+    const { track, pendingPrepares } = makeAudioTrack();
+    const { player, reports, els } = makePlayer(track);
+    // 视频准备失败:通过 asset 不可用走素材失败分支
+    const d = dispatch('pf-b', 'talk', true);
+    d.asset = { url: '', mime: 'video/webm', loop: true, available: false };
+    player.play(d);
+    await idle();
+    pendingPrepares[0]!.deferred.reject(new Error('audio-load-failed'));
+    await idle();
+    expect(reports.some((r) => r.track === 'animation' && r.status === 'failed' && r.reason === 'ASSET_MISSING')).toBe(true);
+    expect(reports.some((r) => r.track === 'audio' && r.status === 'failed' && r.reason === 'AUDIO_LOAD_FAILED')).toBe(true);
+    expect(els.caption.style.display).toBe('block'); // 字幕无条件展示
+  });
+
   it('旧句柄迟到的 begin 成功确认不替新表演上报 started', async () => {
     const { track, pendingPrepares } = makeAudioTrack();
     const { player, reports } = makePlayer(track);

@@ -240,6 +240,45 @@ describe('playback 租约失效联动(WT-P0-007)', () => {
     expect(dispatchedActions(sent).length).toBe(0); // 已取消任务从未派发
   });
 
+  it('定时回收后安全窗仍生效,到期才允许接管;显式释放立即接管(WT-P1-004)', async () => {
+    const sent: WsServerMessage[] = [];
+    let t = 0;
+    const cfg = () => ({ ...settings(), lease: { ttlMs: 3_000, renewIntervalMs: 1_000, takeoverSafetyMs: 800 } });
+    const playback = createPlayback({ runId: 'run-1', settings: cfg, logger: silentLogger, now: () => t, urlForAsset: () => null });
+    playback.registerRenderer('A', (m) => { sent.push(m); return true; });
+    playback.registerRenderer('B', (m) => { sent.push(m); return true; });
+    expect(playback.requestLease('A').ok).toBe(true);
+
+    // 回收前申请:被拒,剩余等待 ≈ 780ms(时钟 3020)
+    t = 3_020;
+    const beforeTick = playback.requestLease('B');
+    expect(beforeTick.ok).toBe(false);
+    if (!beforeTick.ok) expect(beforeTick.retryAfterMs).toBeGreaterThanOrEqual(700);
+
+    // 定时回收清除持有者后,安全等待依然存在(WT-P1-004 核心)
+    playback.tick();
+    const afterTick = playback.requestLease('B');
+    expect(afterTick.ok).toBe(false);
+    if (!afterTick.ok) expect(afterTick.retryAfterMs).toBeGreaterThan(0);
+
+    // 安全时刻(3800)之后:接管成功
+    t = 3_801;
+    const granted = playback.requestLease('B');
+    expect(granted.ok).toBe(true);
+
+    // 显式释放路径:停止确认后新端立即接管,无等待
+    t = 10_000;
+    playback.tick(); // B 租约过期回收
+    const holderLease = playback.requestLease('A'); // A 重新持有
+    expect(holderLease.ok).toBe(true);
+    if (holderLease.ok) {
+      t = 20_000;
+      expect(playback.releaseLease('A', holderLease.leaseId)).toBe(true); // A 显式释放
+      const immediate = playback.requestLease('B'); // B 无需等安全窗
+      expect(immediate.ok).toBe(true);
+    }
+  });
+
   it('租约转交后停止指令发给实际派发端,而非新持有者(WT-P1-004)', async () => {
     const sentA: WsServerMessage[] = [];
     const sentB: WsServerMessage[] = [];

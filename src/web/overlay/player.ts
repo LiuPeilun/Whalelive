@@ -139,7 +139,8 @@ export function createPlayer(deps: {
       }, performance.say === '' ? 800 : subtitleEstimateMs(performance.say));
     };
 
-    if (!asset || !asset.available) {
+    const assetUnavailable = !asset || !asset.available;
+    if (assetUnavailable && !hasAudio) {
       showPlaceholder(`动作 ${performance.action}(素材未配置)`, deps.placeholder, deps.placeholderLabel);
       finishAnimationOnly(ErrorCodes.ASSET_MISSING);
       return;
@@ -147,8 +148,9 @@ export function createPlayer(deps: {
 
     if (!hasAudio) {
       // 纯动画(P0 语义):非循环一轮即结束,循环动作一轮结束
+      // (assetUnavailable 且无音频已在上方同步收尾,此处 asset 必可用)
       deps.video
-        .prepareAction(asset.url, asset.loop)
+        .prepareAction(asset!.url, asset!.loop)
         .then((clip) => {
           if (token !== playToken) {
             clip.stop();
@@ -179,19 +181,27 @@ export function createPlayer(deps: {
     // - 一次性动作(如 dance)自然播完,即使确认音频先结束也不截断;
     // - 两轨各自上报终态,全部终态后再清理回待机。
     void (async () => {
-      const speechLoop = asset.loop; // 清单 loop 标记即“说话/待机”类
+      const speechLoop = asset?.loop === true; // 清单 loop 标记即“说话/待机”类(素材缺失时按说话类收尾)
       let clip: import('./video-track.js').PreparedClip | null = null;
       let audioHandle: import('./audio-track.js').AudioHandle | null = null;
+      // 双轨准备分别捕获(WT-P1-008):音频失败不拖垮动画与字幕,动画失败不拖垮音频
       try {
         audioHandle = await deps.audio.prepare(audioUrl);
-        if (token !== playToken) {
-          // 迟到加载:句柄已在轨道侧失效,元素已被丢弃;
-          // 不触碰共享轨道(那里可能是新表演的元素,WT-P1-003),直接弃置本任务。
-          return;
-        }
-        clip = await deps.video.prepareAction(asset.url, asset.loop, speechLoop); // 仅说话类 endless
       } catch {
-        clip = null;
+        audioHandle = null; // 句柄弃置(含 superseded),走无声降级
+      }
+      if (token !== playToken) {
+        // 迟到加载:不触碰共享轨道(那里可能是新表演的元素,WT-P1-003),直接弃置本任务。
+        return;
+      }
+      if (assetUnavailable) {
+        clip = null; // 素材缺失:不准备视频,音频路径保留(WT-P1-008)
+      } else {
+        try {
+          clip = await deps.video.prepareAction(asset!.url, asset!.loop, speechLoop); // 仅说话类 endless
+        } catch {
+          clip = null;
+        }
       }
       if (token !== playToken) {
         clip?.stop(); // clip 仅操作本任务自己的缓冲位
@@ -200,13 +210,13 @@ export function createPlayer(deps: {
       }
       const audioOk = audioHandle !== null;
 
-      // 动画素材失败:动画回报失败,音频照常(可听),字幕保留估算时长
+      // 动画素材失败:动画回报失败,字幕无条件展示;音频可用时照常发声(WT-P1-008)
       if (clip === null) {
         showPlaceholder(`动作 ${performance.action}(素材加载失败)`, deps.placeholder, deps.placeholderLabel);
         deps.report('animation', 'failed', ErrorCodes.ASSET_MISSING);
+        showCaption(performance.say); // 字幕不依赖音频可用性
         if (audioOk && audioHandle !== null) {
           deps.report('audio', 'ready');
-          showCaption(performance.say);
           if (await audioHandle.begin({ audible })) {
             if (token !== playToken) return; // 迟到起播确认:不替新任务上报(WT-P1-003)
             deps.report('audio', 'started');
@@ -220,6 +230,7 @@ export function createPlayer(deps: {
         } else {
           deps.report('audio', 'failed', 'AUDIO_LOAD_FAILED');
         }
+        // 双轨各自的终态都已上报;字幕保留估算时长后回收(WT-P1-008)
         window.setTimeout(() => {
           if (token !== playToken) return;
           hideCaption();

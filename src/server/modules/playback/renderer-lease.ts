@@ -26,6 +26,9 @@ let leaseSeq = 0;
 export function createRendererRegistry(deps: { leaseTtlMs(): number; renewIntervalMs(): number; takeoverSafetyMs(): number; now(): number; logger: Logger }) {
   const renderers = new Map<string, RendererHandle>();
   let lease: Lease | null = null;
+  // 定时回收清除 lease 后仍保留的接管期限(WT-P1-004):sweep 与申请触发回收
+  // 必须走同一安全条件;旧端显式释放(停止确认)即刻清零。
+  let lastExpiredSafeUntil = 0;
 
   function register(rendererId: string, send: RendererHandle['send']): void {
     renderers.set(rendererId, { rendererId, send, connectedAt: deps.now() });
@@ -66,15 +69,18 @@ export function createRendererRegistry(deps: { leaseTtlMs(): number; renewInterv
         const retryAfterMs = Math.max(200, lease.expiresAt - now);
         return { ok: false, code: 'LEASE_HELD', retryAfterMs };
       }
-      // 接管安全窗(WT-P1-004):旧端本地截止(ttl+500)与 stop 消息处理尚有延迟,
-      // 过期后先等安全窗再授予,确保旧端真正静音后新端才发声(ARCHITECTURE §8 转交契约)。
-      const safeAt = lease.expiresAt + deps.takeoverSafetyMs();
-      if (now < safeAt) {
-        return { ok: false, code: 'LEASE_HELD', retryAfterMs: Math.max(200, safeAt - now) };
-      }
+    }
+    // 接管安全窗(WT-P1-004):不论租约是被申请路径还是定时 sweep 回收,
+    // 旧端本地截止(ttl+500)与 stop 处理延迟都需要这一窗口;显式释放(停止确认)已清零。
+    const safeUntil = lease !== null ? lease.expiresAt + deps.takeoverSafetyMs() : lastExpiredSafeUntil;
+    if (now < safeUntil) {
+      return { ok: false, code: 'LEASE_HELD', retryAfterMs: Math.max(200, safeUntil - now) };
+    }
+    if (lease !== null) {
       deps.logger.info('playback.lease-expired-takeover', { old: lease.rendererId, leaseId: lease.leaseId });
     }
     leaseSeq += 1;
+    lastExpiredSafeUntil = 0; // 新租约成立,旧期限作废
     lease = { leaseId: `lease-${leaseSeq}-${Math.random().toString(36).slice(2, 8)}`, rendererId, grantedAt: now, expiresAt: now + ttlMs };
     deps.logger.info('playback.lease-granted', { rendererId, leaseId: lease.leaseId, ttlMs });
     return { ok: true, leaseId: lease.leaseId, ttlMs };
@@ -88,6 +94,7 @@ export function createRendererRegistry(deps: { leaseTtlMs(): number; renewInterv
 
   function releaseLease(rendererId: string, leaseId: string): boolean {
     if (!lease || lease.leaseId !== leaseId || lease.rendererId !== rendererId) return false;
+    lastExpiredSafeUntil = 0; // 旧端显式释放即停止确认,新端可立即接管
     lease = null;
     deps.logger.info('playback.lease-released', { rendererId, leaseId });
     return true;
@@ -97,7 +104,8 @@ export function createRendererRegistry(deps: { leaseTtlMs(): number; renewInterv
   function sweep(): string | null {
     if (lease && lease.expiresAt <= deps.now()) {
       const lostId = lease.leaseId;
-      deps.logger.info('playback.lease-expired', { rendererId: lease.rendererId, leaseId: lostId });
+      lastExpiredSafeUntil = lease.expiresAt + deps.takeoverSafetyMs(); // 回收不清除安全等待(WT-P1-004)
+      deps.logger.info('playback.lease-expired', { rendererId: lease.rendererId, leaseId: lostId, safeUntil: lastExpiredSafeUntil });
       lease = null;
       return lostId;
     }
