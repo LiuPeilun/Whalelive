@@ -40,6 +40,17 @@ function openEdgePage(marker) {
   ], { stdio: 'ignore' });
 }
 
+/** 轮询等待播放端登记数达到目标(固定等待在慢机器上会漏登记,审核观察项) */
+async function waitForRendererCount(target, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const resp = await http('/api/state', { headers: { authorization: `Bearer ${access.control}` } });
+    if ((resp.body?.renderers?.count ?? 0) >= target) return resp.body;
+    if (Date.now() > deadline) return resp.body;
+    await sleep(500);
+  }
+}
+
 async function waitHolder(expectedHolder) {
   for (let i = 0; i < 30; i++) {
     await sleep(500);
@@ -69,11 +80,10 @@ async function main() {
   const holder = await waitHolder(null);
   check('A(持有端)取得租约', holder !== null);
   openEdgePage(markerB);
-  await sleep(2_500);
+  await waitForRendererCount(2);
   openEdgePage(markerC);
-  await sleep(2_500);
-  const r = await http('/api/state', { headers: { authorization: `Bearer ${access.control}` } });
-  check('双候补登记完成(≥3 端,A 仍持有)', (r.body?.renderers?.count ?? 0) >= 3 && r.body?.renderers?.leaseHolderRendererId === holder, JSON.stringify(r.body?.renderers));
+  const r = await waitForRendererCount(3);
+  check('双候补登记完成(≥3 端,A 仍持有)', (r.renderers?.count ?? 0) >= 3 && r.renderers?.leaseHolderRendererId === holder, JSON.stringify(r.renderers));
 
   // A 断线(杀 Edge 进程:无 beforeunload,走 unregister 安全期限路径)
   const deniedBefore = (logText().match(/ws\.lease-denied/g) ?? []).length;

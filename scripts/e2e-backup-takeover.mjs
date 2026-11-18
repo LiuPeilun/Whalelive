@@ -31,11 +31,12 @@ async function http(pathname, init) {
   return { status: response.status, body };
 }
 
-async function openEdgePage() {
-  // 每页一个独立 profile,保证两个渲染端
+async function openEdgePage(cdpPort) {
+  // 每页一个独立 profile 与独立调试端口:共用调试端口时第二个 Edge 实例
+  // 绑定失败,页面不在 CDP 中,登记等待只能靠盲等(负载下漏判,复审观察项)
   const marker = `edge-profile-bt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   spawnSync('C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', [
-    '--headless=new', '--remote-debugging-port=9341',
+    '--headless=new', `--remote-debugging-port=${cdpPort}`,
     `--user-data-dir=${path.join(root, '.tools', marker)}`,
     '--no-first-run', '--window-size=480,360', '--mute-audio', '--autoplay-policy=no-user-gesture-required',
     `${base}/overlay?audio=1#${encodeURIComponent(access.playback)}`,
@@ -44,9 +45,9 @@ async function openEdgePage() {
   for (let i = 0; i < 40; i++) {
     await sleep(500);
     try {
-      const list = await (await fetch('http://127.0.0.1:9341/json')).json();
+      const list = await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json();
       const page = list.find((t) => t.type === 'page' && t.url.includes('/overlay'));
-      if (page) return { targetId: page.id, wsUrl: page.webSocketDebuggerUrl, marker };
+      if (page) return { targetId: page.id, wsUrl: page.webSocketDebuggerUrl, marker, cdpPort };
     } catch { /* retry */ }
   }
   throw new Error('CDP 目标页未出现');
@@ -83,9 +84,20 @@ function logText() {
   }
 }
 
+/** 轮询等待播放端登记数达到目标(固定等待在慢启动下漏判) */
+async function waitForRendererCount(target, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const s = await stateNow();
+    if ((s.renderers?.count ?? 0) >= target) return s;
+    if (Date.now() > deadline) return s;
+    await sleep(500);
+  }
+}
+
 async function main() {
   // A(主)先开:取得租约并进入待机
-  const pageA = await openEdgePage();
+  const pageA = await openEdgePage(9341);
   const cdpA = await pageIdle(pageA.wsUrl);
   let holder = null;
   for (let i = 0; i < 20; i++) {
@@ -96,10 +108,9 @@ async function main() {
   check('A(主播放端)取得租约', holder !== null, JSON.stringify((await stateNow()).renderers));
 
   // B(候补)后开:登记后申请被拒,进入较长等待
-  const pageB = await openEdgePage();
+  const pageB = await openEdgePage(9343);
   const cdpB = await pageIdle(pageB.wsUrl);
-  await sleep(2_000); // B 申请被拒(A 持有,B 记录 ~15s 等待)
-  const sAfterB = await stateNow();
+  const sAfterB = await waitForRendererCount(2); // B 申请被拒(A 持有,B 记录 ~15s 等待)
   check('B 登记后处于候补(A 仍持有)', (sAfterB.renderers?.count ?? 0) >= 2 && sAfterB.renderers?.leaseHolderRendererId === holder, JSON.stringify(sAfterB.renderers));
   cdpB.close();
 

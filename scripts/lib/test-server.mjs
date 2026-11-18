@@ -1,12 +1,15 @@
 // 测试服务管理(WT-P1-009):e2e 类脚本「杀服务」的归属不再靠进程名/端口猜测,
 // 改为只管理由本模块启动并记录 PID 的服务进程。
-// - startTestServer:以绝对入口路径启动(node tsx/cli.mjs D:\...\src\server\main.ts),
-//   命令行因此携带项目入口绝对路径;PID 写入 .tools/e2e-server.pid;
+// - startTestServer:单进程启动(node --import tsx <绝对入口>),命令行携带项目
+//   入口绝对路径;PID 按端口写入 .tools/e2e-server-<port>.pid;
 // - stopTestServer:读 PID → 校验其命令行含本项目入口绝对路径(正反斜杠、
 //   大小写均可)→ 仅校验通过才停止。同端口同名异项目入口、PID 复用均不会命中;
 // - commandLineOwnsEntry 导出为纯函数,供合成记录验证(异项目同名入口拒绝、
 //   实际 Windows 路径接受)。
-// 日志统一走行缓冲脱敏(WT-P1-011)。
+// 启动并发与失败路径(WT-P1-009):跨进程启动锁串行化整个临界区;任一步失败
+// 终止已创建的子进程并等待退出,再释放登记;锁回收前重新核对内容与文件标识,
+// 不按早先读到的状态删除其他启动器新取得的锁;释放核对 nonce。日志统一走
+// 行缓冲脱敏(WT-P1-011)。
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,8 +19,6 @@ import { createRedactingWriter } from './redact-log.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-// 按端口登记与日志(WT-P1-009):同一工作区可在不同端口并行启动多个测试服务,
-// 各自独立登记与日志;停止按目标端口的登记文件核对,互不影响。
 function pidFileFor(port) {
   return path.join(root, '.tools', `e2e-server-${port}.pid`);
 }
@@ -27,16 +28,24 @@ export function logFileFor(port) {
   return path.join(root, '.tools', `e2e-server-${port}.log`);
 }
 
+function execPowerShell(command) {
+  try {
+    return String(execFileSync('powershell', ['-NoProfile', '-Command', command], { encoding: 'utf8' }));
+  } catch {
+    return '';
+  }
+}
+
+/** PID 是否仍存活(不校验入口;用于启动锁持有者检查) */
+function pidAlive(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  return execPowerShell(`if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { 'alive' } else { 'dead' }`).trim() === 'alive';
+}
+
 /** PID 是否仍存活且命令行含本项目入口(活跃登记判定) */
 function pidAliveOwnsEntry(pid) {
-  let cmdLine = '';
-  try {
-    cmdLine = String(execFileSync('powershell', ['-NoProfile', '-Command',
-      `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`], { encoding: 'utf8' }));
-  } catch {
-    return false;
-  }
-  return commandLineOwnsEntry(cmdLine);
+  if (!pidAlive(pid)) return false;
+  return commandLineOwnsEntry(execPowerShell(`(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`));
 }
 
 export function entryPath() {
@@ -50,49 +59,78 @@ export function commandLineOwnsEntry(cmdLine, entry = entryPath()) {
   return upper.includes(entry.toUpperCase()) || upper.includes(entry.replaceAll('\\', '/').toUpperCase());
 }
 
-/** 端口在健康 URL 同一地址(127.0.0.1)上的监听者 PID(无监听时 null)。
+/** 健康地址(127.0.0.1)上的端口监听者 PID(无监听时 null)。
  * 只筛端口会先命中 IPv6(::1)监听者,与健康地址不符导致误判未就绪(WT-P1-009)。 */
 function listenerPidFor(port) {
-  try {
-    const out = String(execFileSync('powershell', ['-NoProfile', '-Command',
-      `(Get-NetTCPConnection -LocalPort ${port} -LocalAddress 127.0.0.1 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess`], { encoding: 'utf8' }));
-    const pid = Number(out.trim());
-    return Number.isFinite(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
+  const out = execPowerShell(`(Get-NetTCPConnection -LocalPort ${port} -LocalAddress 127.0.0.1 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess`);
+  const pid = Number(out.trim());
+  return Number.isFinite(pid) && pid > 0 ? pid : null;
 }
 
-// 启动互斥锁(WT-P1-009):陈旧登记的"读-校验-删除-重新占用"不是原子的——
-// 删除与重新占用之间可能被并发启动器插占,双方都创建服务子进程。把整个
-// 启动临界区(陈旧回收 → 独占登记 → 日志 → spawn → 写 PID)放进同一把
-// 跨进程锁串行化,所有启动竞态归零。锁超时兜底:持有者崩溃残留时按 mtime
-// 超时(60s)视为陈旧可抢。
+// 启动互斥锁(WT-P1-009):整个启动临界区(陈旧回收→独占登记→日志→spawn→
+// 写 PID)由跨进程锁串行化。锁内容携带持有者 PID 与随机 nonce:
+// - 回收陈旧锁前重新核对内容与文件标识(ino),与判定时不一致即放弃 ——
+//   绝不按早先读到的状态删除其他启动器新取得的锁;
+// - 释放时核对内容仍是自己写入的 nonce,对应不上则不删除(已被换主)。
 const START_LOCK = path.join(root, '.tools', 'e2e-server-start.lock');
+const STALE_LOCK_MS = 60_000;
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function inspectStartLock() {
+  try {
+    const content = fs.readFileSync(START_LOCK, 'utf8').trim();
+    const st = fs.statSync(START_LOCK);
+    return { content, ino: st.ino, mtimeMs: st.mtimeMs };
+  } catch {
+    return null; // 不存在
+  }
+}
 
 async function acquireStartLock(timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    const nonce = `${process.pid} ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
       const fd = fs.openSync(START_LOCK, 'wx');
-      fs.writeSync(fd, `${process.pid} ${Date.now()}`);
-      return fd;
+      fs.writeSync(fd, nonce);
+      return { fd, nonce };
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
-      try {
-        const stat = fs.statSync(START_LOCK);
-        if (Date.now() - stat.mtimeMs > 60_000) fs.rmSync(START_LOCK, { force: true }); // 陈旧锁
-      } catch { /* 竞态中被释放:下轮 wx 即可成功 */ }
-      if (Date.now() > deadline) throw new Error('启动锁获取超时(并发启动过多或存在陈旧锁 .tools/e2e-server-start.lock)');
-      await sleepMs(300);
     }
+    const cur = inspectStartLock();
+    if (cur !== null) {
+      const holderPid = Number(cur.content.split(' ')[0] ?? '');
+      const stale = cur.content === ''
+        || !Number.isFinite(holderPid) || holderPid <= 0 || !pidAlive(holderPid)
+        || Date.now() - cur.mtimeMs > STALE_LOCK_MS;
+      if (stale) {
+        // 回收前重新核对:内容与文件标识仍与刚才判定的一致才删除。
+        // 已被其他启动器收走并重建(ino 或内容变化)则放弃本次回收,回到 wx
+        // 重试 —— 不删除他人的新锁(WT-P1-009)。剩余窗口为核对与删除之间的
+        // 单次系统调用间隔,需要另一启动器在该间隔内完成整套回收+重建,实践中不可达。
+        const re = inspectStartLock();
+        if (re !== null && re.ino === cur.ino && re.content === cur.content) {
+          try { fs.rmSync(START_LOCK, { force: true }); } catch { /* 竞态:重试即可 */ }
+        }
+        continue;
+      }
+    }
+    if (Date.now() > deadline) {
+      throw new Error('启动锁获取超时(并发启动过多或存在陈旧锁 .tools/e2e-server-start.lock)');
+    }
+    await sleepMs(300);
   }
 }
 
-function releaseStartLock(fd) {
-  try { fs.closeSync(fd); } catch { /* 已关闭 */ }
-  try { fs.rmSync(START_LOCK, { force: true }); } catch { /* 已释放 */ }
+function releaseStartLock(lock) {
+  if (!lock) return;
+  // 释放对应当前持有者:内容仍是自己写入的 nonce 才删除;对应不上(被换主)不删
+  try {
+    if (fs.readFileSync(START_LOCK, 'utf8').trim() === lock.nonce) {
+      fs.rmSync(START_LOCK, { force: true });
+    }
+  } catch { /* 已被收走或不存在 */ }
+  try { fs.closeSync(lock.fd); } catch { /* 已关闭 */ }
 }
 
 /**
@@ -106,9 +144,11 @@ export async function startTestServer(opts) {
   if (!fs.existsSync(path.join(root, 'node_modules', 'tsx'))) throw new Error('tsx 依赖不存在(请先 npm install)');
   const pidFile = pidFileFor(opts.port);
   fs.mkdirSync(path.dirname(pidFile), { recursive: true });
-  const lockFd = await acquireStartLock();
+  const lock = await acquireStartLock(opts.startLockTimeoutMs ?? 30_000);
   let occupied = false; // 本次启动是否已持有端口登记(任一步失败时释放)
   let logFd = null;
+  let child = null;
+  let childExited = false;
   try {
     // --- 临界区:陈旧回收 + 独占登记(互斥锁内,无插占窗口) ---
     try {
@@ -135,7 +175,7 @@ export async function startTestServer(opts) {
     logFd = fs.openSync(logFile, 'w');
     const redactor = createRedactingWriter(logFd, opts.extraSecrets ?? []);
     // --- spawn 单进程服务 ---
-    const child = spawn(process.execPath, ['--import', 'tsx', entryPath()], {
+    child = spawn(process.execPath, ['--import', 'tsx', entryPath()], {
       cwd: root,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, PORT: String(opts.port) },
@@ -143,12 +183,10 @@ export async function startTestServer(opts) {
     child.stdout.on('data', (d) => redactor.push(d));
     child.stderr.on('data', (d) => redactor.push(d));
     const childPidStr = String(child.pid);
-    fs.writeFileSync(pidFile, childPidStr); // 覆写自己占用的文件(writeFileSync 截断)
-    let childExited = false;
+    fs.writeFileSync(pidFile, childPidStr); // 失败(如 EIO)进入下方收尾:子进程会被终止
     child.on('exit', () => { childExited = true;
       redactor.flush();
-      try { fs.closeSync(logFd); } catch { /* 已关闭 */ }
-      logFd = null;
+      try { fs.closeSync(logFd); logFd = null; } catch { /* 已关闭 */ }
       // 仅清理本次启动持有的登记(内容仍是自己的 PID);被陈旧清理换主的文件不动
       try { if (fs.readFileSync(pidFile, 'utf8').trim() === childPidStr) fs.rmSync(pidFile, { force: true }); } catch { /* 无文件 */ }
     });
@@ -171,12 +209,20 @@ export async function startTestServer(opts) {
     };
     return { child, pid: child.pid, waitHealthy };
   } catch (err) {
-    // 占用后的任一步失败都释放本次启动拥有的记录(WT-P1-009)
-    if (occupied) fs.rmSync(pidFile, { force: true });
+    // 失败收尾(WT-P1-009):已创建的子进程必须终止并等待退出,再释放本次
+    // 启动占用的记录 —— 服务不得在启动报错后继续运行(无登记不可停止)。
+    if (child !== null && !childExited) {
+      try { child.kill(); } catch { /* 已退出 */ }
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 3_000);
+        child.once('exit', () => { clearTimeout(timer); resolve(); });
+      });
+    }
+    if (occupied) { try { fs.rmSync(pidFile, { force: true }); } catch { /* 已清理 */ } }
     if (logFd !== null) { try { fs.closeSync(logFd); } catch { /* 已关闭 */ } }
     throw err;
   } finally {
-    releaseStartLock(lockFd);
+    releaseStartLock(lock);
   }
 }
 
@@ -188,13 +234,7 @@ export function stopTestServer(port) {
   }
   const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
   if (!Number.isFinite(pid)) throw new Error('PID 文件内容损坏,请手动清理后重新启动');
-  let cmdLine = '';
-  try {
-    cmdLine = String(execFileSync('powershell', ['-NoProfile', '-Command',
-      `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`], { encoding: 'utf8' }));
-  } catch {
-    /* 查询失败按进程不存在处理 */
-  }
+  const cmdLine = execPowerShell(`(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`);
   if (!commandLineOwnsEntry(cmdLine)) {
     fs.rmSync(pidFile, { force: true }); // 进程已退出或 PID 被复用:仅清登记,不动进程
     throw new Error(`端口 ${port} 的 PID ${pid} 命令行不含本项目服务入口,拒绝停止(进程可能已退出或 PID 被复用)`);
