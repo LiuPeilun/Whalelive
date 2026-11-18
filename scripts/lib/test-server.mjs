@@ -16,10 +16,27 @@ import { createRedactingWriter } from './redact-log.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-// 按端口登记(WT-P1-009):同一工作区可在不同端口并行启动多个测试服务,
-// 各自独立登记;停止按目标端口的登记文件核对,互不影响。
+// 按端口登记与日志(WT-P1-009):同一工作区可在不同端口并行启动多个测试服务,
+// 各自独立登记与日志;停止按目标端口的登记文件核对,互不影响。
 function pidFileFor(port) {
   return path.join(root, '.tools', `e2e-server-${port}.pid`);
+}
+
+/** 该端口测试服务的日志文件(行缓冲脱敏写入);回归脚本按同一入口读取 */
+export function logFileFor(port) {
+  return path.join(root, '.tools', `e2e-server-${port}.log`);
+}
+
+/** PID 是否仍存活且命令行含本项目入口(活跃登记判定) */
+function pidAliveOwnsEntry(pid) {
+  let cmdLine = '';
+  try {
+    cmdLine = String(execFileSync('powershell', ['-NoProfile', '-Command',
+      `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`], { encoding: 'utf8' }));
+  } catch {
+    return false;
+  }
+  return commandLineOwnsEntry(cmdLine);
 }
 
 export function entryPath() {
@@ -40,8 +57,20 @@ export function commandLineOwnsEntry(cmdLine, entry = entryPath()) {
 export function startTestServer(opts) {
   const tsxCli = path.join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs');
   if (!fs.existsSync(tsxCli)) throw new Error(`tsx CLI 不存在: ${tsxCli}`);
-  fs.mkdirSync(path.dirname(opts.logFile), { recursive: true });
-  const logFd = fs.openSync(opts.logFile, 'w');
+  const pidFile = pidFileFor(opts.port);
+  // 重复启动守卫(WT-P1-009):该端口已有活跃登记时拒绝启动——否则第二个进程
+  // 会在 EADDRINUSE 退出时清掉自己覆盖写入的登记,原实例从此无法经 --stop 停止。
+  // 陈旧登记(进程已退出/PID 被复用)则清理后放行。
+  if (fs.existsSync(pidFile)) {
+    const registered = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    if (Number.isFinite(registered) && pidAliveOwnsEntry(registered)) {
+      throw new Error(`端口 ${opts.port} 已有活跃测试服务(PID ${registered}):请先 node scripts/e2e-server.mjs --stop --port ${opts.port}`);
+    }
+    fs.rmSync(pidFile, { force: true }); // 陈旧登记
+  }
+  const logFile = opts.logFile ?? logFileFor(opts.port);
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  const logFd = fs.openSync(logFile, 'w');
   const redactor = createRedactingWriter(logFd, opts.extraSecrets ?? []);
   const child = spawn(process.execPath, [tsxCli, entryPath()], {
     cwd: root,
@@ -50,8 +79,8 @@ export function startTestServer(opts) {
   });
   child.stdout.on('data', (d) => redactor.push(d));
   child.stderr.on('data', (d) => redactor.push(d));
-  const pidFile = pidFileFor(opts.port);
-  child.on('exit', () => {
+  let childExited = false;
+  child.on('exit', () => { childExited = true;
     redactor.flush();
     try { fs.closeSync(logFd); } catch { /* 已关闭 */ }
     try { if (fs.readFileSync(pidFile, 'utf8').trim() === String(child.pid)) fs.rmSync(pidFile, { force: true }); } catch { /* 无文件 */ }
@@ -59,11 +88,14 @@ export function startTestServer(opts) {
   fs.mkdirSync(path.dirname(pidFile), { recursive: true });
   fs.writeFileSync(pidFile, String(child.pid));
   const waitHealthy = async (timeoutMs = 30_000) => {
+    // 健康检查不只看端口:子进程已退出(如端口被占 EADDRINUSE)即失败,
+    // 避免把同端口旧实例的 200 误判为新服务就绪(WT-P1-009)
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      if (childExited) return false;
       try {
         const res = await fetch(`http://127.0.0.1:${opts.port}/api/health`);
-        if (res.ok) return true;
+        if (res.ok && !childExited) return true;
       } catch { /* 未就绪 */ }
       await new Promise((r) => setTimeout(r, 400));
     }

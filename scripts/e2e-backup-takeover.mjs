@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import WebSocket from 'ws';
+import { logFileFor } from './lib/test-server.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const port = Number(process.argv[2] ?? process.env.PORT ?? 3210);
@@ -76,7 +77,7 @@ async function stateNow() {
 
 function logText() {
   try {
-    return fs.readFileSync(path.join(root, '.tools', 'e2e-server.log'), 'utf8');
+    return fs.readFileSync(logFileFor(port), 'utf8'); // 同一入口按端口读取(WT-P1-009)
   } catch {
     return '';
   }

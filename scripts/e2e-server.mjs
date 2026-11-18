@@ -32,14 +32,14 @@ const extraSecrets = fs.existsSync(accessPath)
   ? Object.values(JSON.parse(fs.readFileSync(accessPath, 'utf8'))).filter((v) => typeof v === 'string' && v.length > 0)
   : [];
 
-const { child, pid, waitHealthy } = startTestServer({ port, logFile: path.join(root, '.tools', 'e2e-server.log'), extraSecrets });
+const { child, pid, waitHealthy } = startTestServer({ port, extraSecrets }); // 日志按端口:logFileFor(port)
 // 服务进程退出(被 --stop / 崩溃)时本保持器一并退出,不残留
 child.on('exit', () => process.exit(0));
-console.log(`测试服务已启动 pid=${pid} port=${port}(PID 登记于 .tools/e2e-server.pid,日志脱敏写入 .tools/e2e-server.log)`);
+console.log(`测试服务已启动 pid=${pid} port=${port}(登记 .tools/e2e-server-${port}.pid,日志脱敏写入 .tools/e2e-server-${port}.log)`);
 
 const healthy = await waitHealthy();
 if (!healthy) {
-  console.error('服务在 30 秒内未就绪,退出(请检查 .tools/e2e-server.log)');
+  console.error(`服务在 30 秒内未就绪,退出(请检查 .tools/e2e-server-${port}.log)`);
   process.exit(1);
 }
 console.log(`健康检查通过: http://127.0.0.1:${port}/api/health`);

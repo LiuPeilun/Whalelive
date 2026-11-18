@@ -2,10 +2,10 @@
 // 前置:stage1 已执行(服务已死,Edge 保留)。随后本脚本启动服务并观察 60s。
 // 用法:node scripts/e2e-selfheal-verify.mjs
 
-import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
+import { startTestServer, stopTestServer } from './lib/test-server.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -36,8 +36,12 @@ async function attachOnce() {
 const t0 = Date.now();
 const log = (m) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(0)}s] ${m}`);
 
-const server = spawn('npm', ['start'], { cwd: root, stdio: ['ignore', 'ignore', 'ignore'], shell: true });
+const port = Number(process.argv[2] ?? process.env.PORT ?? 3210);
+// 经 startTestServer 启动并登记(WT-P1-009):不再直接 spawn npm——那会在本脚本
+// 退出后留下无主 tsx 服务进程;日志按端口脱敏落盘
+const server = startTestServer({ port });
 log(`服务启动(pid=${server.pid}),开始观察…`);
+void server.waitHealthy();
 
 let sawReloadAt = null;
 let restoredAt = null;
@@ -56,7 +60,7 @@ for (let i = 0; i < 30; i++) {
 console.log('---- 结论 ----');
 console.log(`自愈重载路径(wtWsReloadAt): ${sawReloadAt ? '走到' : '未走到(可能 Vite 全量重载抢先恢复,属更快路径)'}`);
 console.log(`待机恢复: ${restoredAt ? `是(+${((restoredAt - t0) / 1000).toFixed(0)}s)` : '否(60s 窗口内未恢复)'}`);
-server.kill();
+try { stopTestServer(port); } catch { /* 已退出 */ }
 // 回归语义(WT-P1-010):门槛是恢复能力;自愈路径本身由 e2e-selfheal-503.mjs
 // 在文档不可用(Vite 无法代劳)的场景下定向验证。未恢复必须非零退出。
 process.exit(restoredAt ? 0 : 1);
