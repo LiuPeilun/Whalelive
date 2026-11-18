@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import net from 'node:net';
 import { spawn, execFileSync } from 'node:child_process';
 import { createRedactingWriter } from './redact-log.mjs';
 
@@ -36,16 +37,11 @@ function execPowerShell(command) {
   }
 }
 
-/** PID 是否仍存活(不校验入口;用于启动锁持有者检查) */
-function pidAlive(pid) {
-  if (!Number.isFinite(pid) || pid <= 0) return false;
-  return execPowerShell(`if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { 'alive' } else { 'dead' }`).trim() === 'alive';
-}
-
 /** PID 是否仍存活且命令行含本项目入口(活跃登记判定) */
 function pidAliveOwnsEntry(pid) {
-  if (!pidAlive(pid)) return false;
-  return commandLineOwnsEntry(execPowerShell(`(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`));
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  const cmdLine = execPowerShell(`(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`);
+  return commandLineOwnsEntry(cmdLine);
 }
 
 export function entryPath() {
@@ -67,70 +63,42 @@ function listenerPidFor(port) {
   return Number.isFinite(pid) && pid > 0 ? pid : null;
 }
 
-// 启动互斥锁(WT-P1-009):整个启动临界区(陈旧回收→独占登记→日志→spawn→
-// 写 PID)由跨进程锁串行化。锁内容携带持有者 PID 与随机 nonce:
-// - 回收陈旧锁前重新核对内容与文件标识(ino),与判定时不一致即放弃 ——
-//   绝不按早先读到的状态删除其他启动器新取得的锁;
-// - 释放时核对内容仍是自己写入的 nonce,对应不上则不删除(已被换主)。
-const START_LOCK = path.join(root, '.tools', 'e2e-server-start.lock');
-const STALE_LOCK_MS = 60_000;
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function inspectStartLock() {
-  try {
-    const content = fs.readFileSync(START_LOCK, 'utf8').trim();
-    const st = fs.statSync(START_LOCK);
-    return { content, ino: st.ino, mtimeMs: st.mtimeMs };
-  } catch {
-    return null; // 不存在
-  }
-}
+// 启动互斥锁(WT-P1-009):绑定专用回环端口的监听 socket —— 绑定是内核原子
+// 操作,谁绑上谁持有;持有者崩溃时操作系统立即释放端口,无需文件回收,不存在
+// 「读到旧状态后按路径删除他人新锁」与「空占位被竞争方判陈旧」的竞态(前两轮
+// 文件锁方案的残留窗口)。协调端口被无关程序占用时明确失败,可用环境变量更换。
+const START_LOCK_PORT = Number(process.env.WHALETALK_STARTLOCK_PORT ?? 32109);
 
-async function acquireStartLock(timeoutMs = 30_000) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const nonce = `${process.pid} ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    try {
-      const fd = fs.openSync(START_LOCK, 'wx');
-      fs.writeSync(fd, nonce);
-      return { fd, nonce };
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-    }
-    const cur = inspectStartLock();
-    if (cur !== null) {
-      const holderPid = Number(cur.content.split(' ')[0] ?? '');
-      const stale = cur.content === ''
-        || !Number.isFinite(holderPid) || holderPid <= 0 || !pidAlive(holderPid)
-        || Date.now() - cur.mtimeMs > STALE_LOCK_MS;
-      if (stale) {
-        // 回收前重新核对:内容与文件标识仍与刚才判定的一致才删除。
-        // 已被其他启动器收走并重建(ino 或内容变化)则放弃本次回收,回到 wx
-        // 重试 —— 不删除他人的新锁(WT-P1-009)。剩余窗口为核对与删除之间的
-        // 单次系统调用间隔,需要另一启动器在该间隔内完成整套回收+重建,实践中不可达。
-        const re = inspectStartLock();
-        if (re !== null && re.ino === cur.ino && re.content === cur.content) {
-          try { fs.rmSync(START_LOCK, { force: true }); } catch { /* 竞态:重试即可 */ }
-        }
-        continue;
+class StartLock {
+  constructor() { this.server = null; }
+
+  async acquire(timeoutMs = 30_000) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const bound = await new Promise((resolve) => {
+        const server = net.createServer();
+        server.once('error', () => resolve(false));
+        server.listen(START_LOCK_PORT, '127.0.0.1', () => {
+          this.server = server;
+          resolve(true);
+        });
+      });
+      if (bound) return;
+      if (Date.now() > deadline) {
+        throw new Error(`启动锁获取超时:协调端口 ${START_LOCK_PORT} 被其他程序占用,可用环境变量 WHALETALK_STARTLOCK_PORT 更换后重试`);
       }
+      await sleepMs(200);
     }
-    if (Date.now() > deadline) {
-      throw new Error('启动锁获取超时(并发启动过多或存在陈旧锁 .tools/e2e-server-start.lock)');
-    }
-    await sleepMs(300);
   }
-}
 
-function releaseStartLock(lock) {
-  if (!lock) return;
-  // 释放对应当前持有者:内容仍是自己写入的 nonce 才删除;对应不上(被换主)不删
-  try {
-    if (fs.readFileSync(START_LOCK, 'utf8').trim() === lock.nonce) {
-      fs.rmSync(START_LOCK, { force: true });
-    }
-  } catch { /* 已被收走或不存在 */ }
-  try { fs.closeSync(lock.fd); } catch { /* 已关闭 */ }
+  async release() {
+    const server = this.server;
+    this.server = null;
+    if (!server) return;
+    await new Promise((resolve) => server.close(() => resolve()));
+  }
 }
 
 /**
@@ -144,15 +112,16 @@ export async function startTestServer(opts) {
   if (!fs.existsSync(path.join(root, 'node_modules', 'tsx'))) throw new Error('tsx 依赖不存在(请先 npm install)');
   const pidFile = pidFileFor(opts.port);
   fs.mkdirSync(path.dirname(pidFile), { recursive: true });
-  const lock = await acquireStartLock(opts.startLockTimeoutMs ?? 30_000);
+  const lock = new StartLock();
+  await lock.acquire(opts.startLockTimeoutMs ?? 30_000);
   let occupied = false; // 本次启动是否已持有端口登记(任一步失败时释放)
   let logFd = null;
   let child = null;
   let childExited = false;
   try {
-    // --- 临界区:陈旧回收 + 独占登记(互斥锁内,无插占窗口) ---
+    // --- 临界区:陈旧回收 + 独占登记(启动锁内,无并发窗口) ---
     try {
-      fs.closeSync(fs.openSync(pidFile, 'wx')); // 创建即独占(空文件 = 占用中)
+      fs.closeSync(fs.openSync(pidFile, 'wx')); // 创建即独占
       occupied = true;
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
@@ -161,10 +130,8 @@ export async function startTestServer(opts) {
       if (raw !== '' && Number.isFinite(registered) && pidAliveOwnsEntry(registered)) {
         throw new Error(`端口 ${opts.port} 已有活跃测试服务(PID ${registered}):请先 node scripts/e2e-server.mjs --stop --port ${opts.port}`);
       }
-      if (raw === '') {
-        throw new Error(`端口 ${opts.port} 的测试服务启动进行中,请稍候`);
-      }
-      // 锁内无并发:读出的陈旧登记不可能已被换主,可安全回收后重占
+      // 空 PID 文件 = 前一持有者在写入 PID 前崩溃的残留(启动锁内无并发,
+      // 不可能属于正在进行的启动);非本项目入口 = PID 被复用。均回收后重占。
       fs.rmSync(pidFile, { force: true });
       fs.closeSync(fs.openSync(pidFile, 'wx'));
       occupied = true;
@@ -222,7 +189,7 @@ export async function startTestServer(opts) {
     if (logFd !== null) { try { fs.closeSync(logFd); } catch { /* 已关闭 */ } }
     throw err;
   } finally {
-    releaseStartLock(lock);
+    await lock.release();
   }
 }
 
