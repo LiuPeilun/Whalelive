@@ -75,18 +75,42 @@ async function main() {
   const ws = new WebSocket(target, { maxPayload: 64 * 1024 * 1024 });
   await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
   let seq = 0;
-  const pending = new Map();
+  // WT-P0-014:每个 CDP 请求带超时;连接关闭/出错时拒绝全部等待,
+  // 使被测页关闭后 main 立即抛错进入 finally 还原,而不是悬挂后静默退出 0。
+  const pending = new Map(); // id -> { resolve, reject, timer }
+  const CDP_TIMEOUT_MS = 15_000;
+  function rejectPending(reason) {
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(reason);
+    }
+    pending.clear();
+  }
+  ws.on('close', () => rejectPending(new Error('cdp-closed: 被测页面或调试连接已关闭')));
+  ws.on('error', () => rejectPending(new Error('cdp-error: 调试连接出错')));
   ws.on('message', (data) => {
     const msg = JSON.parse(String(data));
     if (msg.id !== undefined && pending.has(msg.id)) {
-      pending.get(msg.id)(msg);
+      const waiter = pending.get(msg.id);
       pending.delete(msg.id);
+      clearTimeout(waiter.timer);
+      waiter.resolve(msg);
     }
   });
-  const send = (method, params = {}) => new Promise((resolve) => {
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++seq;
-    pending.set(id, resolve);
-    ws.send(JSON.stringify({ id, method, params }));
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`cdp-timeout: ${method} 超过 ${CDP_TIMEOUT_MS}ms 未响应`));
+    }, CDP_TIMEOUT_MS);
+    pending.set(id, { resolve, reject, timer });
+    try {
+      ws.send(JSON.stringify({ id, method, params }));
+    } catch (err) {
+      pending.delete(id);
+      clearTimeout(timer);
+      reject(new Error(`cdp-send-failed: ${String(err)}`));
+    }
   });
   const evaluate = async (expression) => {
     const r = await send('Runtime.evaluate', { expression, returnByValue: true });
@@ -108,6 +132,12 @@ async function main() {
     const baselineProbe = await evaluate('window.__wtWs ?? null');
     console.log('基线 probe:', JSON.stringify(baselineProbe));
     await screenshot('e2e-hmr-before.png');
+    // WT-P0-014:写入前完整性校验——若快照后文件被外部编辑,立即中止并保留该编辑,
+    // 不以旧快照覆盖(此前路径会在写入与还原时双重丢失编辑)。
+    const beforeWrite = fs.readFileSync(overlayHtmlPath, 'utf8');
+    if (beforeWrite !== originalHtml) {
+      throw new Error('检测到 overlay/index.html 在脚本启动后被外部修改:中止测试并保留该编辑,未写入测试标记');
+    }
 
     // 可逆变更:标题加 HMR 标记 + 新增静态标记元素
     fs.writeFileSync(overlayHtmlPath, mutatedHtml, 'utf8');
