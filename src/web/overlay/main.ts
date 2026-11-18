@@ -23,6 +23,9 @@ function main(): void {
     placeholderLabel.textContent = '缺少访问凭据:请使用服务启动时输出的播放页链接';
     placeholder.style.display = 'flex';
   }
+  // 音频归属模式(WT-P1-005):仅 ?audio=1 的入口(OBS/控制台分发的播放链接)
+  // 申请播放租约;普通预览不持有租约、始终静音,不会抢走 OBS 的音频播放权。
+  const audioMode = new URLSearchParams(window.location.search).get('audio') === '1';
 
   let runId: string | null = null;
   let rendererId: string | null = null;
@@ -99,6 +102,7 @@ function main(): void {
   }
 
   function scheduleLeaseRequest(): void {
+    if (!audioMode) return; // 预览模式不参与租约
     if (leaseRetryTimer !== null) return; // 唯一待执行重申请
     const delay = leaseRetryAttempt === 0 ? 0 : Math.min(2000 * 2 ** (leaseRetryAttempt - 1), 15_000);
     leaseRetryAttempt += 1;
@@ -134,7 +138,7 @@ function main(): void {
       setStatus('播放租约已失效', false, true);
       dropLeaseAndStopIfHeld(lostLeaseId);
       scheduleLeaseRequest();
-    }, ttlMs + 1500);
+    }, ttlMs + 500);
   }
 
   const ws = createWsClient({
@@ -160,7 +164,11 @@ function main(): void {
           rendererId = message.rendererId;
           player.setIdle(message.idle);
           clearLeaseRetry();
-          ws.send({ kind: 'lease-request' });
+          if (audioMode) {
+            ws.send({ kind: 'lease-request' });
+          } else {
+            setStatus('预览模式(静音)', true);
+          }
           return;
         }
         case 'lease-result': {
@@ -172,7 +180,7 @@ function main(): void {
               if (leaseId) ws.send({ kind: 'lease-renew', leaseId });
             }, message.renewIntervalMs);
             armLeaseDeadline(message.ttlMs);
-          } else {
+          } else if (audioMode) {
             // 续租/首次申请被拒:失效租约归属过滤后停止,并进入受控重申请(WT-P0-007)
             dropLeaseAndStopIfHeld(leaseId);
             scheduleLeaseRequest();

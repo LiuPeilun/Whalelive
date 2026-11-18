@@ -211,6 +211,70 @@ describe('playback 租约失效联动(WT-P0-007)', () => {
     expect(await pending).toEqual({ performanceId: 'pf-b', status: 'ended' });
   });
 
+  it('等待租约期间中止的任务不再派发,即使随后持有者出现(WT-P1-002)', async () => {
+    const sent: WsServerMessage[] = [];
+    const fast = () => ({ ...settings(), playback: { ...settings().playback, noRendererGraceMs: 400 } });
+    const playback = createPlayback({
+      runId: 'run-1',
+      settings: fast,
+      logger: silentLogger,
+      now: () => Date.now(),
+      urlForAsset: () => null,
+    });
+    playback.registerRenderer('r1', (m) => {
+      sent.push(m);
+      return true;
+    });
+    const controller = new AbortController();
+    const pending = playback.play({
+      performance: { ...makePerformance('pf-x', 'talk'), audioUrl: '/media/audio/x.wav' },
+      asset: null,
+      signal: controller.signal,
+    });
+    await new Promise((r) => setTimeout(r, 100)); // 处于等待租约中
+    controller.abort(); // 宽限边界内紧急停止
+    await new Promise((r) => setTimeout(r, 100));
+    playback.requestLease('r1'); // 停止之后持有者才出现
+    await new Promise((r) => setTimeout(r, 400)); // 超过剩余宽限
+    expect(await pending).toEqual({ performanceId: 'pf-x', status: 'cancelled' });
+    expect(dispatchedActions(sent).length).toBe(0); // 已取消任务从未派发
+  });
+
+  it('租约转交后停止指令发给实际派发端,而非新持有者(WT-P1-004)', async () => {
+    const sentA: WsServerMessage[] = [];
+    const sentB: WsServerMessage[] = [];
+    let t = 0;
+    const playback = createPlayback({
+      runId: 'run-1',
+      settings,
+      logger: silentLogger,
+      now: () => t,
+      urlForAsset: () => null,
+    });
+    playback.registerRenderer('A', (m) => {
+      sentA.push(m);
+      return true;
+    });
+    playback.registerRenderer('B', (m) => {
+      sentB.push(m);
+      return true;
+    });
+    const lease = playback.requestLease('A');
+    expect(lease.ok).toBe(true);
+    const pending = playback.play({ performance: makePerformance('pf-a', 'dance'), asset: null, signal: new AbortController().signal });
+    expect(dispatchedActions(sentA).at(-1)).toMatchObject({ performanceId: 'pf-a', action: 'dance' });
+
+    t += 4_000; // A 未续租,租约过期
+    playback.tick(); // 回收 → leaseLost → 结算(LEASE_LOST);停止发给 A
+    expect(await pending).toEqual({ performanceId: 'pf-a', status: 'failed', code: 'LEASE_LOST' });
+    const leaseB = playback.requestLease('B'); // B 接管
+    expect(leaseB.ok).toBe(true);
+
+    // 旧端收到停止;新端不收到旧表演的 stop(WT-P1-004)
+    expect(sentA.some((m) => m.kind === 'stop' && m.performanceId === 'pf-a')).toBe(true);
+    expect(sentB.some((m) => m.kind === 'stop' && m.performanceId === 'pf-a')).toBe(false);
+  });
+
   it('持有者主动释放租约同样立即结算归属表演', async () => {
     const sent: WsServerMessage[] = [];
     const playback = createPlayback({

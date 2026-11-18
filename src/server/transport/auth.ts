@@ -127,7 +127,8 @@ export function createAccessControl(deps: { paths: AppPaths; logger: Logger; por
   function overlayUrl(): string {
     const c = credentials ?? ensure();
     const port = deps.port();
-    return `http://127.0.0.1:${port}/overlay#${c.playback}`;
+    // ?audio=1:声明音频归属用途(OBS 用此链接;普通预览开不带参数的 /overlay 即静音,WT-P1-005)
+    return `http://127.0.0.1:${port}/overlay?audio=1#${c.playback}`;
   }
 
   return { ensure, verify, httpRole, checkControlRequest, checkUpgrade, checkMediaRequest, controlUrl, overlayUrl };

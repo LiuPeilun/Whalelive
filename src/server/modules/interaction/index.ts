@@ -253,6 +253,21 @@ export function createInteraction(deps: {
   async function dispatch(item: QueueItem): Promise<void> {
     taskVersion += 1;
     const version = taskVersion;
+    try {
+      await dispatchTask(item, version);
+    } catch (err) {
+      // 兜底:任何未预期异常(含提供方拒绝逃逸)不得阻塞调度(WT-P1-001);
+      // 仅当异常任务仍持有 current 时清理,避免清掉已接替的新任务。
+      logger.error('interaction.dispatch-unexpected', { eventId: item.eventId, error: String(err) });
+      if (current !== null && current.version === version) {
+        current = null;
+        notify();
+        tick();
+      }
+    }
+  }
+
+  async function dispatchTask(item: QueueItem, version: number): Promise<void> {
     const controller = new AbortController();
     // 版本仍归属本任务(未被停止/替换)才允许推进与写入 current
     const alive = () => current !== null && current.version === version && !controller.signal.aborted;
@@ -262,15 +277,22 @@ export function createInteraction(deps: {
     current = { eventId: item.eventId, performanceId: null, stage: 'generating', say: '', action, since: now(), version, controller };
     notify();
 
-    // 生成:语义弹幕调用回复提供方;指令/礼物等确定性文本跳过
+    // 生成:语义弹幕调用回复提供方;指令/礼物等确定性文本跳过。
+    // 拒绝与超时同样安全化:结果为 null 走保底文本(WT-P1-001)。
     if (!item.isCommand && item.text !== null) {
       const call = derivedSignal(controller.signal);
-      const result = await withTimeoutMs(
-        deps.replyProvider.generate({ text: item.text, userKey: item.userKey ?? '', signal: call.signal }),
-        deps.settings().generation.llmTimeoutMs,
-        () => call.cancel(),
-      );
-      call.cancel(); // 释放派生监听
+      let result: Awaited<ReturnType<ReplyProvider['generate']>> | null = null;
+      try {
+        result = await withTimeoutMs(
+          deps.replyProvider.generate({ text: item.text, userKey: item.userKey ?? '', signal: call.signal }),
+          deps.settings().generation.llmTimeoutMs,
+          () => call.cancel(),
+        );
+      } catch (err) {
+        logger.warn('interaction.reply-error', { eventId: item.eventId, error: String(err) });
+      } finally {
+        call.cancel(); // 释放派生监听
+      }
       if (current === null || current.version !== version) return; // 停止后的迟到结果丢弃
       if (result !== null && typeof result.say === 'string' && result.say.trim() !== '') {
         say = result.say.trim().slice(0, SAY_MAX_LENGTH);
@@ -282,28 +304,34 @@ export function createInteraction(deps: {
         }
       } else {
         say = rules.fallbackReply();
-        logger.warn('interaction.reply-fallback', { eventId: item.eventId, why: result === null ? 'timeout' : 'empty-or-invalid' });
+        logger.warn('interaction.reply-fallback', { eventId: item.eventId, why: result === null ? 'timeout-or-error' : 'empty-or-invalid' });
       }
       if (!alive()) return;
       current = { ...current, say, action, stage: 'synthesizing' };
       notify();
     }
 
-    // 合成:非空文本请求语音;失败/超时降级为无声表演(字幕与动作保留)
+    // 合成:非空文本请求语音;拒绝/失败/超时降级为无声表演(字幕与动作保留,WT-P1-001)
     let audioUrl: string | undefined;
     if (say !== '' && !controller.signal.aborted) {
       const call = derivedSignal(controller.signal);
-      const synth = await withTimeoutMs(
-        deps.speechProvider.synthesize({ text: say, signal: call.signal }),
-        deps.settings().generation.ttsTimeoutMs,
-        () => call.cancel(),
-      );
-      call.cancel();
+      let synth: Awaited<ReturnType<SpeechProvider['synthesize']>> = null;
+      try {
+        synth = await withTimeoutMs(
+          deps.speechProvider.synthesize({ text: say, signal: call.signal }),
+          deps.settings().generation.ttsTimeoutMs,
+          () => call.cancel(),
+        );
+      } catch (err) {
+        logger.warn('interaction.tts-error', { eventId: item.eventId, error: String(err) });
+      } finally {
+        call.cancel();
+      }
       if (current === null || current.version !== version) return;
       if (synth !== null && typeof synth.audioUrl === 'string' && synth.audioUrl !== '') {
         audioUrl = synth.audioUrl;
       } else {
-        logger.warn('interaction.tts-unavailable', { eventId: item.eventId, why: synth === null ? 'timeout' : 'no-audio' });
+        logger.warn('interaction.tts-unavailable', { eventId: item.eventId, why: synth === null ? 'timeout-or-error' : 'no-audio' });
       }
     }
     if (current === null || current.version !== version) return;
@@ -336,6 +364,7 @@ export function createInteraction(deps: {
       .catch((err: unknown) => {
         // playback.play 约定只 resolve;此处仅防御性兜底,保证调度不悬挂。
         logger.error('interaction.playback-unexpected', { eventId: item.eventId, error: String(err) });
+        if (current === null || current.version !== version) return; // 不清理已接替的新任务
         current = null;
         notify();
         tick();
