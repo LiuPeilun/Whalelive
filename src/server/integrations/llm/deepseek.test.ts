@@ -241,6 +241,7 @@ describe('回复路由降级', () => {
     expect(router.active()).toBe('fixed-local');
     const result = await generate(router);
     expect(result.say).toBe('罐头回复');
+    expect(result.provider).toBe('fallback'); // 用户选的是 deepseek:缺 Key 属自动降级(WT-P1-021)
   });
 
   it('provider=deepseek 且已配置时使用模型结果', async () => {
@@ -257,7 +258,7 @@ describe('回复路由降级', () => {
     expect(result.provider).toBe('deepseek');
   });
 
-  it('模型调用失败时降级到固定回复,不中断链路', async () => {
+  it('模型调用失败时降级到固定回复并标记 fallback(WT-P1-021)', async () => {
     const deepseek = build({ script: [chat('bad json')] }).provider;
     const router = createReplyRouter({
       fixed: labeled,
@@ -267,6 +268,51 @@ describe('回复路由降级', () => {
     });
     const result = await generate(router);
     expect(result.say).toBe('罐头回复');
+    expect(result.provider).toBe('fallback'); // 自动降级 ≠ 主动选择 fixed-local
+  });
+
+  it('上游 401 降级同样标记 fallback(缺 Key/上游故障/主动离线三态可区分,WT-P1-021)', async () => {
+    const deepseek = build({ script: [jsonResponse({ message: 'invalid key' }, 401)] }).provider;
+    const router = createReplyRouter({
+      fixed: labeled,
+      deepseek,
+      settings: () => ({ llm: { provider: 'deepseek' } }),
+      logger: silentLogger,
+    });
+    const result = await generate(router);
+    expect(result.provider).toBe('fallback');
+  });
+});
+
+describe('非法/截断回复的用量保留(WT-P1-022,真实适配器+假端点)', () => {
+  const fixed: ReplyProvider = { generate: async () => ({ say: '罐头回复', action: null }) };
+  const labeled = withProviderLabel(fixed, 'fixed-local');
+  const usage32 = { prompt_tokens: 20, completion_tokens: 12, total_tokens: 32 };
+
+  it('HTTP 200 含非法 JSON + 32 token:保底内容,provider=fallback,usage=32', async () => {
+    const deepseek = build({ script: [chat('not-json-at-all', usage32)] }).provider;
+    const router = createReplyRouter({ fixed: labeled, deepseek, settings: () => ({ llm: { provider: 'deepseek' } }), logger: silentLogger });
+    const result = await generate(router);
+    expect(result.say).toBe('罐头回复');
+    expect(result.provider).toBe('fallback');
+    expect(result.usage).toEqual({ promptTokens: 20, completionTokens: 12, totalTokens: 32 });
+  });
+
+  it('finish_reason=length + 32 token:保底内容且 usage 保留(截断不丢用量)', async () => {
+    const deepseek = build({ script: [chat('{"say":"被截断的', usage32, 'length')] }).provider;
+    const router = createReplyRouter({ fixed: labeled, deepseek, settings: () => ({ llm: { provider: 'deepseek' } }), logger: silentLogger });
+    const result = await generate(router);
+    expect(result.say).toBe('罐头回复');
+    expect(result.provider).toBe('fallback');
+    expect(result.usage?.totalTokens).toBe(32);
+  });
+
+  it('合法回复的 usage 照常随模型结果(provider=deepseek)', async () => {
+    const deepseek = build({ script: [chat('{"say":"模型","action":null}', usage32, 'stop')] }).provider;
+    const router = createReplyRouter({ fixed: labeled, deepseek, settings: () => ({ llm: { provider: 'deepseek' } }), logger: silentLogger });
+    const result = await generate(router);
+    expect(result.provider).toBe('deepseek');
+    expect(result.usage?.totalTokens).toBe(32);
   });
 });
 

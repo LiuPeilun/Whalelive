@@ -21,6 +21,20 @@ export interface ReplyProvider {
   generate(input: { text: string; userKey: string; signal: AbortSignal }): Promise<ReplyResult>;
 }
 
+/**
+ * 提供方已取得上游响应但输出不可用(非法 JSON/截断/空内容)时的类型化错误。
+ * usage 为该次请求上游已返回的 token 用量——即使内容不可用,已发生的调用
+ * 仍应计入统计(WT-P1-022);调用方降级保底文本时把 usage 随结果归属本次请求。
+ */
+export class ReplyInvalidError extends Error {
+  readonly usage?: TokenUsage;
+  constructor(message: string, usage?: TokenUsage) {
+    super(message);
+    this.name = 'ReplyInvalidError';
+    if (usage !== undefined) this.usage = usage;
+  }
+}
+
 export interface SpeechProvider {
   synthesize(input: { text: string; signal: AbortSignal }): Promise<{ audioUrl: string; audioId: string } | null>;
 }

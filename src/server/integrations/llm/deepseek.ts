@@ -1,4 +1,4 @@
-import type { ReplyProvider, ReplyResult, TokenUsage } from '../../modules/interaction/providers.js';
+import { ReplyInvalidError, type ReplyProvider, type ReplyResult, type TokenUsage } from '../../modules/interaction/providers.js';
 import type { Logger } from '../../infrastructure/logger.js';
 
 // P1 第三批回复提供方:DeepSeek OpenAI 兼容 chat/completions 接口。
@@ -126,28 +126,31 @@ export function createDeepSeekReplyProvider(deps: {
       }
       const raw = (await response.json()) as ChatResponse;
       signal.throwIfAborted();
+      // 上游已返回的 usage 尽早读取(WT-P1-022):输出不可用(截断/空/非法 JSON)时
+      // 以类型化错误随行,路由降级保底文本时把用量归属本次请求,不因格式问题丢失。
+      const usage = readUsage(raw.usage);
+      const invalid = (message: string, event: string): Error => {
+        deps.logger.warn(`llm.${event}`, { event });
+        return new ReplyInvalidError(message, usage);
+      };
       const choice = raw.choices?.[0];
       // 上游明确报告截断:即使内容里能拼出 JSON 也不采纳,走保底(WT-P1-023)。
       // 仅在 finish_reason 明确为 length 时判定;缺失该字段的兼容端点不受影响。
       if (choice?.finish_reason === 'length') {
-        deps.logger.warn('llm.deepseek-truncated', { event: 'finish-reason-length' });
-        throw new Error('DeepSeek 回复被截断(finish_reason=length)');
+        throw invalid('DeepSeek 回复被截断(finish_reason=length)', 'deepseek-truncated');
       }
       const content = choice?.message?.content;
       if (typeof content !== 'string' || content.trim() === '') {
-        deps.logger.warn('llm.deepseek-empty', { event: 'empty-content' });
-        throw new Error('DeepSeek 返回空内容');
+        throw invalid('DeepSeek 返回空内容', 'deepseek-empty');
       }
       const parsed = parseReply(content);
       if (parsed === null) {
-        deps.logger.warn('llm.deepseek-invalid', { event: 'invalid-or-truncated-json' });
-        throw new Error('DeepSeek 回复格式不合法');
+        throw invalid('DeepSeek 回复格式不合法', 'deepseek-invalid');
       }
       const action = parsed.action !== null && deps.isAllowedAction(parsed.action) ? parsed.action : null;
       if (parsed.action !== null && action === null) {
         deps.logger.warn('llm.deepseek-action-rejected', { requested: parsed.action });
       }
-      const usage = readUsage(raw.usage);
       return {
         say: parsed.say,
         action,

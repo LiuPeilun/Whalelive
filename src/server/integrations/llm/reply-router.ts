@@ -1,4 +1,4 @@
-import type { ReplyProvider, ReplyResult } from '../../modules/interaction/providers.js';
+import { ReplyInvalidError, type ReplyProvider, type ReplyResult, type TokenUsage } from '../../modules/interaction/providers.js';
 import type { EffectiveSettings } from '../../../shared/settings.js';
 import type { Logger } from '../../infrastructure/logger.js';
 
@@ -48,17 +48,31 @@ export function createReplyRouter(deps: {
       };
     },
     async generate(input): Promise<ReplyResult> {
-      const provider = active();
-      if (provider === 'deepseek') {
-        try {
-          return await deps.deepseek.generate(input);
-        } catch (err) {
-          // 未配置或调用失败:记录后降级固定回复,保证直播链路不中断。
-          deps.logger.warn('llm.deepseek-fallback', { error: String(err), reason: 'provider-error' });
-          return deps.fixed.generate(input);
-        }
+      // 自动降级统一标记来源 fallback(WT-P1-021):缺 Key 与上游故障都是
+      // 「用户选了 DeepSeek 但模型未参与」,区别于主动选择的 fixed-local。
+      if (deps.settings().llm.provider !== 'deepseek') {
+        return deps.fixed.generate(input);
       }
-      return deps.fixed.generate(input);
+      if (!deps.deepseek.configured()) {
+        deps.logger.warn('llm.deepseek-fallback', { reason: 'DEEPSEEK_KEY_MISSING' });
+        const fixed = await deps.fixed.generate(input);
+        return { ...fixed, provider: 'fallback' };
+      }
+      try {
+        return await deps.deepseek.generate(input);
+      } catch (err) {
+        // 调用失败:记录后降级固定回复,保证直播链路不中断。
+        // 输出不可用但上游已返回的 usage 随类型化错误保留,归属本次请求(WT-P1-022)。
+        deps.logger.warn('llm.deepseek-fallback', { error: String(err), reason: 'provider-error' });
+        const invalidUsage: TokenUsage | undefined =
+          err instanceof ReplyInvalidError && err.usage !== undefined ? err.usage : undefined;
+        const fixed = await deps.fixed.generate(input);
+        return {
+          ...fixed,
+          provider: 'fallback',
+          ...(invalidUsage !== undefined ? { usage: invalidUsage } : {}),
+        };
+      }
     },
     async generateStrict(input): Promise<ReplyResult> {
       // 预览需要真实反映上游状态:缺 Key、HTTP 失败、超时、非法输出都抛出,

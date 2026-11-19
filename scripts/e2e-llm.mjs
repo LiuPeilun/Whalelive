@@ -98,6 +98,7 @@ async function runWithFakeKey() {
   // 本地假模型服务:返回合法短回复 JSON 与 token 用量,记录是否收到 Bearer 与系统提示。
   let sawAuth = false;
   let sawSystem = false;
+  let modelRequests = 0;
   const fake = http.createServer((req, res) => {
     let raw = '';
     req.on('data', (chunk) => { raw += chunk; });
@@ -105,11 +106,21 @@ async function runWithFakeKey() {
       sawAuth = typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ');
       const body = JSON.parse(raw || '{}');
       sawSystem = Array.isArray(body.messages) && body.messages.some((m) => m.role === 'system');
+      modelRequests += 1;
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({
-        choices: [{ message: { content: '{"say":"今晚吃什么好呀","action":null,"emotion":"happy"}' } }],
-        usage: { prompt_tokens: 20, completion_tokens: 12, total_tokens: 32 },
-      }));
+      if (modelRequests === 1) {
+        // 第 1 次(预览):合法回复
+        res.end(JSON.stringify({
+          choices: [{ message: { content: '{"say":"今晚吃什么好呀","action":null,"emotion":"happy"}' } }],
+          usage: { prompt_tokens: 20, completion_tokens: 12, total_tokens: 32 },
+        }));
+      } else {
+        // 第 2 次起(直播弹幕,WT-P1-022):非法 JSON + usage——保底内容但用量保留
+        res.end(JSON.stringify({
+          choices: [{ message: { content: '不是 JSON 的输出' } }],
+          usage: { prompt_tokens: 20, completion_tokens: 12, total_tokens: 32 },
+        }));
+      }
     });
   });
   await new Promise((resolve) => fake.listen(0, '127.0.0.1', resolve));
@@ -148,6 +159,28 @@ async function runWithFakeKey() {
     check('假 Key 场景:预览走模型并解析回复', preview.provider === 'deepseek' && preview.say === '今晚吃什么好呀', JSON.stringify(preview));
     check('假 Key 场景:上报 token 用量', preview.usage?.totalTokens === 32, JSON.stringify(preview.usage));
     check('假 Key 场景:请求带 Bearer 与系统提示', sawAuth && sawSystem, `auth=${sawAuth} system=${sawSystem}`);
+
+    // WT-P1-022 直播入口复验:上游返回非法 JSON + 32 token → 保底内容、
+    // 来源标记 fallback、累计用量增加 32(非法回复不丢已发生的用量)。
+    const api = async (method, pathname, body) => await (await fetch(`${base}${pathname}`, {
+      method, headers: { ...auth, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    })).json();
+    const totalsBefore = (await api('GET', '/api/state')).metrics.totals.totalTokens;
+    const bad = await api('POST', '/api/mock/events', { type: 'chat', text: '触发非法回复', userId: 'llm-e2e-bad', userName: '统计员' });
+    check('非法回复场景:弹幕入队成功', bad?.enqueue?.accepted === true, JSON.stringify(bad));
+    let badSnap = null;
+    for (let i = 0; i < 40; i++) {
+      await sleep(250);
+      const s2 = await api('GET', '/api/state');
+      if (s2.metrics?.last?.provider === 'fallback') { badSnap = s2; break; }
+    }
+    check('非法回复场景:来源标记 fallback(WT-P1-021)', badSnap !== null, '未等到 fallback');
+    if (badSnap) {
+      const totalsAfter = (await api('GET', '/api/state')).metrics.totals.totalTokens;
+      check('非法回复场景:累计用量增加 32(WT-P1-022)', totalsAfter - totalsBefore === 32, `before=${totalsBefore} after=${totalsAfter}`);
+    }
+
     return failed === 0;
   } finally {
     await app?.close();
