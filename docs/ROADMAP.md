@@ -213,6 +213,14 @@ P1 第一批的审核问题（WT-P1-001～014，共十四项，跨 `2026-11-18_1
 
 **下一项可继续任务**：P1 第二批 edge-tts 真实合成（含音色与连通性）。
 
+### 2026-11-19 · P1 第二批：edge-tts 真实语音合成
+
+**实现**：`msedge-tts@2.1.1`（含 Sec-MS-GEC 令牌）接入——`integrations/tts/edge-tts.ts` 适配器（连接按音色惰性建立复用、音色切换/连接退役重建一次重试、signal 中止、MP3 入音频缓存）与 `createSpeechRouter`（按设置 `tts.provider` 在 fixed-local/edge-tts 间热切换）；settings 新增 `tts:{provider,voice}`（schema 校验音色短名形态，默认 `edge-tts` + `zh-CN-XiaoxiaoNeural`）；HTTP 新增 `GET /api/tts/voices`（318 音色，中文在前，缓存 10 分钟）与 `POST /api/tts/preview`（控制台试听，音色可覆盖，超时对齐 generation.ttsTimeoutMs）；控制台设置面板新增语音区块（提供方下拉、音色下拉、试听按钮），并修复面板 draft 丢失 `lease.takeoverSafetyMs` 的既有缺口（保存必被校验拒绝）。时序敏感回归脚本（lease-lost/late-idle）测试期间固定 fixed-local 并恢复。
+
+**实测**（隔离端口 3290，操作者 3210 未受影响）：连通性探针 `scripts/tts-probe.mjs`（连通 5.0s、318 音色/中文 14、合成 0.9s/26 字）；voices 200（318）；试听 200（0.5s，当前音色）与覆盖男声云健 200（2.7s 含音色切换重建）；音频 GET 200 `audio/mpeg` 14.3KB；弹幕全链路（页面在线）：有声派发（leaseId 非空）→ `session-settled result=ended`；设置热切换 edge-tts→fixed-local→edge-tts 均 200。
+
+**尚缺与下一步**：OBS 实听由操作者确认（浏览器源应使用 `?audio=1` 链接）；第三批 DeepSeek 接入；30 分钟连续录制。
+
 ## 实施记录模板
 
 每次完成任务后补充以下内容。

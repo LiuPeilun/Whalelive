@@ -24,6 +24,12 @@ export type LeaseSettings = {
   takeoverSafetyMs: number;
 };
 
+/** 语音合成(P1 第二批):提供方选择与 edge-tts 音色(ShortName,如 zh-CN-XiaoxiaoNeural)。 */
+export type TtsSettings = {
+  provider: 'fixed-local' | 'edge-tts';
+  voice: string;
+};
+
 /** 界面可编辑并写入 data/config 的用户覆盖。 */
 export type UserSettings = {
   petId: string;
@@ -31,6 +37,7 @@ export type UserSettings = {
   gift: GiftSettings;
   playback: PlaybackSettings;
   lease: LeaseSettings;
+  tts: TtsSettings;
 };
 
 /** 合成后的有效配置(含只读的服务器与平台项)。 */

@@ -8,6 +8,7 @@ import type { CharactersModule } from '../../modules/characters/index.js';
 import type { InteractionModule } from '../../modules/interaction/index.js';
 import type { SettingsModule } from '../../modules/settings/index.js';
 import type { MockEventInput } from '../../integrations/platforms/mock.js';
+import type { EdgeTtsSpeech } from '../../integrations/tts/edge-tts.js';
 import type { createAccessControl } from '../auth.js';
 
 // 路由、请求校验、响应与资源传输(PROJECT_STRUCTURE《接口与页面路径》)。
@@ -24,6 +25,10 @@ export type HttpDeps = {
   submitMock(input: MockEventInput): { eventId: string; ingest: string; enqueue: { accepted: boolean; reason: string | null } | null };
   overlayUrl(): string;
   audioCache: { resolve(audioId: string): { file: string; mime: string } | null };
+  /** edge-tts 适配器(音色列表与试听;当前生效 provider 由设置决定,路由内部不做委托) */
+  edgeTts: EdgeTtsSpeech;
+  /** 试听合成:按当前(或覆盖)音色合成一段文本,返回音频地址;失败抛错由路由映射 */
+  ttsPreview(input: { text: string; voice?: string }): Promise<{ audioUrl: string } | null>;
   logger: Logger;
 };
 
@@ -123,6 +128,41 @@ export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): vo
     }
     const result = deps.submitMock(body as MockEventInput);
     return { eventId: result.eventId, ingest: result.ingest, enqueue: result.enqueue };
+  });
+
+  // P1 第二批:edge-tts 音色列表与试听(控制台凭据;列表中文在前,适配器缓存 10 分钟)
+  fastify.get('/api/tts/voices', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    try {
+      return { voices: await deps.edgeTts.voices() };
+    } catch (err) {
+      deps.logger.warn('http.tts-voices-failed', { error: String(err) });
+      reply.code(502).send(apiError('TTS_UNAVAILABLE', `音色列表获取失败:${String(err)}`, 'tts'));
+      return reply;
+    }
+  });
+
+  fastify.post('/api/tts/preview', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    const body = request.body as { text?: unknown; voice?: unknown } | undefined;
+    const text = typeof body?.text === 'string' ? body.text.trim().slice(0, 120) : '';
+    if (text === '') {
+      reply.code(400).send(apiError(ErrorCodes.VALIDATION_FAILED, 'text 需为 1-120 字的文本', 'tts'));
+      return reply;
+    }
+    const voice = typeof body?.voice === 'string' && body.voice !== '' ? body.voice : undefined;
+    try {
+      const result = await deps.ttsPreview(voice !== undefined ? { text, voice } : { text });
+      if (result === null) {
+        reply.code(504).send(apiError('TTS_TIMEOUT', '试听合成超时或被取消', 'tts'));
+        return reply;
+      }
+      return result;
+    } catch (err) {
+      deps.logger.warn('http.tts-preview-failed', { error: String(err) });
+      reply.code(502).send(apiError('TTS_UNAVAILABLE', `试听合成失败:${String(err)}`, 'tts'));
+      return reply;
+    }
   });
 
   fastify.post('/api/control/action', async (request, reply) => {

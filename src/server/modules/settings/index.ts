@@ -18,6 +18,7 @@ type DefaultsFile = {
   gift: UserSettings['gift'];
   playback: UserSettings['playback'];
   lease: UserSettings['lease'];
+  tts: UserSettings['tts'];
   auth: { timeoutMs: number };
   generation?: { llmTimeoutMs: number; ttsTimeoutMs: number };
 };
@@ -78,6 +79,7 @@ export function createSettings(deps: { paths: AppPaths; env: Record<string, stri
       gift: { ...defaults.gift, ...user?.gift },
       playback: { ...defaults.playback, ...user?.playback },
       lease: { ...defaults.lease, ...user?.lease },
+      tts: { ...defaults.tts, ...user?.tts },
     };
   }
 
@@ -97,6 +99,7 @@ export function createSettings(deps: { paths: AppPaths; env: Record<string, stri
       gift: user.gift,
       playback: user.playback,
       lease: user.lease,
+      tts: user.tts,
       server: { host: envHost || '127.0.0.1', port: envPort ?? 3210 },
       platform: envPlatform || 'mock',
       auth: { timeoutMs: defaults.auth.timeoutMs },

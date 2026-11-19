@@ -65,6 +65,29 @@ async function findTarget() {
 }
 
 async function main() {
+  // 时序脚本固定 fixed-local:edge-tts 真实网络合成(0.5-3s)会打破本脚本
+  // 「待机拦截 3 秒 + dance 播放窗口」的时序假设;结束时恢复原设置
+  const settingsHeaders = { authorization: `Bearer ${access.control}` };
+  const svResp = await fetch(`http://127.0.0.1:${port}/api/settings`, { headers: settingsHeaders });
+  const sv = await svResp.json();
+  if (sv.user?.tts?.provider !== 'fixed-local') {
+    await fetch(`http://127.0.0.1:${port}/api/settings`, {
+      method: 'PUT',
+      headers: { ...settingsHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: sv.savedVersion, settings: { ...sv.user, tts: { provider: 'fixed-local', voice: sv.user.tts.voice } } }),
+    });
+    process.on('exit', async () => {
+      try {
+        const fresh = await (await fetch(`http://127.0.0.1:${port}/api/settings`, { headers: settingsHeaders })).json();
+        await fetch(`http://127.0.0.1:${port}/api/settings`, {
+          method: 'PUT',
+          headers: { ...settingsHeaders, 'content-type': 'application/json' },
+          body: JSON.stringify({ expectedVersion: fresh.savedVersion, settings: { ...fresh.user, tts: { provider: sv.user.tts.provider, voice: sv.user.tts.voice } } }),
+        });
+      } catch { /* 服务可能已停 */ }
+    });
+  }
+
   const target = await findTarget();
   const ws = new WebSocket(target, { maxPayload: 64 * 1024 * 1024 });
   await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });

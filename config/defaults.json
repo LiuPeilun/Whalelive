@@ -22,6 +22,10 @@
   "auth": {
     "timeoutMs": 5000
   },
+  "tts": {
+    "provider": "edge-tts",
+    "voice": "zh-CN-XiaoxiaoNeural"
+  },
   "generation": {
     "llmTimeoutMs": 8000,
     "ttsTimeoutMs": 10000

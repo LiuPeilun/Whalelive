@@ -23,6 +23,7 @@ function settings(): EffectiveSettings {
     gift: { mergeWindowMs: 2_000 },
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
     lease: { ttlMs: 3_000, renewIntervalMs: 1_000, takeoverSafetyMs: 0 },
+      tts: { provider: 'fixed-local', voice: 'zh-CN-XiaoxiaoNeural' },
     server: { host: '127.0.0.1', port: 3210 },
     platform: 'mock',
     auth: { timeoutMs: 5_000 },

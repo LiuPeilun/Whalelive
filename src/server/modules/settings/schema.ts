@@ -48,6 +48,18 @@ export function validateLease(v: unknown): SettingsValidation {
   return { ok: true };
 }
 
+/** 语音合成配置(P1 第二批):提供方枚举 + 音色 ShortName 形态。 */
+export function validateTts(v: unknown): SettingsValidation {
+  if (!isRecord(v)) return { ok: false, field: 'tts', reason: '必须是对象' };
+  if (v.provider !== 'fixed-local' && v.provider !== 'edge-tts') {
+    return { ok: false, field: 'tts.provider', reason: '需为 fixed-local 或 edge-tts' };
+  }
+  if (typeof v.voice !== 'string' || !/^[A-Za-z]{2,3}-[A-Za-z]{2,8}-[A-Za-z0-9]{1,32}Neural$/.test(v.voice)) {
+    return { ok: false, field: 'tts.voice', reason: '需为形如 zh-CN-XiaoxiaoNeural 的音色短名' };
+  }
+  return { ok: true };
+}
+
 export function validateUserSettings(v: unknown): SettingsValidation {
   if (!isRecord(v)) return { ok: false, field: 'settings', reason: '必须是对象' };
   if (typeof v.petId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v.petId)) {
@@ -58,6 +70,7 @@ export function validateUserSettings(v: unknown): SettingsValidation {
     validateGift(v.gift),
     validatePlayback(v.playback),
     validateLease(v.lease),
+    validateTts(v.tts),
   ];
   for (const c of checks) if (!c.ok) return c;
   return { ok: true };

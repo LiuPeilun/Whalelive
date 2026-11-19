@@ -6,6 +6,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { createSettings } from './index.js';
 import type { AppPaths } from '../../infrastructure/paths.js';
 import type { Logger } from '../../infrastructure/logger.js';
+import type { UserSettings } from '../../../shared/settings.js';
 
 // 验证配置原子保存与版本冲突(PROJECT_STRUCTURE《配置覆盖与保存》)。
 // 用户覆盖文件写入临时目录,避免污染真实 data/。
@@ -42,13 +43,14 @@ function makePaths(): AppPaths {
   };
 }
 
-function validSettings(petId = 'main') {
+function validSettings(petId = 'main'): UserSettings {
   return {
     petId,
     queue: { capacity: 20, chatTtlMs: 30_000, userCooldownMs: 10_000 },
     gift: { mergeWindowMs: 2_000 },
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
     lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 800 },
+    tts: { provider: 'fixed-local', voice: 'zh-CN-XiaoxiaoNeural' },
   };
 }
 

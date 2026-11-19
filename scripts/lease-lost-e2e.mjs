@@ -56,6 +56,9 @@ const originalVersion = original.body.savedVersion;
 const originalSettings = original.body.user;
 const tightened = JSON.parse(JSON.stringify(originalSettings));
 tightened.lease = { ttlMs: 3000, renewIntervalMs: 1000, takeoverSafetyMs: 0 }; // 安全窗 0:本场景专测过期回收路径
+// 时序脚本固定 fixed-local:edge-tts 真实网络合成(0.5-3s)会打破秒级时序假设;
+// 恢复段整体还原 original 设置,provider 一并恢复
+tightened.tts = { provider: 'fixed-local', voice: originalSettings.tts.voice };
 const tightenResult = await http('/api/settings', {
   method: 'PUT',
   headers: controlAuth,

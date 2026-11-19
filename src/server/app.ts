@@ -18,6 +18,7 @@ import { createPlayback, type PlaybackModule } from './modules/playback/index.js
 import { mockEvent, type MockEventInput } from './integrations/platforms/mock.js';
 import { createFixedReplyProvider } from './integrations/llm/fixed.js';
 import { createFixedLocalSpeech } from './integrations/tts/fixed-local.js';
+import { createEdgeTtsSpeech, createSpeechRouter } from './integrations/tts/edge-tts.js';
 import type { GiftRuleConfig, PersonaConfig } from './modules/interaction/rules.js';
 
 // 依赖组装与资源关闭(PROJECT_STRUCTURE《依赖方向》):
@@ -81,9 +82,18 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   // P1 第一批提供方:固定回复 + 本地 WAV 合成(后续替换为 DeepSeek / edge-tts 适配器)
   const audioCache = createAudioCache({ audioDir: paths.audioCacheDir, logger, now });
   const replyProvider = createFixedReplyProvider({ fallbackReplies: persona.fallbackReplies });
-  const speechProvider = createFixedLocalSpeech({ cache: audioCache });
+  // P1 第二批:edge-tts 真实合成(默认),fixed-local 保留为离线备选;按设置热切换
+  const fixedSpeech = createFixedLocalSpeech({ cache: audioCache });
+  const edgeTts = createEdgeTtsSpeech({ cache: audioCache, logger, now, voice: () => effective().tts.voice });
+  const speechProvider = createSpeechRouter({ fixed: fixedSpeech, edge: edgeTts, settings: () => effective().tts });
 
   const interaction = createInteraction({ settings: effective, characters, playback, replyProvider, speechProvider, persona, giftRules: giftRulesCfg, logger, now });
+
+  // 控制台试听:直接经 edge 适配器(验证真实通道),音色可覆盖;超时对齐 generation.ttsTimeoutMs
+  const ttsPreview = (input: { text: string; voice?: string }): Promise<{ audioUrl: string } | null> => {
+    const voice = input.voice ?? effective().tts.voice;
+    return edgeTts.synthesizeWith({ text: input.text, voice, signal: AbortSignal.timeout(effective().generation.ttsTimeoutMs) });
+  };
 
   // 平台适配器 → events → app 连接的回调 → interaction(PROJECT_STRUCTURE《依赖方向》)
   let mockSeq = 0;
@@ -151,6 +161,8 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
     submitMock,
     overlayUrl: () => access.overlayUrl(),
     audioCache,
+  edgeTts,
+  ttsPreview,
     logger,
   });
 
