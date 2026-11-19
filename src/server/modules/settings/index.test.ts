@@ -48,7 +48,7 @@ function validSettings(petId = 'main') {
     queue: { capacity: 20, chatTtlMs: 30_000, userCooldownMs: 10_000 },
     gift: { mergeWindowMs: 2_000 },
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
-    lease: { ttlMs: 15_000, renewIntervalMs: 5_000 },
+    lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 800 },
   };
 }
 

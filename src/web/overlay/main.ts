@@ -23,6 +23,9 @@ function main(): void {
     placeholderLabel.textContent = '缺少访问凭据:请使用服务启动时输出的播放页链接';
     placeholder.style.display = 'flex';
   }
+  // 音频归属模式(WT-P1-005):仅 ?audio=1 的入口(OBS/控制台分发的播放链接)
+  // 申请播放租约;普通预览不持有租约、始终静音,不会抢走 OBS 的音频播放权。
+  const audioMode = new URLSearchParams(window.location.search).get('audio') === '1';
 
   let runId: string | null = null;
   let rendererId: string | null = null;
@@ -32,6 +35,13 @@ function main(): void {
   let leaseTimer: number | null = null;
   let leaseDeadlineTimer: number | null = null;
   let statusHideTimer: number | null = null;
+  // 断线时仍持有的租约(WT-P1-004):本地 stopAll 已停声但服务端无从得知;
+  // 重连登记后补发释放作为真实停止确认,解除新端的接管安全等待。
+  let pendingReleaseLeaseId: string | null = null;
+  // 最近一次状态广播中的租约持有者(undefined=尚未见过):候补重评只在
+  // 可用性发生变化时触发(WT-P1-012),持续"无持有者"的重复广播不再触发
+  // 立即重申请——多候补在断线安全等待内按服务端等待建议退避,不相互风暴。
+  let lastHolderSeen: string | null | undefined = undefined;
 
   function setStatus(text: string, ok: boolean, sticky = false): void {
     statusEl.textContent = text;
@@ -98,9 +108,14 @@ function main(): void {
     leaseRetryAttempt = 0;
   }
 
-  function scheduleLeaseRequest(): void {
+  function scheduleLeaseRequest(serverRetryAfterMs?: number): void {
+    if (!audioMode) return; // 预览模式不参与租约
     if (leaseRetryTimer !== null) return; // 唯一待执行重申请
-    const delay = leaseRetryAttempt === 0 ? 0 : Math.min(2000 * 2 ** (leaseRetryAttempt - 1), 15_000);
+    // 服务端给出等待建议(接管安全期限,WT-P1-004)时以其为准(加少量余量);
+    // 否则指数退避。不设上限钳制:服务端期限是权威,多轮被拒只是无谓轮询。
+    const delay = serverRetryAfterMs !== undefined
+      ? serverRetryAfterMs + 250
+      : (leaseRetryAttempt === 0 ? 0 : Math.min(2000 * 2 ** (leaseRetryAttempt - 1), 15_000));
     leaseRetryAttempt += 1;
     leaseRetryTimer = window.setTimeout(() => {
       leaseRetryTimer = null;
@@ -134,7 +149,7 @@ function main(): void {
       setStatus('播放租约已失效', false, true);
       dropLeaseAndStopIfHeld(lostLeaseId);
       scheduleLeaseRequest();
-    }, ttlMs + 1500);
+    }, ttlMs + 500);
   }
 
   const ws = createWsClient({
@@ -160,22 +175,34 @@ function main(): void {
           rendererId = message.rendererId;
           player.setIdle(message.idle);
           clearLeaseRetry();
-          ws.send({ kind: 'lease-request' });
+          if (pendingReleaseLeaseId !== null) {
+            // 断线遗留租约的停止确认(WT-P1-004):本页已 stopAll,先释放旧租约
+            // 解除新端安全等待,再申请新租约,避免一次注定被拒的申请轮次。
+            ws.send({ kind: 'lease-release', leaseId: pendingReleaseLeaseId });
+            pendingReleaseLeaseId = null;
+          }
+          if (audioMode) {
+            ws.send({ kind: 'lease-request' });
+          } else {
+            setStatus('预览模式(静音)', true);
+          }
           return;
         }
         case 'lease-result': {
           if (message.ok) {
             leaseId = message.leaseId;
+            pendingReleaseLeaseId = null; // 新租约成立,服务端已作废旧断线确认
             clearLeaseRetry();
             clearLeaseTimer();
             leaseTimer = window.setInterval(() => {
               if (leaseId) ws.send({ kind: 'lease-renew', leaseId });
             }, message.renewIntervalMs);
             armLeaseDeadline(message.ttlMs);
-          } else {
-            // 续租/首次申请被拒:失效租约归属过滤后停止,并进入受控重申请(WT-P0-007)
+          } else if (audioMode) {
+            // 续租/首次申请被拒:失效租约归属过滤后停止,并进入受控重申请(WT-P0-007);
+            // 拒绝响应携带安全期限等待建议时按其重试(WT-P1-004)
             dropLeaseAndStopIfHeld(leaseId);
-            scheduleLeaseRequest();
+            scheduleLeaseRequest(message.retryAfterMs);
           }
           return;
         }
@@ -195,7 +222,21 @@ function main(): void {
           return;
         }
         case 'state': {
-          // 播放页仅用于状态展示调试;表演与停止以专用消息驱动。
+          // 候补重评(WT-P1-012):仅在租约可用性发生变化时提前重试——
+          // 持有者出现→消失(显式释放/断线清除)时,按长等待建议计时的候补
+          // 立即重新申请;持续"无持有者"的重复广播不再触发,多候补在断线
+          // 安全等待内按服务端等待建议退避,不相互触发高频申请风暴。
+          // 断线安全期限仍在时,申请会被服务端拒绝并给出新的等待建议,受控不变。
+          const holderNow = message.state.renderers.leaseHolderRendererId;
+          // 可用性变化 = 本次无持有者,而此前见到的不是"无持有者"(undefined 表示
+          // 尚未见过任何状态——候补登记后服务端拒绝不广播,首次见到的无持有者
+          // 状态往往就是释放/清除事件本身,同样需要立即重评)
+          const becameAvailable = holderNow === null && lastHolderSeen !== null;
+          lastHolderSeen = holderNow;
+          if (audioMode && leaseId === null && leaseRetryTimer !== null && becameAvailable) {
+            clearLeaseRetry();
+            scheduleLeaseRequest();
+          }
           return;
         }
         default:
@@ -205,13 +246,15 @@ function main(): void {
     onStatus(status) {
       if (status === 'disconnected') {
         setStatus('连接断开,已停止声音,重连中…', false, true);
-        player.stopAll();
+        player.stopAll(); // 先停声;持有时记录遗留租约供重连后补发释放(WT-P1-004)
+        pendingReleaseLeaseId = leaseId ?? pendingReleaseLeaseId;
         clearLeaseTimer();
         clearLeaseDeadline();
         clearLeaseRetry();
         leaseId = null;
         currentDispatchLeaseId = null;
         rendererId = null;
+        lastHolderSeen = undefined; // 断线后重新学习租约状态,避免跨会话误判可用性变化
       } else if (status === 'connected') {
         setStatus('已连接', true);
       }
@@ -222,6 +265,7 @@ function main(): void {
     clearLeaseTimer();
     clearLeaseDeadline();
     clearLeaseRetry();
+    player.stopAll(); // 先完成本地停声,释放才对应“停止确认”(WT-P1-004 契约)
     if (leaseId && rendererId) {
       ws.send({ kind: 'lease-release', leaseId });
     }

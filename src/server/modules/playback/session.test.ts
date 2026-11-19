@@ -88,7 +88,7 @@ describe('playback 会话单次完成', () => {
     controller.abort();
     const result = await pending;
     expect(result).toEqual({ performanceId: 'pf-test', status: 'cancelled' });
-    expect(sendStop).toHaveBeenCalledWith('pf-test');
+    expect(sendStop).toHaveBeenCalledWith('pf-test', 'rnd-1');
   });
 
   it('外部 stop():当前表演兑现 cancelled', async () => {
@@ -145,7 +145,7 @@ describe('playback 会话单次完成', () => {
     const assertion = expect(pending).resolves.toEqual({ performanceId: 'pf-test', status: 'failed', code: 'PLAYBACK_TIMEOUT' });
     await vi.advanceTimersByTimeAsync(2_500);
     await assertion;
-    expect(sendStop).toHaveBeenCalledWith('pf-test');
+    expect(sendStop).toHaveBeenCalledWith('pf-test', 'rnd-1');
   });
 
   it('租约失效:leaseLost 结算 failed(LEASE_LOST)并补发停止,迟到回执失效(WT-P0-007)', async () => {
@@ -163,7 +163,7 @@ describe('playback 会话单次完成', () => {
     expect(sessions.report(makeReport({ leaseId: 'lease-1', status: 'started' }))).toBe('accepted');
     sessions.leaseLost('lease-1');
     expect(await pending).toEqual({ performanceId: 'pf-test', status: 'failed', code: 'LEASE_LOST' });
-    expect(sendStop).toHaveBeenCalledWith('pf-test');
+    expect(sendStop).toHaveBeenCalledWith('pf-test', 'rnd-1');
     // 结算后的旧回执保持失效
     expect(sessions.report(makeReport({ leaseId: 'lease-1', status: 'ended' }))).toBe('stale-performance');
   });
@@ -181,6 +181,28 @@ describe('playback 会话单次完成', () => {
     sessions.leaseLost('lease-other');
     expect(sessions.report(makeReport({ leaseId: 'lease-1', status: 'ended' }))).toBe('accepted');
     expect(await pending).toEqual({ performanceId: 'pf-test', status: 'ended' });
+  });
+
+  it('音频失败原因原样保留到服务端终态(WT-P1-006)', async () => {
+    const deps = makeDeps();
+    const sessions = createSessionManager(deps);
+    const withAudio = { ...makePerformance(), audioUrl: '/media/audio/x.wav' };
+    const pending = sessions.start({ performance: withAudio, asset: null, signal: new AbortController().signal });
+    expect(sessions.report(makeReport({ status: 'started' }))).toBe('accepted');
+    expect(sessions.report(makeReport({ track: 'audio', status: 'failed', reason: 'AUDIO_START_REJECTED' }))).toBe('accepted');
+    expect(sessions.report(makeReport({ status: 'ended' }))).toBe('accepted');
+    // 播放器上报的稳定音频错误码原样进入终态(此前被映射为 UNKNOWN,WT-P1-006)
+    expect(await pending).toEqual({ performanceId: 'pf-test', status: 'failed', code: 'AUDIO_START_REJECTED' });
+  });
+
+  it('已中止的 signal 进入 start 直接兑现 cancelled,不派发(WT-P1-002)', async () => {
+    const deps = makeDeps({ tryDispatch: vi.fn(() => true) as never });
+    const sessions = createSessionManager(deps);
+    const controller = new AbortController();
+    controller.abort(); // 中止发生在进入会话之前
+    const result = await sessions.start({ performance: makePerformance(), asset: null, signal: controller.signal });
+    expect(result).toEqual({ performanceId: 'pf-test', status: 'cancelled' });
+    expect(deps.tryDispatch).not.toHaveBeenCalled();
   });
 
   it('并发 start 被拒绝为失败,不悬挂调度', async () => {

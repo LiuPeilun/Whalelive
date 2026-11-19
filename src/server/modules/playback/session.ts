@@ -33,7 +33,8 @@ export type SessionDeps = {
   noRendererGraceMs(): number;
   logger: Logger;
   tryDispatch(entry: SessionEntry, performance: Performance, asset: SessionRawAsset): boolean;
-  sendStop(performanceId: string): void;
+  /** 停止指令绑定实际派发端;rendererId 为空时由实现回退到当前主目标。 */
+  sendStop(performanceId: string, rendererId: string | null): void;
 };
 
 export function createSessionManager(deps: SessionDeps) {
@@ -82,6 +83,10 @@ export function createSessionManager(deps: SessionDeps) {
 
   /** 开始一次表演:等待播放端出现并派发,设置双看门狗,返回终态 Promise。 */
   function start(input: { performance: Performance; asset: SessionRawAsset; signal: AbortSignal }): Promise<PlaybackResult> {
+    // 已中止的任务不得进入会话:已触发过的 abort 事件不会重放给后续监听(WT-P1-002)
+    if (input.signal.aborted) {
+      return Promise.resolve({ performanceId: input.performance.id, status: 'cancelled' });
+    }
     if (current !== null) {
       // interaction 保证串行;走到这里说明调度状态被破坏,立即暴露为失败而不是排队。
       deps.logger.error('playback.session-busy', { existing: current.performance.id, incoming: input.performance.id });
@@ -104,7 +109,7 @@ export function createSessionManager(deps: SessionDeps) {
 
       const abort = () => {
         if (entry.settled) return;
-        deps.sendStop(entry.performance.id);
+        deps.sendStop(entry.performance.id, entry.dispatchedRendererId);
         settle(entry, { performanceId: entry.performance.id, status: 'cancelled' });
       };
       input.signal.addEventListener('abort', abort, { once: true });
@@ -118,14 +123,14 @@ export function createSessionManager(deps: SessionDeps) {
             if (entry.settled) return;
             if (entry.animation === 'pending' || entry.animation === 'ready') {
               deps.logger.warn('playback.preload-timeout', { performanceId: entry.performance.id, animation: entry.animation });
-              deps.sendStop(entry.performance.id);
+              deps.sendStop(entry.performance.id, entry.dispatchedRendererId);
               settle(entry, { performanceId: entry.performance.id, status: 'failed', code: ErrorCodes.PLAYBACK_TIMEOUT });
             }
           }, deps.preloadTimeoutMs());
           entry.timers.overall = setTimeout(() => {
             if (entry.settled) return;
             deps.logger.warn('playback.overall-timeout', { performanceId: entry.performance.id });
-            deps.sendStop(entry.performance.id);
+            deps.sendStop(entry.performance.id, entry.dispatchedRendererId);
             settle(entry, { performanceId: entry.performance.id, status: 'failed', code: ErrorCodes.PLAYBACK_TIMEOUT });
           }, deps.overallTimeoutMs());
           return true;
@@ -178,7 +183,7 @@ export function createSessionManager(deps: SessionDeps) {
   /** 外部停止(紧急停止/人工):取消当前表演并通知播放端。 */
   function stop(): void {
     if (!current) return;
-    deps.sendStop(current.performance.id);
+    deps.sendStop(current.performance.id, current.dispatchedRendererId);
     settle(current, { performanceId: current.performance.id, status: 'cancelled' });
   }
 
@@ -196,7 +201,7 @@ export function createSessionManager(deps: SessionDeps) {
   function leaseLost(leaseId: string): void {
     if (!current || current.leaseId !== leaseId || current.settled) return;
     deps.logger.warn('playback.lease-lost', { performanceId: current.performance.id, leaseId });
-    deps.sendStop(current.performance.id);
+    deps.sendStop(current.performance.id, current.dispatchedRendererId);
     settle(current, { performanceId: current.performance.id, status: 'failed', code: ErrorCodes.LEASE_LOST });
   }
 

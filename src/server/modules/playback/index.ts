@@ -46,6 +46,7 @@ export function createPlayback(deps: {
   const registry = createRendererRegistry({
     leaseTtlMs: () => deps.settings().lease.ttlMs,
     renewIntervalMs: () => deps.settings().lease.renewIntervalMs,
+    takeoverSafetyMs: () => deps.settings().lease.takeoverSafetyMs,
     now: deps.now,
     logger: deps.logger,
   });
@@ -91,9 +92,13 @@ export function createPlayback(deps: {
       });
       return true;
     },
-    sendStop(performanceId) {
-      const target = registry.primaryTarget();
-      if (target) registry.send(target.rendererId, { kind: 'stop', runId: deps.runId, performanceId });
+    sendStop(performanceId, rendererId) {
+      // 停止指令发给实际派发端(WT-P1-004):租约转交后主目标可能已是新端,
+      // 旧端才是仍在发声的一方;定向失败再回退主目标。
+      const message: WsServerMessage = { kind: 'stop', runId: deps.runId, performanceId };
+      if (rendererId !== null && registry.send(rendererId, message)) return;
+      const fallback = registry.primaryTarget();
+      if (fallback) registry.send(fallback.rendererId, message);
     },
   });
 
@@ -107,8 +112,15 @@ export function createPlayback(deps: {
       if (registry.leaseHolderHandle() !== null) break;
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
+    // 等待结束后再次拒绝已中止任务:边界交错(等待中停止、随后持有者出现)不得派发(WT-P1-002)
+    if (input.signal.aborted) {
+      return { performanceId: input.performance.id, status: 'cancelled' };
+    }
     if (registry.leaseHolderHandle() !== null) {
       return sessions.start(input);
+    }
+    if (input.signal.aborted) {
+      return { performanceId: input.performance.id, status: 'cancelled' };
     }
     // 降级:剥离 audioUrl,以纯动画派发给任意在线播放端
     deps.logger.warn('playback.audio-degraded-no-lease', { performanceId: input.performance.id });
@@ -132,7 +144,15 @@ export function createPlayback(deps: {
     requestLease(rendererId) {
       const prev = registry.leaseView();
       const result = registry.requestLease(rendererId);
-      notify();
+      // 拒绝且租约视图未变化时不广播(WT-P1-012):断线安全等待内多候补的
+      // 申请-拒绝循环若每次都广播,候补端会相互触发立即重申请,形成高频风暴;
+      // 授予或视图变化(接管/释放)照常广播,候补端据状态变化重评。
+      const next = registry.leaseView();
+      const viewChanged = result.ok
+        || prev.leaseId !== next.leaseId
+        || prev.holderRendererId !== next.holderRendererId
+        || prev.expiresAt !== next.expiresAt;
+      if (viewChanged) notify();
       if (result.ok) {
         // 新端接管了已过期的旧租约:旧租约归属的表演立即结算(WT-P0-007)
         if (prev.leaseId !== null && prev.leaseId !== result.leaseId) {

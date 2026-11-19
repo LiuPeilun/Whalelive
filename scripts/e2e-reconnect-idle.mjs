@@ -135,19 +135,25 @@ async function stage1() {
 }
 
 function spawnSyncKillServer() {
-  // 精确杀 tsx 服务进程,排除本脚本自身;不使用 node.exe 全量匹配
-  spawnSync('powershell', ['-NoProfile', '-Command',
-    "Get-CimInstance Win32_Process -Filter \"name='node.exe'\" | " +
-    `Where-Object { $_.ProcessId -ne ${process.pid} -and $_.CommandLine -match 'tsx' } | ` +
-    'ForEach-Object { Stop-Process -Id $_.ProcessId -Force }'], { stdio: 'ignore' });
+  // WT-P1-009:只停止由 scripts/e2e-server.mjs 登记的测试服务(PID + 命令行
+  // 含本项目入口绝对路径双重校验),不再按进程名/端口匹配全机进程。
+  const r = spawnSync('node', [path.join(root, 'scripts', 'e2e-server.mjs'), '--stop', '--port', String(port)], { encoding: 'utf8' });
+  if (r.status !== 0) {
+    console.error(String(r.stderr ?? r.stdout ?? '').trim());
+    throw new Error('杀服务失败:测试服务须由 node scripts/e2e-server.mjs 启动');
+  }
+  console.log(String(r.stdout ?? '').trim());
 }
 
 async function stage2() {
   const { ws, evaluate, screenshot } = await attach();
-  // 服务已由外部重启;无任何新互动:轮询观察画面自动恢复
+  // 服务已由外部重启;无任何新互动:轮询观察画面自动恢复。
+  // 窗口需覆盖 socket 层卡死自愈时序:3 次悬挂守卫(约 30s,退避拉长)→ 防风暴
+  // 重载 → 新页面握手与待机起播(实测 2026-11-18:Edge 服务硬杀后 WS 全挂,
+  // 仅 HTTP 正常,页面不重载则 65s+ 不恢复;重载后立即恢复)。
   let after = null;
   let restored = false;
-  const deadline = Date.now() + 25_000;
+  const deadline = Date.now() + 70_000;
   for (;;) {
     await sleep(500);
     after = await readState(evaluate);

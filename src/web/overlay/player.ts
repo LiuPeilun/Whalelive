@@ -139,7 +139,8 @@ export function createPlayer(deps: {
       }, performance.say === '' ? 800 : subtitleEstimateMs(performance.say));
     };
 
-    if (!asset || !asset.available) {
+    const assetUnavailable = !asset || !asset.available;
+    if (assetUnavailable && !hasAudio) {
       showPlaceholder(`动作 ${performance.action}(素材未配置)`, deps.placeholder, deps.placeholderLabel);
       finishAnimationOnly(ErrorCodes.ASSET_MISSING);
       return;
@@ -147,8 +148,9 @@ export function createPlayer(deps: {
 
     if (!hasAudio) {
       // 纯动画(P0 语义):非循环一轮即结束,循环动作一轮结束
+      // (assetUnavailable 且无音频已在上方同步收尾,此处 asset 必可用)
       deps.video
-        .prepareAction(asset.url, asset.loop)
+        .prepareAction(asset!.url, asset!.loop)
         .then((clip) => {
           if (token !== playToken) {
             clip.stop();
@@ -174,40 +176,61 @@ export function createPlayer(deps: {
       return;
     }
 
-    // 带音频:动画持续循环,由音频结束驱动整场表演结束(ARCHITECTURE §7)
+    // 带音频:双轨协同(ARCHITECTURE §7 / WT-P1-006 / WT-P1-007)
+    // - 说话类动作(素材 loop=true)持续循环,由音频结束驱动结束;
+    // - 一次性动作(如 dance)自然播完,即使确认音频先结束也不截断;
+    // - 两轨各自上报终态,全部终态后再清理回待机。
     void (async () => {
+      const speechLoop = asset?.loop === true; // 清单 loop 标记即“说话/待机”类(素材缺失时按说话类收尾)
       let clip: import('./video-track.js').PreparedClip | null = null;
-      let audioOk = false;
+      let audioHandle: import('./audio-track.js').AudioHandle | null = null;
+      // 双轨准备分别捕获(WT-P1-008):音频失败不拖垮动画与字幕,动画失败不拖垮音频
       try {
-        audioOk = await deps.audio.prepare(audioUrl).then(
-          () => true,
-          () => false,
-        );
-        if (token !== playToken) return;
-        clip = await deps.video.prepareAction(asset.url, asset.loop, true); // endless
+        audioHandle = await deps.audio.prepare(audioUrl);
       } catch {
-        clip = null;
+        audioHandle = null; // 句柄弃置(含 superseded),走无声降级
       }
       if (token !== playToken) {
-        clip?.stop();
-        deps.audio.stop();
+        // 迟到加载:不触碰共享轨道(那里可能是新表演的元素,WT-P1-003),直接弃置本任务。
         return;
       }
+      if (assetUnavailable) {
+        clip = null; // 素材缺失:不准备视频,音频路径保留(WT-P1-008)
+      } else {
+        try {
+          clip = await deps.video.prepareAction(asset!.url, asset!.loop, speechLoop); // 仅说话类 endless
+        } catch {
+          clip = null;
+        }
+      }
+      if (token !== playToken) {
+        clip?.stop(); // clip 仅操作本任务自己的缓冲位
+        audioHandle = null; // 失效句柄不产生任何回执
+        return;
+      }
+      const audioOk = audioHandle !== null;
 
+      // 动画素材失败:动画回报失败,字幕无条件展示;音频可用时照常发声(WT-P1-008)
       if (clip === null) {
-        // 动画素材失败:保留字幕与音频(可听),动画回报失败
         showPlaceholder(`动作 ${performance.action}(素材加载失败)`, deps.placeholder, deps.placeholderLabel);
         deps.report('animation', 'failed', ErrorCodes.ASSET_MISSING);
-        if (audioOk) {
+        showCaption(performance.say); // 字幕不依赖音频可用性
+        if (audioOk && audioHandle !== null) {
           deps.report('audio', 'ready');
-          showCaption(performance.say);
-          deps.report('audio', 'started');
-          await deps.audio.play({ audible });
-          if (token !== playToken) return;
-          deps.report('audio', 'ended');
+          if (await audioHandle.begin({ audible })) {
+            if (token !== playToken) return; // 迟到起播确认:不替新任务上报(WT-P1-003)
+            deps.report('audio', 'started');
+            const audioResult = await audioHandle.ended();
+            if (token !== playToken) return;
+            deps.report('audio', audioResult === 'ended' ? 'ended' : 'failed', audioResult === 'failed' ? 'AUDIO_PLAY_ERROR' : undefined);
+          } else {
+            if (token !== playToken) return;
+            deps.report('audio', 'failed', 'AUDIO_START_REJECTED');
+          }
         } else {
           deps.report('audio', 'failed', 'AUDIO_LOAD_FAILED');
         }
+        // 双轨各自的终态都已上报;字幕保留估算时长后回收(WT-P1-008)
         window.setTimeout(() => {
           if (token !== playToken) return;
           hideCaption();
@@ -217,23 +240,27 @@ export function createPlayer(deps: {
       }
 
       deps.report('animation', 'ready');
+
+      // 音频加载失败:无声降级,字幕时长驱动(说话类此时也按估算收尾)
       if (!audioOk) {
-        // 音频加载失败:降级为“字幕时长”驱动的无声表演(ARCHITECTURE §7)
         deps.report('audio', 'failed', 'AUDIO_LOAD_FAILED');
         clip.show();
         clip.play();
         deps.report('animation', 'started');
         showCaption(performance.say);
-        window.setTimeout(
-          () => {
-            if (token !== playToken) return;
-            deps.report('animation', 'ended');
-            clip?.stop();
-            hideCaption();
-            backToIdle(token);
-          },
-          performance.say === '' ? 1500 : subtitleEstimateMs(performance.say),
-        );
+        const estimateMs = speechLoop ? subtitleEstimateMs(performance.say) : -1;
+        const animationDone = estimateMs >= 0
+          ? new Promise<void>((resolve) => setTimeout(resolve, estimateMs)).then(() => {
+              if (token === playToken) deps.report('animation', 'ended');
+            })
+          : clip.ended().then(() => {
+              if (token === playToken) deps.report('animation', 'ended');
+            });
+        await animationDone;
+        if (token !== playToken) return;
+        clip.stop();
+        hideCaption();
+        backToIdle(token);
         return;
       }
 
@@ -242,11 +269,49 @@ export function createPlayer(deps: {
       clip.play();
       deps.report('animation', 'started');
       showCaption(performance.say);
+
+      // 起播确认后再报 started;被拒按失败上报(WT-P1-006);
+      // 迟到的成功确认属于已失效句柄(begin 兑现 false)或需再次核对令牌(WT-P1-003)
+      if (!(await audioHandle!.begin({ audible }))) {
+        if (token !== playToken) return;
+        deps.report('audio', 'failed', 'AUDIO_START_REJECTED');
+        // 保留无声动作与字幕的合理展示时间,再继续队列
+        const estimateMs = speechLoop ? subtitleEstimateMs(performance.say) : -1;
+        if (estimateMs >= 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, estimateMs));
+          if (token !== playToken) return;
+          deps.report('animation', 'ended');
+        } else {
+          await clip.ended();
+          if (token !== playToken) return;
+          deps.report('animation', 'ended');
+        }
+        clip.stop();
+        hideCaption();
+        backToIdle(token);
+        return;
+      }
+      if (token !== playToken) return; // 迟到起播确认不替新任务上报 started
       deps.report('audio', 'started');
-      await deps.audio.play({ audible });
+
+      // 双轨并行,各自终态:说话类动画在音频结束后手动收尾;
+      // 一次性动作自然播完(音频先结束也不截断,WT-P1-007)。
+      const audioDone = audioHandle!.ended().then((result) => {
+        if (token === playToken) {
+          deps.report('audio', result === 'ended' ? 'ended' : 'failed', result === 'failed' ? 'AUDIO_PLAY_ERROR' : undefined);
+          hideCaption(); // 字幕随语音消失;一次性动作画面继续到自然结束
+        }
+        return result;
+      });
+      const animationDone = speechLoop
+        ? audioDone.then(() => {
+            if (token === playToken) deps.report('animation', 'ended');
+          })
+        : clip.ended().then(() => {
+            if (token === playToken) deps.report('animation', 'ended');
+          });
+      await Promise.all([animationDone, audioDone]);
       if (token !== playToken) return;
-      deps.report('audio', 'ended');
-      deps.report('animation', 'ended');
       clip.stop();
       hideCaption();
       backToIdle(token);

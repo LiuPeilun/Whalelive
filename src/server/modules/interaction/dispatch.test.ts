@@ -25,7 +25,7 @@ function settings(): EffectiveSettings {
     queue: { capacity: 20, chatTtlMs: 30_000, userCooldownMs: 0 },
     gift: { mergeWindowMs: 2_000 },
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
-    lease: { ttlMs: 15_000, renewIntervalMs: 5_000 },
+    lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 0 },
     server: { host: '127.0.0.1', port: 3210 },
     platform: 'mock',
     auth: { timeoutMs: 5_000 },
@@ -59,7 +59,15 @@ function fakePlayback(): { module: PlaybackModule; plays: PlayCapture[]; results
     play: (input) => {
       plays.push({ performance: input.performance, signal: input.signal });
       const p = new Promise<{ performanceId: string; status: 'ended' | 'cancelled' }>((resolve) => {
-        input.signal.addEventListener('abort', () => resolve({ performanceId: input.performance.id, status: 'cancelled' }), { once: true });
+        const timer = setTimeout(() => resolve({ performanceId: input.performance.id, status: 'ended' }), 5);
+        input.signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            resolve({ performanceId: input.performance.id, status: 'cancelled' });
+          },
+          { once: true },
+        );
       });
       results.set(input.performance.id, p);
       return p;
@@ -147,7 +155,27 @@ describe('interaction 生成链路(P1 第一批)', () => {
     await new Promise((r) => setTimeout(r, 120));
     expect(playback.plays.length).toBe(1);
     expect(playback.plays[0]!.performance.say).toBe('保底回复A');
+  });
+
+  it('提供方拒绝(非超时):回落保底文本,任务照常派发(WT-P1-001)', async () => {
+    const { interaction, playback } = build({ reply: { generate: async () => { throw new Error('provider down'); } } });
+    interaction.enqueue(chatEvent('聊聊天气'));
+    await settle();
+    expect(playback.plays.length).toBe(1);
+    expect(playback.plays[0]!.performance.say).toBe('保底回复A');
     expect(playback.plays[0]!.performance.audioUrl).toBeDefined();
+  });
+
+  it('合成拒绝(非超时):降级无声表演,队列继续处理下一条(WT-P1-001)', async () => {
+    const { interaction, playback } = build({ speech: { synthesize: async () => { throw new Error('ENOENT'); } } });
+    interaction.enqueue(chatEvent('第一条话题'));
+    await settle();
+    interaction.enqueue(chatEvent('第二条话题', 'u2'));
+    await settle();
+    expect(playback.plays.length).toBe(2); // 第一条未阻塞第二条
+    expect(playback.plays[0]!.performance.audioUrl).toBeUndefined(); // 第一条无声降级
+    expect(playback.plays[1]!.performance.say).toBe('生成的话'); // 第二条正常
+    expect(interaction.state().current === null || interaction.state().current?.performanceId !== playback.plays[0]!.performance.id).toBe(true);
   });
 
   it('合成失败:降级为无声表演(audioUrl 缺省),文本与动作保留', async () => {

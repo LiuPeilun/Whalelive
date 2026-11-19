@@ -22,7 +22,7 @@ function settings(): EffectiveSettings {
     queue: { capacity: 20, chatTtlMs: 30_000, userCooldownMs: 10_000 },
     gift: { mergeWindowMs: 2_000 },
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
-    lease: { ttlMs: 3_000, renewIntervalMs: 1_000 },
+    lease: { ttlMs: 3_000, renewIntervalMs: 1_000, takeoverSafetyMs: 0 },
     server: { host: '127.0.0.1', port: 3210 },
     platform: 'mock',
     auth: { timeoutMs: 5_000 },
@@ -211,6 +211,161 @@ describe('playback 租约失效联动(WT-P0-007)', () => {
     expect(await pending).toEqual({ performanceId: 'pf-b', status: 'ended' });
   });
 
+  it('等待租约期间中止的任务不再派发,即使随后持有者出现(WT-P1-002)', async () => {
+    const sent: WsServerMessage[] = [];
+    const fast = () => ({ ...settings(), playback: { ...settings().playback, noRendererGraceMs: 400 } });
+    const playback = createPlayback({
+      runId: 'run-1',
+      settings: fast,
+      logger: silentLogger,
+      now: () => Date.now(),
+      urlForAsset: () => null,
+    });
+    playback.registerRenderer('r1', (m) => {
+      sent.push(m);
+      return true;
+    });
+    const controller = new AbortController();
+    const pending = playback.play({
+      performance: { ...makePerformance('pf-x', 'talk'), audioUrl: '/media/audio/x.wav' },
+      asset: null,
+      signal: controller.signal,
+    });
+    await new Promise((r) => setTimeout(r, 100)); // 处于等待租约中
+    controller.abort(); // 宽限边界内紧急停止
+    await new Promise((r) => setTimeout(r, 100));
+    playback.requestLease('r1'); // 停止之后持有者才出现
+    await new Promise((r) => setTimeout(r, 400)); // 超过剩余宽限
+    expect(await pending).toEqual({ performanceId: 'pf-x', status: 'cancelled' });
+    expect(dispatchedActions(sent).length).toBe(0); // 已取消任务从未派发
+  });
+
+  it('定时回收后安全窗仍生效,到期才允许接管;显式释放立即接管(WT-P1-004)', async () => {
+    const sent: WsServerMessage[] = [];
+    let t = 0;
+    const cfg = () => ({ ...settings(), lease: { ttlMs: 3_000, renewIntervalMs: 1_000, takeoverSafetyMs: 800 } });
+    const playback = createPlayback({ runId: 'run-1', settings: cfg, logger: silentLogger, now: () => t, urlForAsset: () => null });
+    playback.registerRenderer('A', (m) => { sent.push(m); return true; });
+    playback.registerRenderer('B', (m) => { sent.push(m); return true; });
+    expect(playback.requestLease('A').ok).toBe(true);
+
+    // 回收前申请:被拒,剩余等待 ≈ 780ms(时钟 3020)
+    t = 3_020;
+    const beforeTick = playback.requestLease('B');
+    expect(beforeTick.ok).toBe(false);
+    if (!beforeTick.ok) expect(beforeTick.retryAfterMs).toBeGreaterThanOrEqual(700);
+
+    // 定时回收清除持有者后,安全等待依然存在(WT-P1-004 核心)
+    playback.tick();
+    const afterTick = playback.requestLease('B');
+    expect(afterTick.ok).toBe(false);
+    if (!afterTick.ok) expect(afterTick.retryAfterMs).toBeGreaterThan(0);
+
+    // 安全时刻(3800)之后:接管成功
+    t = 3_801;
+    const granted = playback.requestLease('B');
+    expect(granted.ok).toBe(true);
+
+    // 显式释放路径:停止确认后新端立即接管,无等待
+    t = 10_000;
+    playback.tick(); // B 租约过期回收
+    const holderLease = playback.requestLease('A'); // A 重新持有
+    expect(holderLease.ok).toBe(true);
+    if (holderLease.ok) {
+      t = 20_000;
+      expect(playback.releaseLease('A', holderLease.leaseId)).toBe(true); // A 显式释放
+      const immediate = playback.requestLease('B'); // B 无需等安全窗
+      expect(immediate.ok).toBe(true);
+    }
+  });
+
+  it('持有端断线注销保留旧租约剩余生命的接管等待,不早于旧租约截止接管(WT-P1-004)', async () => {
+    const sent: WsServerMessage[] = [];
+    let t = 1_000;
+    const cfg = () => ({ ...settings(), lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 800 } });
+    const playback = createPlayback({ runId: 'run-1', settings: cfg, logger: silentLogger, now: () => t, urlForAsset: () => null });
+    playback.registerRenderer('A', (m) => { sent.push(m); return true; });
+    playback.registerRenderer('B', (m) => { sent.push(m); return true; });
+    const leaseA = playback.requestLease('A');
+    expect(leaseA.ok).toBe(true); // expiresAt = 16_000,剩余 15s
+
+    // A 断线(未确认停声):关闭事件处理延迟可超过固定安全窗,安全期限必须
+    // 保留旧租约剩余生命(expiresAt + safety = 16_800),而不是断线时刻 + 800。
+    playback.unregisterRenderer('A');
+    t = 1_801; // 旧实现的授予时刻:仍处于旧租约生命期内,必须被拒
+    const early = playback.requestLease('B');
+    expect(early.ok).toBe(false);
+    if (!early.ok) expect(early.retryAfterMs).toBeGreaterThan(14_000);
+
+    t = 16_700; // 旧租约截止 + 700ms(安全窗 800 内):仍被拒
+    const stillEarly = playback.requestLease('B');
+    expect(stillEarly.ok).toBe(false);
+
+    t = 16_801; // 旧租约截止 + 安全窗之后:接管成功
+    const granted = playback.requestLease('B');
+    expect(granted.ok).toBe(true);
+  });
+
+  it('断线端重连补发释放(停止确认)提前解除接管等待(WT-P1-004)', async () => {
+    const sent: WsServerMessage[] = [];
+    let t = 1_000;
+    const cfg = () => ({ ...settings(), lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 800 } });
+    const playback = createPlayback({ runId: 'run-1', settings: cfg, logger: silentLogger, now: () => t, urlForAsset: () => null });
+    playback.registerRenderer('A', (m) => { sent.push(m); return true; });
+    playback.registerRenderer('B', (m) => { sent.push(m); return true; });
+    const leaseA = playback.requestLease('A');
+    expect(leaseA.ok).toBe(true);
+    const oldLeaseId = leaseA.ok ? leaseA.leaseId : '';
+
+    playback.unregisterRenderer('A'); // A 断线,安全期限 = 16_800
+    const early = playback.requestLease('B');
+    expect(early.ok).toBe(false);
+
+    // A 重连(新连接分配新 rendererId),登记后补发断线前租约的释放:真实停止确认
+    playback.registerRenderer('A2', (m) => { sent.push(m); return true; });
+    expect(playback.releaseLease('A2', oldLeaseId)).toBe(true);
+    const immediate = playback.requestLease('B'); // 无需等安全时刻
+    expect(immediate.ok).toBe(true);
+
+    // 补发释放只匹配最近一次断线租约:无关 leaseId 不产生效果
+    expect(playback.releaseLease('A2', 'lease-not-exist')).toBe(false);
+  });
+
+  it('租约转交后停止指令发给实际派发端,而非新持有者(WT-P1-004)', async () => {
+    const sentA: WsServerMessage[] = [];
+    const sentB: WsServerMessage[] = [];
+    let t = 0;
+    const playback = createPlayback({
+      runId: 'run-1',
+      settings,
+      logger: silentLogger,
+      now: () => t,
+      urlForAsset: () => null,
+    });
+    playback.registerRenderer('A', (m) => {
+      sentA.push(m);
+      return true;
+    });
+    playback.registerRenderer('B', (m) => {
+      sentB.push(m);
+      return true;
+    });
+    const lease = playback.requestLease('A');
+    expect(lease.ok).toBe(true);
+    const pending = playback.play({ performance: makePerformance('pf-a', 'dance'), asset: null, signal: new AbortController().signal });
+    expect(dispatchedActions(sentA).at(-1)).toMatchObject({ performanceId: 'pf-a', action: 'dance' });
+
+    t += 4_000; // A 未续租,租约过期
+    playback.tick(); // 回收 → leaseLost → 结算(LEASE_LOST);停止发给 A
+    expect(await pending).toEqual({ performanceId: 'pf-a', status: 'failed', code: 'LEASE_LOST' });
+    const leaseB = playback.requestLease('B'); // B 接管
+    expect(leaseB.ok).toBe(true);
+
+    // 旧端收到停止;新端不收到旧表演的 stop(WT-P1-004)
+    expect(sentA.some((m) => m.kind === 'stop' && m.performanceId === 'pf-a')).toBe(true);
+    expect(sentB.some((m) => m.kind === 'stop' && m.performanceId === 'pf-a')).toBe(false);
+  });
+
   it('持有者主动释放租约同样立即结算归属表演', async () => {
     const sent: WsServerMessage[] = [];
     const playback = createPlayback({
@@ -231,5 +386,35 @@ describe('playback 租约失效联动(WT-P0-007)', () => {
     expect(playback.releaseLease('r1', lease.leaseId)).toBe(true);
     expect(await pending).toEqual({ performanceId: 'pf-c', status: 'failed', code: 'LEASE_LOST' });
     expect(sent.some((m) => m.kind === 'stop' && m.performanceId === 'pf-c')).toBe(true);
+  });
+
+  it('拒绝且租约视图未变化时不广播状态,避免多候补申请风暴(WT-P1-012)', async () => {
+    const sent: WsServerMessage[] = [];
+    let t = 1_000;
+    let broadcasts = 0;
+    const cfg = () => ({ ...settings(), lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 800 } });
+    const playback = createPlayback({ runId: 'run-1', settings: cfg, logger: silentLogger, now: () => t, urlForAsset: () => null });
+    playback.onChange(() => { broadcasts += 1; });
+    playback.registerRenderer('A', (m) => { sent.push(m); return true; });
+    playback.registerRenderer('B', (m) => { sent.push(m); return true; });
+    playback.registerRenderer('C', (m) => { sent.push(m); return true; });
+    const lease = playback.requestLease('A');
+    expect(lease.ok).toBe(true);
+    const broadcastsAfterGrant = broadcasts;
+
+    // A 断线:安全期限内 B/C 的申请全部被拒,且拒绝不得引发状态广播
+    playback.unregisterRenderer('A');
+    const broadcastsAfterDisconnect = broadcasts;
+    for (let i = 0; i < 20; i += 1) {
+      expect(playback.requestLease('B').ok).toBe(false);
+      expect(playback.requestLease('C').ok).toBe(false);
+    }
+    expect(broadcasts).toBe(broadcastsAfterDisconnect); // 拒绝不广播:风暴无放大器
+
+    // 授予(安全时刻后)照常广播
+    t = 17_000;
+    expect(playback.requestLease('B').ok).toBe(true);
+    expect(broadcasts).toBeGreaterThan(broadcastsAfterGrant + 0);
+    expect(broadcasts).toBeGreaterThan(broadcastsAfterDisconnect);
   });
 });

@@ -11,7 +11,7 @@ import WebSocket from 'ws';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const port = Number(process.env.PORT ?? 3210);
 const access = JSON.parse(fs.readFileSync(path.join(root, 'data', 'access.json'), 'utf8'));
-const overlayUrl = `http://127.0.0.1:${port}/overlay#${access.playback}`;
+const overlayUrl = `http://127.0.0.1:${port}/overlay?audio=1#${access.playback}`;
 
 const edgeCandidates = [
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
