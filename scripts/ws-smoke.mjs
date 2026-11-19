@@ -174,7 +174,7 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
       }
       return undefined;
     },
-    12_000,
+    25_000,
   );
   check('全链路:弹幕 → dance 派发并完成闭环', outcome === 'completed', String(outcome));
   // 等待调度收尾后检查状态

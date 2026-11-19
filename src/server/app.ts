@@ -16,6 +16,7 @@ import { createEvents } from './modules/events/index.js';
 import { createInteraction, type InteractionModule } from './modules/interaction/index.js';
 import { createPlayback, type PlaybackModule } from './modules/playback/index.js';
 import { mockEvent, type MockEventInput } from './integrations/platforms/mock.js';
+import { createBilibiliOpenClient, type BilibiliOpenHandle } from './integrations/platforms/bilibili-open.js';
 import { createFixedReplyProvider } from './integrations/llm/fixed.js';
 import { createDeepSeekReplyProvider, type DeepSeekConfig } from './integrations/llm/deepseek.js';
 import { createReplyRouter, withProviderLabel } from './integrations/llm/reply-router.js';
@@ -133,6 +134,39 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
     };
   };
 
+  // P2 平台适配器:B 站创作开放平台(open-live)。PLATFORM=bilibili-open 且
+  // 密钥齐全时启动;断线自动重连,事件经 events.ingest 进入统一队列。
+  const openConfig = {
+    appId: Number(env.BILIBILI_OPEN_APP_ID ?? '') || 0,
+    accessKeyId: env.BILIBILI_OPEN_ACCESS_KEY_ID?.trim() ?? '',
+    accessKeySecret: env.BILIBILI_OPEN_ACCESS_KEY_SECRET?.trim() ?? '',
+    code: env.BILIBILI_OPEN_CODE?.trim() ?? '',
+  };
+  const bilibiliOpen: BilibiliOpenHandle | null = createBilibiliOpenClient({
+    config: openConfig,
+    onEvent(event) {
+      const ingest = events.ingest(event);
+      if (!ingest.accepted) {
+        logger.info('bilibili.event-dropped', { eventId: event.id, reason: ingest.reason });
+        return;
+      }
+      interaction.enqueue(ingest.event);
+    },
+    logger,
+    now,
+  });
+  if (effective().platform === 'bilibili-open' && openConfig.appId > 0 && openConfig.accessKeyId !== '' && openConfig.accessKeySecret !== '' && openConfig.code !== '') {
+    bilibiliOpen.start();
+    logger.info('bilibili.open-started', { appId: openConfig.appId });
+  } else {
+    logger.info('bilibili.open-disabled', {
+      platform: effective().platform,
+      hasAppId: openConfig.appId > 0,
+      hasCode: openConfig.code !== '',
+      hasSecret: openConfig.accessKeySecret !== '',
+    });
+  }
+
   const startedAt = now();
   const stateSnapshot = (): StateSnapshot => {
     const st = interaction.state();
@@ -141,7 +175,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
       runId,
       startedAt,
       paused: st.paused,
-      platform: effective().platform,
+      platform: effective().platform === 'bilibili-open' ? `bilibili-open:${bilibiliOpen.status().state}` : effective().platform,
       petId: effective().petId,
       queue: {
         capacity: st.queue.capacity,
@@ -261,6 +295,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   });
 
   const pushState = () => ws.broadcastState();
+  void bilibiliOpen;
   interaction.onChange(pushState);
   playback.onChange(pushState);
   const ticker = setInterval(() => {
