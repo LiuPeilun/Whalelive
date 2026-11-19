@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ErrorCodes, apiError } from '../../../shared/errors.js';
 import type { StateSnapshot } from '../../../shared/protocol.js';
-import type { SettingsUpdateRequest } from '../../../shared/settings.js';
+import { isValidVoiceShortName, type SettingsUpdateRequest } from '../../../shared/settings.js';
 import type { Logger } from '../../infrastructure/logger.js';
 import type { CharactersModule } from '../../modules/characters/index.js';
 import type { InteractionModule } from '../../modules/interaction/index.js';
@@ -26,7 +26,7 @@ export type HttpDeps = {
   overlayUrl(): string;
   audioCache: { resolve(audioId: string): { file: string; mime: string } | null };
   /** edge-tts 适配器(音色列表与试听;当前生效 provider 由设置决定,路由内部不做委托) */
-  edgeTts: EdgeTtsSpeech;
+  edgeTts: Pick<EdgeTtsSpeech, 'voices'>;
   /** 试听合成:按当前(或覆盖)音色合成一段文本,返回音频地址;失败抛错由路由映射 */
   ttsPreview(input: { text: string; voice?: string }): Promise<{ audioUrl: string } | null>;
   logger: Logger;
@@ -39,6 +39,15 @@ function guardControl(deps: HttpDeps, request: FastifyRequest, reply: FastifyRep
     return false;
   }
   return true;
+}
+
+function sendTtsError(reply: FastifyReply, err: unknown, action: string): FastifyReply {
+  const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+  return reply.code(timedOut ? 504 : 502).send(apiError(
+    timedOut ? ErrorCodes.TTS_TIMEOUT : ErrorCodes.TTS_UNAVAILABLE,
+    `${action}${timedOut ? '超时' : '失败'}`,
+    'tts',
+  ));
 }
 
 function serveFile(request: FastifyRequest, reply: FastifyReply, file: string, mime: string, method: 'GET' | 'HEAD'): void {
@@ -137,8 +146,7 @@ export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): vo
       return { voices: await deps.edgeTts.voices() };
     } catch (err) {
       deps.logger.warn('http.tts-voices-failed', { error: String(err) });
-      reply.code(502).send(apiError('TTS_UNAVAILABLE', `音色列表获取失败:${String(err)}`, 'tts'));
-      return reply;
+      return sendTtsError(reply, err, '音色列表获取');
     }
   });
 
@@ -150,18 +158,21 @@ export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): vo
       reply.code(400).send(apiError(ErrorCodes.VALIDATION_FAILED, 'text 需为 1-120 字的文本', 'tts'));
       return reply;
     }
-    const voice = typeof body?.voice === 'string' && body.voice !== '' ? body.voice : undefined;
+    const voice = body?.voice === '' ? undefined : body?.voice;
+    if (voice !== undefined && !isValidVoiceShortName(voice)) {
+      reply.code(400).send(apiError(ErrorCodes.VALIDATION_FAILED, 'voice 需为合法的音色短名', 'tts'));
+      return reply;
+    }
     try {
       const result = await deps.ttsPreview(voice !== undefined ? { text, voice } : { text });
       if (result === null) {
-        reply.code(504).send(apiError('TTS_TIMEOUT', '试听合成超时或被取消', 'tts'));
+        reply.code(504).send(apiError(ErrorCodes.TTS_TIMEOUT, '试听合成超时或被取消', 'tts'));
         return reply;
       }
       return result;
     } catch (err) {
       deps.logger.warn('http.tts-preview-failed', { error: String(err) });
-      reply.code(502).send(apiError('TTS_UNAVAILABLE', `试听合成失败:${String(err)}`, 'tts'));
-      return reply;
+      return sendTtsError(reply, err, '试听合成');
     }
   });
 
