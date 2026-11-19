@@ -67,27 +67,53 @@ const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 启动互斥锁(WT-P1-009):绑定专用回环端口的监听 socket —— 绑定是内核原子
 // 操作,谁绑上谁持有;持有者崩溃时操作系统立即释放端口,无需文件回收,不存在
-// 「读到旧状态后按路径删除他人新锁」与「空占位被竞争方判陈旧」的竞态(前两轮
-// 文件锁方案的残留窗口)。协调端口被无关程序占用时明确失败,可用环境变量更换。
-const START_LOCK_PORT = Number(process.env.WHALETALK_STARTLOCK_PORT ?? 32109);
+// 「读到旧状态后按路径删除他人新锁」与「空占位被判陈旧」的竞态(前两轮
+// 文件锁方案的残留窗口)。
+//
+// 协调端口属于工作区共享配置:首次使用写入 .tools/startlock-port,此后本工作区
+// 的启动器一律使用该端口(WT-P1-009,2026-11-19_010303)——否则同一工作区内
+// 不同环境变量配置的终端会在各自锁下同时操作同一份 PID 登记,互斥失效。
+// 绑定/创建失败且共享配置与本进程期望不一致时明确报错,不回退到其他端口。
+const START_LOCK_PORT_FILE = path.join(root, '.tools', 'startlock-port');
+
+function sharedStartLockPort() {
+  const wanted = Number(process.env.WHALETALK_STARTLOCK_PORT ?? 0);
+  if (fs.existsSync(START_LOCK_PORT_FILE)) {
+    const shared = Number(fs.readFileSync(START_LOCK_PORT_FILE, 'utf8').trim());
+    if (Number.isFinite(shared) && shared > 0) {
+      if (wanted > 0 && wanted !== shared) {
+        throw new Error(`本工作区启动协调端口已固定为 ${shared}(.tools/startlock-port),与环境变量 WHALETALK_STARTLOCK_PORT=${wanted} 不一致;如需更换请先删除该文件并确保没有正在进行的启动`);
+      }
+      return shared;
+    }
+  }
+  const chosen = wanted > 0 ? wanted : 32109;
+  fs.mkdirSync(path.dirname(START_LOCK_PORT_FILE), { recursive: true });
+  fs.writeFileSync(START_LOCK_PORT_FILE, String(chosen));
+  return chosen;
+}
 
 class StartLock {
-  constructor() { this.server = null; }
+  constructor(port) { this.server = null; this.port = port; }
 
   async acquire(timeoutMs = 30_000) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const bound = await new Promise((resolve) => {
-        const server = net.createServer();
+        const server = net.createServer((socket) => {
+          // 立即挂断探测/无关连接:不让已接受连接阻塞 close 回调(Node 的
+          // net.Server 等待所有连接关闭才触发 close,WT-P1-009 有界收尾)
+          socket.destroy();
+        });
         server.once('error', () => resolve(false));
-        server.listen(START_LOCK_PORT, '127.0.0.1', () => {
+        server.listen(this.port, '127.0.0.1', () => {
           this.server = server;
           resolve(true);
         });
       });
       if (bound) return;
       if (Date.now() > deadline) {
-        throw new Error(`启动锁获取超时:协调端口 ${START_LOCK_PORT} 被其他程序占用,可用环境变量 WHALETALK_STARTLOCK_PORT 更换后重试`);
+        throw new Error(`启动锁获取超时:协调端口 ${this.port} 被其他程序占用;若确认非本工作区启动器占用,可删除 .tools/startlock-port 后更换端口重试`);
       }
       await sleepMs(200);
     }
@@ -97,7 +123,12 @@ class StartLock {
     const server = this.server;
     this.server = null;
     if (!server) return;
-    await new Promise((resolve) => server.close(() => resolve()));
+    // 有界收尾:close 回调最多等 3 秒(连接均已即时销毁,正常远快于此),
+    // 超时强制 destroy 并继续 —— 不让启动调用的 finally 无限等待
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => { server.close(() => {}); server.closeAllConnections?.(); resolve(); }, 3_000);
+      server.close(() => { clearTimeout(timer); resolve(); });
+    });
   }
 }
 
@@ -112,7 +143,7 @@ export async function startTestServer(opts) {
   if (!fs.existsSync(path.join(root, 'node_modules', 'tsx'))) throw new Error('tsx 依赖不存在(请先 npm install)');
   const pidFile = pidFileFor(opts.port);
   fs.mkdirSync(path.dirname(pidFile), { recursive: true });
-  const lock = new StartLock();
+  const lock = new StartLock(sharedStartLockPort());
   await lock.acquire(opts.startLockTimeoutMs ?? 30_000);
   let occupied = false; // 本次启动是否已持有端口登记(任一步失败时释放)
   let logFd = null;

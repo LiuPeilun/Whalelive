@@ -4,6 +4,7 @@
 // 场景1:PID 写入失败(EIO 注入)→ 启动报错、端口不再监听、可立即重试;
 // 场景2:无关程序占用启动协调端口 → 启动明确失败且替身不受影响;
 // 场景3:空端口并发两个启动器 → 仅一个服务、败者退出 1、胜者可停止。
+// 场景4:与本工作区固定协调端口不一致的环境配置 → 启动明确拒绝(共享配置互斥)。
 // 用法:node scripts/e2e-startlock-regression.mjs
 
 import fs from 'node:fs';
@@ -114,6 +115,7 @@ async function scenario1(port) {
 
 async function scenario2(port, lockPort) {
   console.log(`---- 场景2:无关程序占用启动协调端口 ${lockPort} ----`);
+  // lockPort 由调用方从 .tools/startlock-port 读取(工作区共享配置的实际值)
   const squatter = await startSentinel(lockPort); // 替身占用协调端口
   let threw = null;
   try {
@@ -132,7 +134,7 @@ async function scenario3(port) {
   console.log(`---- 场景3:并发两个启动器(端口 ${port}) ----`);
   const logA = fs.openSync(path.join(root, '.tools', 'lockrace-a.log'), 'w');
   const logB = fs.openSync(path.join(root, '.tools', 'lockrace-b.log'), 'w');
-  const env = { ...process.env, WHALETALK_STARTLOCK_PORT: process.env.WHALETALK_STARTLOCK_PORT ?? '32109' };
+  const env = { ...process.env }; // 协调端口由工作区共享配置统一(WT-P1-009)
   const a = spawn(process.execPath, [path.join(root, 'scripts', 'e2e-server.mjs'), '--port', String(port)], { stdio: ['ignore', logA, logA], env });
   const b = spawn(process.execPath, [path.join(root, 'scripts', 'e2e-server.mjs'), '--port', String(port)], { stdio: ['ignore', logB, logB], env });
 
@@ -159,6 +161,23 @@ async function scenario3(port) {
   check('胜者可正常停止', listenerPid(port) === null);
 }
 
+/** 场景4:与本工作区固定协调端口不一致的环境配置被拒绝(共享配置互斥) */
+async function scenario4(port) {
+  console.log(`---- 场景4:不一致的协调端口环境配置(端口 ${port}) ----`);
+  const shared = Number(fs.readFileSync(path.join(root, '.tools', 'startlock-port'), 'utf8').trim());
+  const mismatched = shared === 32110 ? 32111 : 32110; // 任取一个不同的有效端口
+  const proc = spawn(process.execPath, [path.join(root, 'scripts', 'e2e-server.mjs'), '--port', String(port)], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, WHALETALK_STARTLOCK_PORT: String(mismatched) },
+  });
+  let out = '';
+  proc.stdout.on('data', (d) => { out += d; });
+  proc.stderr.on('data', (d) => { out += d; });
+  const code = await new Promise((resolve) => { proc.on('exit', (c) => resolve(c)); });
+  check('不一致的协调端口配置被明确拒绝', code !== 0 && /不一致/.test(out), `code=${code} out=${out.slice(-140)}`);
+  check('该配置下未创建服务子进程', listenerPid(port) === null, `listener=${listenerPid(port)}`);
+}
+
 // 主流程:哨兵首尾验证 + 临时端口
 const sentinelPort = await pickFreePort();
 const sentinel = await startSentinel(sentinelPort);
@@ -169,8 +188,10 @@ const port2 = await pickFreePort();
 const port3 = await pickFreePort();
 try {
   await scenario1(port1);
-  await scenario2(port2, Number(process.env.WHALETALK_STARTLOCK_PORT ?? 32109));
+  const sharedLockPort = Number(fs.readFileSync(path.join(root, '.tools', 'startlock-port'), 'utf8').trim());
+  await scenario2(port2, sharedLockPort);
   await scenario3(port3);
+  await scenario4((await pickFreePort()));
 } catch (err) {
   failures += 1;
   console.error('harness 异常:', err);
