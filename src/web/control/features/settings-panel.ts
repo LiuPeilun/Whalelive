@@ -69,9 +69,11 @@ export function mountSettingsPanel(context: ControlContext): void {
     try {
       const result = await apiFetch('/api/llm/config', context.credential);
       if (!result.ok) throw new Error(errorMessage(result.body, '配置读取失败'));
-      const cfg = result.body as { active: string; configured: boolean; model: string; thinking: boolean };
+      const cfg = result.body as { active: string; configured: boolean; model: string; thinking: boolean; fallbackReason?: string | null };
       const activeLabel = cfg.active === 'deepseek' ? 'DeepSeek' : '固定回复';
-      llmStatus.textContent = `当前生效:${activeLabel} | 密钥:${cfg.configured ? '已配置' : '未配置'} | 模型:${cfg.model} | 思考:${cfg.thinking ? '开' : '关'}`;
+      // 选了 DeepSeek 却回退到固定回复时,明确显示原因,避免误以为模型可用(WT-P1-021)。
+      const fallback = cfg.fallbackReason === 'DEEPSEEK_KEY_MISSING' ? ' | 回退原因:服务端未配置密钥' : '';
+      llmStatus.textContent = `当前生效:${activeLabel} | 密钥:${cfg.configured ? '已配置' : '未配置'} | 模型:${cfg.model} | 思考:${cfg.thinking ? '开' : '关'}${fallback}`;
     } catch (err) {
       llmStatus.textContent = `配置状态读取失败:${err instanceof Error ? err.message : String(err)}`;
     }

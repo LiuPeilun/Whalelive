@@ -86,7 +86,8 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   const deepSeekConfig: DeepSeekConfig = {
     apiKey: env.DEEPSEEK_API_KEY?.trim() ?? '',
     baseUrl: env.DEEPSEEK_BASE_URL?.trim() || 'https://api.deepseek.com',
-    model: env.DEEPSEEK_MODEL?.trim() || 'deepseek-chat',
+    // ARCHITECTURE §6 契约默认名;本地兼容端点可由 DEEPSEEK_MODEL 覆盖(WT-P1-023)。
+    model: env.DEEPSEEK_MODEL?.trim() || 'deepseek-flash',
     thinking: env.DEEPSEEK_THINKING?.trim().toLowerCase() === 'enabled',
   };
   const audioCache = createAudioCache({ audioDir: paths.audioCacheDir, logger, now });
@@ -185,7 +186,8 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
     edgeTts,
     ttsPreview,
     llm: {
-      generate: (input) => replyProvider.generate(input),
+      generateStrict: (input) => replyProvider.generateStrict(input),
+      diagnose: () => replyProvider.diagnose(),
       active: () => replyProvider.active(),
       configured: () => deepseek.configured(),
       model: deepSeekConfig.model,

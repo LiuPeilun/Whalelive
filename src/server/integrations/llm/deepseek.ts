@@ -22,7 +22,10 @@ const SAY_MAX = 120;
 
 type ChatMessage = { role: string; content: string };
 type ChatResponse = {
-  choices?: Array<{ message?: { content?: unknown; reasoning_content?: unknown } }>;
+  choices?: Array<{
+    message?: { content?: unknown; reasoning_content?: unknown };
+    finish_reason?: unknown;
+  }>;
   usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; total_tokens?: unknown };
 };
 
@@ -104,7 +107,8 @@ export function createDeepSeekReplyProvider(deps: {
           { role: 'user', content: JSON.stringify({ user: userKey, text }) },
         ],
         stream: false,
-        ...(deps.config.thinking ? { thinking: { type: 'enabled' } } : {}),
+        // ARCHITECTURE §6:低延迟聊天显式发送思考开关,不依赖上游默认(WT-P1-023)。
+        thinking: { type: deps.config.thinking ? 'enabled' : 'disabled' },
       };
       const response = await doFetch(endpoint, {
         method: 'POST',
@@ -122,7 +126,14 @@ export function createDeepSeekReplyProvider(deps: {
       }
       const raw = (await response.json()) as ChatResponse;
       signal.throwIfAborted();
-      const content = raw.choices?.[0]?.message?.content;
+      const choice = raw.choices?.[0];
+      // 上游明确报告截断:即使内容里能拼出 JSON 也不采纳,走保底(WT-P1-023)。
+      // 仅在 finish_reason 明确为 length 时判定;缺失该字段的兼容端点不受影响。
+      if (choice?.finish_reason === 'length') {
+        deps.logger.warn('llm.deepseek-truncated', { event: 'finish-reason-length' });
+        throw new Error('DeepSeek 回复被截断(finish_reason=length)');
+      }
+      const content = choice?.message?.content;
       if (typeof content !== 'string' || content.trim() === '') {
         deps.logger.warn('llm.deepseek-empty', { event: 'empty-content' });
         throw new Error('DeepSeek 返回空内容');

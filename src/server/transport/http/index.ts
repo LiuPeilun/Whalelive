@@ -10,6 +10,8 @@ import type { SettingsModule } from '../../modules/settings/index.js';
 import type { MockEventInput } from '../../integrations/platforms/mock.js';
 import type { EdgeTtsSpeech } from '../../integrations/tts/edge-tts.js';
 import type { ReplyProvider } from '../../modules/interaction/providers.js';
+import type { ReplyRouter } from '../../integrations/llm/reply-router.js';
+import { LlmPreviewError } from '../../integrations/llm/reply-router.js';
 import type { createAccessControl } from '../auth.js';
 
 // 路由、请求校验、响应与资源传输(PROJECT_STRUCTURE《接口与页面路径》)。
@@ -31,8 +33,7 @@ export type HttpDeps = {
   /** 试听合成:按当前(或覆盖)音色合成一段文本,返回音频地址;失败抛错由路由映射 */
   ttsPreview(input: { text: string; voice?: string }): Promise<{ audioUrl: string } | null>;
   /** P1 第三批:回复提供方(用于预览与配置状态),不入队、不播放。 */
-  llm: {
-    generate(input: { text: string; userKey: string; signal: AbortSignal }): Promise<Awaited<ReturnType<ReplyProvider['generate']>>>;
+  llm: Pick<ReplyRouter, 'generateStrict' | 'diagnose'> & {
     active(): 'fixed-local' | 'deepseek';
     configured(): boolean;
     model: string;
@@ -61,6 +62,12 @@ function sendTtsError(reply: FastifyReply, err: unknown, action: string): Fastif
 }
 
 function sendLlmError(reply: FastifyReply, err: unknown): FastifyReply {
+  // 预览专用诊断错误(WT-P1-021):区分未配置、超时与上游故障,返回对应错误码。
+  if (err instanceof LlmPreviewError) {
+    const code = err.reason === 'TIMEOUT' ? ErrorCodes.LLM_TIMEOUT : ErrorCodes.LLM_UNAVAILABLE;
+    const status = err.reason === 'TIMEOUT' ? 504 : 502;
+    return reply.code(status).send(apiError(code, err.message, 'llm'));
+  }
   const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
   return reply.code(timedOut ? 504 : 502).send(apiError(
     timedOut ? ErrorCodes.LLM_TIMEOUT : ErrorCodes.LLM_UNAVAILABLE,
@@ -198,10 +205,12 @@ export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): vo
   // P1 第三批:模型配置状态(脱敏,不含密钥)与回复预览(调模型但不入队、不播放)。
   fastify.get('/api/llm/config', async (request, reply) => {
     if (!guardControl(deps, request, reply)) return reply;
+    const diag = deps.llm.diagnose();
     return {
-      provider: deps.settings.effective().llm.provider,
-      active: deps.llm.active(),
-      configured: deps.llm.configured(),
+      provider: diag.requested,
+      active: diag.active,
+      configured: diag.configured,
+      fallbackReason: diag.fallbackReason,
       model: deps.llm.model,
       baseUrl: deps.llm.baseUrl,
       thinking: deps.llm.thinking,
@@ -219,7 +228,7 @@ export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): vo
     const startedAt = Date.now();
     try {
       const signal = AbortSignal.timeout(deps.settings.effective().generation.llmTimeoutMs);
-      const result = await deps.llm.generate({ text, userKey: 'preview', signal });
+      const result = await deps.llm.generateStrict({ text, userKey: 'preview', signal });
       return { ...result, elapsedMs: Date.now() - startedAt };
     } catch (err) {
       deps.logger.warn('http.llm-preview-failed', { error: String(err) });
