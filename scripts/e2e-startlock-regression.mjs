@@ -7,10 +7,13 @@
 // 场景4:与本工作区固定协调端口不一致的环境配置 → 启动明确拒绝(共享配置互斥)。
 // 场景5:共享配置缺失时两个不同环境值并发首次发布 → 原子发布只允许一个值生效,
 //        胜者唯一、登记保留且可正常停止。
+// 场景2/4/5 在隔离临时工作区(WHALETALK_TOOLS_DIR)运行,不读取、不删除、不改写
+// 调用者工作区的共享协调配置(WT-P1-014);哨兵同时守护主工作区配置前后一致。
 // 用法:node scripts/e2e-startlock-regression.mjs
 
 import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
@@ -115,20 +118,32 @@ async function scenario1(port) {
   check('重试实例可正常停止', listenerPid(port) === null);
 }
 
-async function scenario2(port, lockPort) {
-  console.log(`---- 场景2:无关程序占用启动协调端口 ${lockPort} ----`);
-  // lockPort 由调用方从 .tools/startlock-port 读取(工作区共享配置的实际值)
+async function scenario2(port) {
+  // 隔离工作区(WT-P1-014):协调端口与登记都在临时目录,不碰主工作区
+  const tools = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-startlock2-'));
+  const lockPort = 32297; // 隔离工作区专用协调端口
+  console.log(`---- 场景2:无关程序占用启动协调端口 ${lockPort}(隔离工作区) ----`);
   const squatter = await startSentinel(lockPort); // 替身占用协调端口
+  const prevTools = process.env.WHALETALK_TOOLS_DIR;
+  const prevLockPort = process.env.WHALETALK_STARTLOCK_PORT;
+  process.env.WHALETALK_TOOLS_DIR = tools; // 本进程内切换到隔离工作区
+  process.env.WHALETALK_STARTLOCK_PORT = String(lockPort); // 隔离配置发布为替身占用的端口
   let threw = null;
   try {
     await startTestServer({ port, startLockTimeoutMs: 4_000 });
   } catch (err) {
     threw = err;
+  } finally {
+    if (prevTools === undefined) delete process.env.WHALETALK_TOOLS_DIR;
+    else process.env.WHALETALK_TOOLS_DIR = prevTools;
+    if (prevLockPort === undefined) delete process.env.WHALETALK_STARTLOCK_PORT;
+    else process.env.WHALETALK_STARTLOCK_PORT = prevLockPort;
   }
   check('协调端口被占时启动明确失败', threw !== null && /启动锁获取超时/.test(String(threw.message)), threw?.message?.slice(0, 90) ?? '未报错');
   const alive = await sentinelResponds(lockPort);
   check('占用协调端口的替身不受影响(未误杀)', alive);
   squatter.close();
+  fs.rmSync(tools, { recursive: true, force: true });
   await sleep(300);
 }
 
@@ -163,14 +178,15 @@ async function scenario3(port) {
   check('胜者可正常停止', listenerPid(port) === null);
 }
 
-/** 场景4:与本工作区固定协调端口不一致的环境配置被拒绝(共享配置互斥) */
+/** 场景4:与本工作区固定协调端口不一致的环境配置被拒绝(共享配置互斥,隔离工作区) */
 async function scenario4(port) {
-  console.log(`---- 场景4:不一致的协调端口环境配置(端口 ${port}) ----`);
-  const shared = Number(fs.readFileSync(path.join(root, '.tools', 'startlock-port'), 'utf8').trim());
-  const mismatched = shared === 32110 ? 32111 : 32110; // 任取一个不同的有效端口
+  console.log(`---- 场景4:不一致的协调端口环境配置(端口 ${port},隔离工作区) ----`);
+  const tools = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-startlock4-'));
+  fs.writeFileSync(path.join(tools, 'startlock-port'), '32222'); // 预置已发布配置
+  const mismatched = 32233; // 与预置不一致的环境值
   const proc = spawn(process.execPath, [path.join(root, 'scripts', 'e2e-server.mjs'), '--port', String(port)], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, WHALETALK_STARTLOCK_PORT: String(mismatched) },
+    env: { ...process.env, WHALETALK_TOOLS_DIR: tools, WHALETALK_STARTLOCK_PORT: String(mismatched) },
   });
   let out = '';
   proc.stdout.on('data', (d) => { out += d; });
@@ -178,26 +194,28 @@ async function scenario4(port) {
   const code = await new Promise((resolve) => { proc.on('exit', (c) => resolve(c)); });
   check('不一致的协调端口配置被明确拒绝', code !== 0 && /不一致/.test(out), `code=${code} out=${out.slice(-140)}`);
   check('该配置下未创建服务子进程', listenerPid(port) === null, `listener=${listenerPid(port)}`);
+  check('隔离工作区的预置配置未被改写', fs.readFileSync(path.join(tools, 'startlock-port'), 'utf8').trim() === '32222');
+  fs.rmSync(tools, { recursive: true, force: true });
 }
 
-/** 场景5:共享配置缺失时,两个不同环境值并发首次发布(WT-P1-009 原子发布) */
+/** 场景5:共享配置缺失时,两个不同环境值并发首次发布(WT-P1-009 原子发布,隔离工作区) */
 async function scenario5(port) {
-  console.log(`---- 场景5:首次并发发布共享配置(端口 ${port}) ----`);
-  fs.rmSync(path.join(root, '.tools', 'startlock-port'), { force: true }); // 确保配置缺失
+  console.log(`---- 场景5:首次并发发布共享配置(端口 ${port},隔离工作区) ----`);
+  const tools = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-startlock5-')); // 无预置配置 = 缺失态
   const portA = 32211;
   const portB = 32213; // 两个不同且有效的协调端口
   const logA = fs.openSync(path.join(root, '.tools', 'pubrace-a.log'), 'w');
   const logB = fs.openSync(path.join(root, '.tools', 'pubrace-b.log'), 'w');
+  const envBase = { ...process.env, WHALETALK_TOOLS_DIR: tools };
   const a = spawn(process.execPath, [path.join(root, 'scripts', 'e2e-server.mjs'), '--port', String(port)], {
     stdio: ['ignore', logA, logA],
-    env: { ...process.env, WHALETALK_STARTLOCK_PORT: String(portA) },
+    env: { ...envBase, WHALETALK_STARTLOCK_PORT: String(portA) },
   });
   const b = spawn(process.execPath, [path.join(root, 'scripts', 'e2e-server.mjs'), '--port', String(port)], {
     stdio: ['ignore', logB, logB],
-    env: { ...process.env, WHALETALK_STARTLOCK_PORT: String(portB) },
+    env: { ...envBase, WHALETALK_STARTLOCK_PORT: String(portB) },
   });
 
-  // 轮询等待一个启动器退出(胜者保持前台运行)
   let loserExit = null;
   const deadline = Date.now() + 25_000;
   while (Date.now() < deadline) {
@@ -211,21 +229,25 @@ async function scenario5(port) {
     const loserText = fs.readFileSync(path.join(root, '.tools', loserExit.log), 'utf8');
     check('败者以冲突/占用信息退出 1', loserExit.code === 1 && /不一致|已有活跃测试服务/.test(loserText), loserText.slice(-160));
   }
-  const published = Number(fs.readFileSync(path.join(root, '.tools', 'startlock-port'), 'utf8').trim());
-  check('共享配置只发布了一个值(A 或 B 之一)', published === portA || published === portB, `published=${published}`);
+  const published = Number(fs.readFileSync(path.join(tools, 'startlock-port'), 'utf8').trim());
+  check('共享配置只发布了一个完整值(A 或 B 之一)', published === portA || published === portB, `published=${published}`);
 
-  // 胜者健康(带重试:败者退出时胜者可能仍在启动)、登记保留、可正常停止(复审验收口径)
+  // 胜者健康(带启动重试)、登记保留(隔离工作区内)、经隔离工作区停止入口正常停止
   let healthy = false;
   for (let i = 0; i < 20 && !healthy; i += 1) {
     healthy = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.ok).catch(() => false);
     if (!healthy) await sleep(1_000);
   }
   check('胜者服务健康', healthy);
-  const registered = fs.existsSync(path.join(root, '.tools', `e2e-server-${port}.pid`));
+  const registered = fs.existsSync(path.join(tools, `e2e-server-${port}.pid`));
   check('胜者登记保留(未消失)', registered);
-  try { stopTestServer(port); } catch (err) { /* 已退出 */ }
-  await sleep(800);
-  check('胜者可正常停止', listenerPid(port) === null);
+  const stop = spawn(process.execPath, [path.join(root, 'scripts', 'e2e-server.mjs'), '--stop', '--port', String(port)], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: envBase,
+  });
+  const stopCode = await new Promise((resolve) => { stop.on('exit', (c) => resolve(c)); });
+  check('胜者可经隔离工作区停止入口正常停止(退出 0)', stopCode === 0 && listenerPid(port) === null, `stopCode=${stopCode}`);
+  fs.rmSync(tools, { recursive: true, force: true });
 }
 
 // 主流程:哨兵首尾验证 + 临时端口
@@ -236,10 +258,11 @@ check('哨兵替身启动并可响应(执行前)', await sentinelResponds(sentin
 const port1 = await pickFreePort();
 const port2 = await pickFreePort();
 const port3 = await pickFreePort();
+const mainCfg = path.join(root, '.tools', 'startlock-port');
+const cfgBefore = fs.existsSync(mainCfg) ? fs.readFileSync(mainCfg, 'utf8').trim() : null;
 try {
   await scenario1(port1);
-  const sharedLockPort = Number(fs.readFileSync(path.join(root, '.tools', 'startlock-port'), 'utf8').trim());
-  await scenario2(port2, sharedLockPort);
+  await scenario2(port2);
   await scenario3(port3);
   await scenario4((await pickFreePort()));
   await scenario5((await pickFreePort()));
@@ -248,6 +271,8 @@ try {
   console.error('harness 异常:', err);
 }
 check('哨兵替身仍正常响应(执行后,测试未误伤无关进程)', await sentinelResponds(sentinelPort));
+const cfgAfter = fs.existsSync(mainCfg) ? fs.readFileSync(mainCfg, 'utf8').trim() : null;
+check('主工作区共享协调配置前后一致(WT-P1-014)', cfgBefore === cfgAfter, `before=${cfgBefore} after=${cfgAfter}`);
 sentinel.close();
 console.log(failures === 0 ? '启动锁回归:全部通过' : `启动锁回归:${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

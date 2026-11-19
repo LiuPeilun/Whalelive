@@ -19,14 +19,20 @@ import { spawn, execFileSync } from 'node:child_process';
 import { createRedactingWriter } from './redact-log.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+// 登记与日志目录:默认工作区 .tools;WHALETALK_TOOLS_DIR 供回归在隔离工作区
+// 运行(WT-P1-014:测试不得改写调用者工作区的共享协调配置)。按调用时读取,
+// 进程内切换环境变量即可切换目录。
+function toolsDirPath() {
+  return process.env.WHALETALK_TOOLS_DIR ?? path.join(root, '.tools');
+}
 
 function pidFileFor(port) {
-  return path.join(root, '.tools', `e2e-server-${port}.pid`);
+  return path.join(toolsDirPath(), `e2e-server-${port}.pid`);
 }
 
 /** 该端口测试服务的日志文件(行缓冲脱敏写入);回归脚本按同一入口读取 */
 export function logFileFor(port) {
-  return path.join(root, '.tools', `e2e-server-${port}.log`);
+  return path.join(toolsDirPath(), `e2e-server-${port}.log`);
 }
 
 function execPowerShell(command) {
@@ -73,39 +79,57 @@ const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 // 协调端口属于工作区共享配置:首次使用发布到 .tools/startlock-port,此后本
 // 工作区的启动器一律使用该端口(WT-P1-009)——否则同一工作区内不同环境变量
 // 配置的终端会在各自锁下同时操作同一份 PID 登记,互斥失效。
-// 首次发布是原子操作(wx 独占创建,WT-P1-009,2026-11-19_093710):并发首次
-// 启动时只有一方能创建文件,败者读取已发布的完整值并做冲突检查——不存在
-// 「双方都看到缺失、各自发布不同端口」的窗口。已发布的值与环境变量冲突时
-// 明确报错,不回退。
-const START_LOCK_PORT_FILE = path.join(root, '.tools', 'startlock-port');
+// 发布流程(WT-P1-009,2026-11-19_100754):先在临时文件完成写入并校验端口值,
+// 再以 rename(Windows 上等同于原子替换,不留下零字节目标)发布完整值——写入
+// 中断只会留下临时文件,目标路径要么缺失要么始终是完整值,不存在
+// 「独占创建成功但写入中断留下空文件、下次启动 wx 得 EEXIST 死循环」。
+// 已发布的值与环境变量冲突时明确报错,不回退。
+const startLockPortFile = () => path.join(toolsDirPath(), 'startlock-port');
+
+function readPublishedPort() {
+  try {
+    const value = Number(fs.readFileSync(startLockPortFile(), 'utf8').trim());
+    return Number.isFinite(value) && value > 0 ? value : null;
+  } catch {
+    return null; // 不存在
+  }
+}
 
 function sharedStartLockPort() {
   const wanted = Number(process.env.WHALETALK_STARTLOCK_PORT ?? 0);
   const chosen = wanted > 0 ? wanted : 32109;
-  fs.mkdirSync(path.dirname(START_LOCK_PORT_FILE), { recursive: true });
-  for (;;) {
-    // 已发布:读取完整值并做一致性检查(与 wanted 冲突时明确拒绝)
-    if (fs.existsSync(START_LOCK_PORT_FILE)) {
-      const shared = Number(fs.readFileSync(START_LOCK_PORT_FILE, 'utf8').trim());
-      if (Number.isFinite(shared) && shared > 0) {
-        if (wanted > 0 && wanted !== shared) {
-          throw new Error(`本工作区启动协调端口已固定为 ${shared}(.tools/startlock-port),与环境变量 WHALETALK_STARTLOCK_PORT=${wanted} 不一致;如需更换请先删除该文件并确保没有正在进行的启动`);
-        }
-        return shared;
-      }
-      // 内容无效:极少见(写入中断),按未发布处理,由下方独占创建重写
+  const PORT_FILE = startLockPortFile();
+  fs.mkdirSync(path.dirname(PORT_FILE), { recursive: true });
+
+  // 已发布完整值:一致性检查(与 wanted 冲突时明确拒绝)
+  const published = readPublishedPort();
+  if (published !== null) {
+    if (wanted > 0 && wanted !== published) {
+      throw new Error(`本工作区启动协调端口已固定为 ${published}(startlock-port 配置文件),与环境变量 WHALETALK_STARTLOCK_PORT=${wanted} 不一致;如需更换请先删除该文件并确保没有正在进行的启动`);
     }
-    // 未发布:原子发布 —— wx 独占创建,只有一个进程能成功
-    try {
-      const fd = fs.openSync(START_LOCK_PORT_FILE, 'wx');
-      fs.writeSync(fd, String(chosen));
-      fs.closeSync(fd);
-      return chosen;
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-      // 另一启动器已抢先发布:回到读取分支,用已发布的值(可能触发冲突拒绝)
-    }
+    return published;
   }
+
+  // 未发布(缺失或无效):临时文件写入 + 校验后 rename 原子发布。
+  // 并发双方各自写自己的临时文件,rename 后写者胜——最终文件是一个完整值。
+  const tmp = `${PORT_FILE}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, String(chosen));
+  const written = Number(fs.readFileSync(tmp, 'utf8').trim()); // 校验写入完整
+  if (written !== chosen) {
+    fs.rmSync(tmp, { force: true });
+    throw new Error(`共享协调端口临时文件校验失败(期望 ${chosen},读到 ${written})`);
+  }
+  fs.renameSync(tmp, PORT_FILE);
+  // 并发下可能被对方先发布:读取最终值(必为完整值),仍做一致性检查
+  const final = readPublishedPort();
+  if (final === null) {
+    throw new Error('共享协调端口发布后读取失败(不应发生)');
+  }
+  if (wanted > 0 && wanted !== final) {
+    // 本进程的值被对方覆盖:按已发布值执行(如与自己的环境变量冲突则拒绝)
+    throw new Error(`本工作区启动协调端口已固定为 ${final}(startlock-port 配置文件),与环境变量 WHALETALK_STARTLOCK_PORT=${wanted} 不一致;如需更换请先删除该文件并确保没有正在进行的启动`);
+  }
+  return final;
 }
 
 class StartLock {
