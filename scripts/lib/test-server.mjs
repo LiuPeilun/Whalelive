@@ -79,16 +79,17 @@ const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 // 协调端口属于工作区共享配置:首次使用发布到 .tools/startlock-port,此后本
 // 工作区的启动器一律使用该端口(WT-P1-009)——否则同一工作区内不同环境变量
 // 配置的终端会在各自锁下同时操作同一份 PID 登记,互斥失效。
-// 发布流程(WT-P1-009,2026-11-19_100754):先在临时文件完成写入并校验端口值,
-// 再以 rename(Windows 上等同于原子替换,不留下零字节目标)发布完整值——写入
-// 中断只会留下临时文件,目标路径要么缺失要么始终是完整值,不存在
-// 「独占创建成功但写入中断留下空文件、下次启动 wx 得 EEXIST 死循环」。
+// 发布流程(WT-P1-009,2026-11-19_103853):临时文件写入并校验后,以
+// fs.linkSync(tmp, target) 发布——link 同时满足「完整交付」与「禁止覆盖」:
+// 目标已存在时返回 EEXIST 且保留原值(Windows 实测同目录行为一致),后发布方
+// 覆盖不了先发布方的值,双方只会在同一把锁下串行。竞争失败方捕获 EEXIST 后
+// 读回获胜值并做一致性检查。rename 不具备禁止覆盖语义,不再使用。
 // 已发布的值与环境变量冲突时明确报错,不回退。
 const startLockPortFile = () => path.join(toolsDirPath(), 'startlock-port');
 
 function readPublishedPort() {
   try {
-    const value = Number(fs.readFileSync(startLockPortFile(), 'utf8').trim());
+    const value = Number(fs.readFileSync(startLockPortFile(), 'utf-8').trim());
     return Number.isFinite(value) && value > 0 ? value : null;
   } catch {
     return null; // 不存在
@@ -101,32 +102,45 @@ function sharedStartLockPort() {
   const PORT_FILE = startLockPortFile();
   fs.mkdirSync(path.dirname(PORT_FILE), { recursive: true });
 
-  // 已发布完整值:一致性检查(与 wanted 冲突时明确拒绝)
-  const published = readPublishedPort();
-  if (published !== null) {
+  // 已发布:完整值做一致性检查;空/损坏值给出有界诊断(link 发布下无效文件
+  // 不可能由本代码产生,只来自外部干预或历史遗留,自动覆盖恢复会重新引入
+  // 「删掉他人刚发布的完整值」的竞态)
+  const existing = fs.existsSync(PORT_FILE);
+  if (existing) {
+    const published = readPublishedPort();
+    if (published === null) {
+      throw new Error(`startlock-port 配置文件内容无效(空或损坏):请确认没有正在进行的启动后手动删除 ${PORT_FILE} 再重试`);
+    }
     if (wanted > 0 && wanted !== published) {
       throw new Error(`本工作区启动协调端口已固定为 ${published}(startlock-port 配置文件),与环境变量 WHALETALK_STARTLOCK_PORT=${wanted} 不一致;如需更换请先删除该文件并确保没有正在进行的启动`);
     }
     return published;
   }
 
-  // 未发布(缺失或无效):临时文件写入 + 校验后 rename 原子发布。
-  // 并发双方各自写自己的临时文件,rename 后写者胜——最终文件是一个完整值。
+  // 未发布(缺失或无效):临时文件写入 + 校验后 link 发布(禁止覆盖)。
   const tmp = `${PORT_FILE}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmp, String(chosen));
-  const written = Number(fs.readFileSync(tmp, 'utf8').trim()); // 校验写入完整
+  const written = Number(fs.readFileSync(tmp, 'utf-8').trim()); // 校验写入完整
   if (written !== chosen) {
     fs.rmSync(tmp, { force: true });
     throw new Error(`共享协调端口临时文件校验失败(期望 ${chosen},读到 ${written})`);
   }
-  fs.renameSync(tmp, PORT_FILE);
-  // 并发下可能被对方先发布:读取最终值(必为完整值),仍做一致性检查
+  try {
+    fs.linkSync(tmp, PORT_FILE); // 目标已存在 → EEXIST,原值保留
+  } catch (err) {
+    if (err.code !== 'EEXIST') {
+      fs.rmSync(tmp, { force: true });
+      throw err;
+    }
+    // 竞争失败:对方已发布完整值。读回获胜值做一致性检查。
+  } finally {
+    fs.rmSync(tmp, { force: true }); // 临时文件清理(link 成功后原 tmp 已成为目标,删除的是名字)
+  }
   const final = readPublishedPort();
   if (final === null) {
     throw new Error('共享协调端口发布后读取失败(不应发生)');
   }
   if (wanted > 0 && wanted !== final) {
-    // 本进程的值被对方覆盖:按已发布值执行(如与自己的环境变量冲突则拒绝)
     throw new Error(`本工作区启动协调端口已固定为 ${final}(startlock-port 配置文件),与环境变量 WHALETALK_STARTLOCK_PORT=${wanted} 不一致;如需更换请先删除该文件并确保没有正在进行的启动`);
   }
   return final;
