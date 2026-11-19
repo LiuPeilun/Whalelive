@@ -13,3 +13,6 @@ coverage/
 # 日志
 *.log
 .tools/
+
+# WorkBuddy 工作记忆(非项目交付物)
+.workbuddy/
