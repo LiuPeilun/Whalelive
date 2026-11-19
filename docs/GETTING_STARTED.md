@@ -86,12 +86,18 @@ BILIBILI_OPEN_ANCHOR_CODE=
 
 初始 `PLATFORM=mock` 使用模拟事件。`bilibili-web` 接法按实现和当前平台要求配置房间号及登录信息，`bilibili-open` 接法配置应用凭据和主播身份码。TTS 音色列表由所选提供方加载，正式云语音服务增加其对应配置。
 
+### 3.0 语音（已默认配置，无需额外步骤）
+
+语音默认使用 **edge-tts**（微软 Edge 朗读通道，免费），安装后开箱即用：发弹幕角色即用真人声回应。音色可在控制台设置面板的「语音区块」下拉选择并**试听**后保存（默认 `zh-CN-XiaoxiaoNeural` 晓晓女声）。
+
 ### 3.1 接入 DeepSeek（P1 第三批）
 
 回复默认使用离线固定回复，零配置即可启动。接入真实模型只需两步：
 
 1. 在 `.env.local` 填写 `DEEPSEEK_API_KEY`（在 DeepSeek 开放平台创建，按用量计费）。按需调整 `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`DEEPSEEK_THINKING`（`enabled` 开启思考）。这些值只在服务端读取，不会出现在控制台或浏览器。
 2. 重启服务。控制台设置面板的「回复来源」选择 `deepseek`；「配置状态」显示密钥已配置、当前生效为 DeepSeek 即成功。填好密钥后路由自动切换，无需改其它设置。
+
+> **使用本地自部署模型**（vLLM 等内网/隧道部署）：不需要改代码，同样只改 `.env.local` 的 `DEEPSEEK_BASE_URL`/`DEEPSEEK_MODEL`。连接与排障步骤见本地文档 `docs/MODEL_SERVICE_ACCESS.md`（含服务器拓扑，该文件**已加入 .gitignore 不入库**，仅本地保留）。
 
 密钥未填或模型调用失败时，回复自动降级为固定文本并在控制台标注来源 `fallback`，直播不会中断。可用设置面板的「回复预览」输入一句话，核对回复文本、动作、来源、耗时与 token 用量；队列区的「耗时与用量」展示排队、生成、合成、播放各阶段耗时与累计 token。模型输出只接受白名单动作，观众弹幕里的指令文字不会被执行。
 

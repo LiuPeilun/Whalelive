@@ -2,10 +2,16 @@
 -- 录制停止后,把录像文件移动到目标根目录下按日期(YYYY-MM-DD)的子文件夹。
 -- 前置:OBS 设置 → 输出 → 录制 → 录制路径 需指向目标根目录(同盘移动才可靠)。
 -- 安装:OBS 菜单 工具 → 脚本 → 「+」→ 选择本文件;可在脚本面板修改目标根目录。
+--
+-- 实测修正(2026-11-19):停止录制后 Windows 上 MP4 句柄未立即释放,
+-- 立即 os.rename 会静默失败(目标文件夹建好但文件留在根目录)。
+-- 改为定时重试:每 500ms 尝试一次,最多 60 次(30 秒),成功后自动撤销定时器。
 
 local obs = obslua
 
 local target_root = "D:\\Project\\dsh-workspace\\WhaleTalk\\data\\recordings"
+
+local rename_timer_active = false
 
 script_description = "录制停止后,把录像移动到目标根目录下按日期(YYYY-MM-DD)的子文件夹。"
 
@@ -39,13 +45,35 @@ local function handle_event(event)
     return
   end
   local dest = dest_dir .. "\\" .. name
-  local ok, err = os.rename(src, dest)
-  if not ok then
-    -- 同名冲突等情况:加时间戳前缀重试一次
-    dest = dest_dir .. "\\" .. os.date("%H%M%S-") .. name
-    ok, err = os.rename(src, dest)
+
+  -- 立即试一次(多数情况句柄已释放);失败进入定时重试
+  local ok = os.rename(src, dest)
+  if ok then
+    print(string.format("[WhaleTalk 录制整理] %s -> %s OK", src, dest))
+    return
   end
-  print(string.format("[WhaleTalk 录制整理] %s -> %s %s", src, dest, ok and "OK" or ("失败: " .. tostring(err))))
+
+  -- 句柄未释放:启动重试定时器(500ms×60 次=30s 上限)
+  if rename_timer_active then
+    return -- 上一次仍在重试中:不叠加定时器
+  end
+  rename_timer_active = true
+  local attempts = 0
+  local function retry()
+    attempts = attempts + 1
+    local done = os.rename(src, dest)
+    if done then
+      obs.timer_remove(retry)
+      rename_timer_active = false
+      print(string.format("[WhaleTalk 录制整理] %s -> %s OK(第 %d 次重试)", src, dest, attempts))
+    elseif attempts >= 60 then
+      obs.timer_remove(retry)
+      rename_timer_active = false
+      print(string.format("[WhaleTalk 录制整理] 失败: 30 秒内无法移动 %s(文件可能仍被占用),请手动移动到 %s", src, dest_dir))
+    end
+  end
+  obs.timer_add(retry, 500)
+  print(string.format("[WhaleTalk 录制整理] 句柄未释放,500ms 后开始重试移动 -> %s", dest))
 end
 
 function script_load(settings)
