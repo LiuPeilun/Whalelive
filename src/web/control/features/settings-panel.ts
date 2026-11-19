@@ -38,6 +38,71 @@ export function mountSettingsPanel(context: ControlContext): void {
     box.append(label);
   }
 
+  // ---- 回复模型(LLM)区块:P1 第三批 ----
+  const llmProviderSelect = document.createElement('select');
+  for (const [value, label] of [['fixed-local', '固定回复(离线,零配置)'], ['deepseek', 'DeepSeek(需服务端配置密钥)']] as const) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    llmProviderSelect.append(opt);
+  }
+  const llmStatus = document.createElement('span');
+  llmStatus.className = 'muted';
+  const previewText = document.createElement('input');
+  previewText.type = 'text';
+  previewText.value = '今天天气不错呀';
+  previewText.style.flex = '1';
+  const llmPreviewBtn = document.createElement('button');
+  llmPreviewBtn.textContent = '生成回复';
+  llmPreviewBtn.type = 'button';
+  const previewOut = document.createElement('div');
+  previewOut.className = 'muted mono';
+  box.append(
+    el('label', { className: 'field' }, [el('span', { textContent: '回复来源' }), llmProviderSelect]),
+    el('label', { className: 'field' }, [el('span', { textContent: '配置状态' }), llmStatus]),
+    el('label', { className: 'field' }, [el('span', { textContent: '回复预览' }), previewText, llmPreviewBtn]),
+    previewOut,
+  );
+
+  /** 读取模型配置状态(脱敏)并显示;密钥是否配置由服务端判定。 */
+  async function refreshLlmConfig(): Promise<void> {
+    try {
+      const result = await apiFetch('/api/llm/config', context.credential);
+      if (!result.ok) throw new Error(errorMessage(result.body, '配置读取失败'));
+      const cfg = result.body as { active: string; configured: boolean; model: string; thinking: boolean; fallbackReason?: string | null };
+      const activeLabel = cfg.active === 'deepseek' ? 'DeepSeek' : '固定回复';
+      // 选了 DeepSeek 却回退到固定回复时,明确显示原因,避免误以为模型可用(WT-P1-021)。
+      const fallback = cfg.fallbackReason === 'DEEPSEEK_KEY_MISSING' ? ' | 回退原因:服务端未配置密钥' : '';
+      llmStatus.textContent = `当前生效:${activeLabel} | 密钥:${cfg.configured ? '已配置' : '未配置'} | 模型:${cfg.model} | 思考:${cfg.thinking ? '开' : '关'}${fallback}`;
+    } catch (err) {
+      llmStatus.textContent = `配置状态读取失败:${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  llmPreviewBtn.addEventListener('click', async () => {
+    const text = previewText.value.trim();
+    if (text === '') {
+      context.notify('请输入预览文本', true);
+      return;
+    }
+    llmPreviewBtn.disabled = true;
+    llmPreviewBtn.textContent = '生成中…';
+    try {
+      const result = await apiFetch('/api/llm/preview', context.credential, {
+        method: 'POST',
+        body: JSON.stringify({ text }),
+      });
+      if (!result.ok) throw new Error(errorMessage(result.body, '生成失败'));
+      const r = result.body as { say: string; action: string | null; emotion?: string; provider?: string; usage?: { totalTokens: number }; elapsedMs: number };
+      previewOut.textContent = `${r.say}  [动作:${r.action ?? '无'} 情绪:${r.emotion ?? '-'} 来源:${r.provider ?? '-'} ${r.elapsedMs}ms token:${r.usage?.totalTokens ?? 0}]`;
+    } catch (err) {
+      context.notify(`回复预览失败:${err instanceof Error ? err.message : String(err)}`, true);
+    } finally {
+      llmPreviewBtn.disabled = false;
+      llmPreviewBtn.textContent = '生成回复';
+    }
+  });
+
   // ---- 语音(TTS)区块:P1 第二批 ----
   const providerSelect = document.createElement('select');
   for (const [value, label] of [['edge-tts', 'edge-tts(真实人声)'], ['fixed-local', 'fixed-local(本地罐头音,离线可用)']] as const) {
@@ -123,6 +188,8 @@ export function mountSettingsPanel(context: ControlContext): void {
       const input = inputs.get(field.key);
       if (input) input.value = String(field.get(view));
     }
+    llmProviderSelect.value = view.user.llm.provider;
+    void refreshLlmConfig();
     providerSelect.value = view.user.tts.provider;
     voiceSelect.value = view.user.tts.voice;
     if (voiceSelect.value !== view.user.tts.voice) {
@@ -168,6 +235,9 @@ export function mountSettingsPanel(context: ControlContext): void {
       tts: {
         provider: providerSelect.value as 'fixed-local' | 'edge-tts',
         voice: voiceSelect.value,
+      },
+      llm: {
+        provider: llmProviderSelect.value as 'fixed-local' | 'deepseek',
       },
     };
     const result = await apiFetch('/api/settings', context.credential, {

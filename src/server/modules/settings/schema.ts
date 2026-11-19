@@ -1,4 +1,4 @@
-import { isValidVoiceShortName, type UserSettings } from '../../../shared/settings.js';
+import { isLlmProvider, isValidVoiceShortName, type UserSettings } from '../../../shared/settings.js';
 
 // 服务端配置结构校验。手写校验保持零依赖,错误信息面向控制台展示。
 
@@ -61,6 +61,15 @@ export function validateTts(v: unknown): SettingsValidation {
   return { ok: true };
 }
 
+/** 回复提供方(P1 第三批):deepseek 需服务端配置密钥,界面仅选择来源。 */
+export function validateLlm(v: unknown): SettingsValidation {
+  if (!isRecord(v)) return { ok: false, field: 'llm', reason: '必须是对象' };
+  if (!isLlmProvider(v.provider)) {
+    return { ok: false, field: 'llm.provider', reason: '需为 fixed-local 或 deepseek' };
+  }
+  return { ok: true };
+}
+
 export function validateUserSettings(v: unknown): SettingsValidation {
   if (!isRecord(v)) return { ok: false, field: 'settings', reason: '必须是对象' };
   if (typeof v.petId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v.petId)) {
@@ -72,6 +81,7 @@ export function validateUserSettings(v: unknown): SettingsValidation {
     validatePlayback(v.playback),
     validateLease(v.lease),
     validateTts(v.tts),
+    validateLlm(v.llm),
   ];
   for (const c of checks) if (!c.ok) return c;
   return { ok: true };

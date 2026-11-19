@@ -86,6 +86,15 @@ BILIBILI_OPEN_ANCHOR_CODE=
 
 初始 `PLATFORM=mock` 使用模拟事件。`bilibili-web` 接法按实现和当前平台要求配置房间号及登录信息，`bilibili-open` 接法配置应用凭据和主播身份码。TTS 音色列表由所选提供方加载，正式云语音服务增加其对应配置。
 
+### 3.1 接入 DeepSeek（P1 第三批）
+
+回复默认使用离线固定回复，零配置即可启动。接入真实模型只需两步：
+
+1. 在 `.env.local` 填写 `DEEPSEEK_API_KEY`（在 DeepSeek 开放平台创建，按用量计费）。按需调整 `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`DEEPSEEK_THINKING`（`enabled` 开启思考）。这些值只在服务端读取，不会出现在控制台或浏览器。
+2. 重启服务。控制台设置面板的「回复来源」选择 `deepseek`；「配置状态」显示密钥已配置、当前生效为 DeepSeek 即成功。填好密钥后路由自动切换，无需改其它设置。
+
+密钥未填或模型调用失败时，回复自动降级为固定文本并在控制台标注来源 `fallback`，直播不会中断。可用设置面板的「回复预览」输入一句话，核对回复文本、动作、来源、耗时与 token 用量；队列区的「耗时与用量」展示排队、生成、合成、播放各阶段耗时与累计 token。模型输出只接受白名单动作，观众弹幕里的指令文字不会被执行。
+
 环境配置保存在项目根的 `.env.local`（可先复制 `.env.example`）。`WHALETALK_DATA_DIR` 指定用户数据目录，示例中的 `main` 角色包位于 `data/pets/main/manifest.json`。界面修改的设置保存在 `data/config`，动画、日志和语音缓存分别保存在数据目录的对应子目录。备份时保留用户配置、角色包和后续数据库，本地密钥单独妥善保存。详细路径见 [项目结构](PROJECT_STRUCTURE.md)。
 
 服务启动后，使用启动输出的 `http://127.0.0.1:3210/control#<凭据>` 操作角色，把 `http://127.0.0.1:3210/overlay#<凭据>` 提供给 OBS。端口可修改，实际地址以启动输出为准。

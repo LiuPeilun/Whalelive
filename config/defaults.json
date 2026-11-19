@@ -26,6 +26,9 @@
     "provider": "edge-tts",
     "voice": "zh-CN-XiaoxiaoNeural"
   },
+  "llm": {
+    "provider": "fixed-local"
+  },
   "generation": {
     "llmTimeoutMs": 8000,
     "ttsTimeoutMs": 10000

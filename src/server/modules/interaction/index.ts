@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { LiveEvent } from '../../../shared/live-event.js';
-import type { TaskView } from '../../../shared/protocol.js';
+import type { MetricsView, StageTimings, TaskView, TokenUsageView } from '../../../shared/protocol.js';
 import type { Performance } from '../../../shared/performance.js';
 import type { EffectiveSettings } from '../../../shared/settings.js';
 import type { Logger } from '../../infrastructure/logger.js';
@@ -24,6 +24,7 @@ export type InteractionState = {
   paused: boolean;
   queue: { capacity: number; length: number; items: QueueItem[]; drops: DropRecord[] };
   current: TaskView | null;
+  metrics: MetricsView;
 };
 
 export type InteractionModule = {
@@ -51,6 +52,17 @@ type CurrentTask = {
   since: number;
   version: number;
   controller: AbortController;
+  /** P1 第三批计时:每阶段独立起止,避免模型时长重复计入排队(WT-P1-022)。 */
+  timings: {
+    enqueuedAt: number;
+    dequeuedAt: number;
+    generationDoneAt: number | null;
+    synthesisStartAt: number | null;
+    synthesisDoneAt: number | null;
+    playbackAt: number | null;
+  };
+  usage: TokenUsageView | null;
+  provider: string;
 };
 
 /** 派生 signal:父任务中止传导给提供方调用;超时只取消调用本身,不杀任务。 */
@@ -108,6 +120,29 @@ export function createInteraction(deps: {
   let current: CurrentTask | null = null;
   let taskVersion = 0;
   let paused = false;
+  // P1 第三批:累计 token 与最近一次任务的阶段耗时,随状态快照推送到控制台。
+  const totals: TokenUsageView = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  let completed = 0;
+  let lastMetrics: MetricsView['last'] = null;
+
+  function addUsage(usage: TokenUsageView | null): void {
+    if (!usage) return;
+    totals.promptTokens += usage.promptTokens;
+    totals.completionTokens += usage.completionTokens;
+    totals.totalTokens += usage.totalTokens;
+  }
+
+  function stageTimings(task: CurrentTask, endedAt: number): StageTimings {
+    const t = task.timings;
+    return {
+      queueWaitMs: Math.max(0, t.dequeuedAt - t.enqueuedAt),
+      generationMs: t.generationDoneAt !== null ? Math.max(0, t.generationDoneAt - t.dequeuedAt) : null,
+      synthesisMs: t.synthesisStartAt !== null && t.synthesisDoneAt !== null
+        ? Math.max(0, t.synthesisDoneAt - t.synthesisStartAt) : null,
+      playbackMs: t.playbackAt !== null ? Math.max(0, endedAt - t.playbackAt) : null,
+      totalMs: Math.max(0, endedAt - t.enqueuedAt),
+    };
+  }
 
   function notify(): void {
     for (const cb of listeners) cb();
@@ -274,7 +309,17 @@ export function createInteraction(deps: {
 
     let say = item.say;
     let action = item.action;
-    current = { eventId: item.eventId, performanceId: null, stage: 'generating', say: '', action, since: now(), version, controller };
+    let usage: TokenUsageView | null = null;
+    let provider = item.isCommand ? 'rule' : 'fixed-local';
+    const dequeuedAt = now();
+    current = {
+      eventId: item.eventId, performanceId: null, stage: 'generating', say: '', action, since: dequeuedAt, version, controller,
+      timings: {
+        enqueuedAt: item.enqueuedAt, dequeuedAt, generationDoneAt: null,
+        synthesisStartAt: null, synthesisDoneAt: null, playbackAt: null,
+      },
+      usage: null, provider,
+    };
     notify();
 
     // 生成:语义弹幕调用回复提供方;指令/礼物等确定性文本跳过。
@@ -293,9 +338,19 @@ export function createInteraction(deps: {
       } finally {
         call.cancel(); // 释放派生监听
       }
+      // 用量在取得结果时即按本次请求归属累计一次,与播放终态解耦(WT-P1-022)。
+      // 即使随后被停止、或输出非法走保底,上游已发生的 token 仍如实计入。
+      if (result !== null && current !== null && current.version === version) {
+        const u = result.usage;
+        if (u) {
+          usage = { promptTokens: u.promptTokens, completionTokens: u.completionTokens, totalTokens: u.totalTokens };
+          addUsage(usage);
+        }
+      }
       if (current === null || current.version !== version) return; // 停止后的迟到结果丢弃
       if (result !== null && typeof result.say === 'string' && result.say.trim() !== '') {
         say = result.say.trim().slice(0, SAY_MAX_LENGTH);
+        if (result.provider && result.provider !== '') provider = result.provider;
         const suggested = typeof result.action === 'string' && result.action !== '' ? result.action : null;
         if (suggested !== null && characters.resolveAction(suggested) !== null) {
           action = suggested;
@@ -304,14 +359,22 @@ export function createInteraction(deps: {
         }
       } else {
         say = rules.fallbackReply();
+        provider = 'fallback';
         logger.warn('interaction.reply-fallback', { eventId: item.eventId, why: result === null ? 'timeout-or-error' : 'empty-or-invalid' });
       }
       if (!alive()) return;
-      current = { ...current, say, action, stage: 'synthesizing' };
+      current = {
+        ...current, say, action, usage, provider, stage: 'synthesizing',
+        timings: { ...current.timings, generationDoneAt: now(), synthesisStartAt: now() },
+      };
       notify();
     }
 
     // 合成:非空文本请求语音;拒绝/失败/超时降级为无声表演(字幕与动作保留,WT-P1-001)
+    // 规则回复不经过生成分支,合成起点在此设置,保证其合成耗时同样可观测(WT-P1-022)。
+    if (current !== null && current.timings.synthesisStartAt === null) {
+      current = { ...current, timings: { ...current.timings, synthesisStartAt: now() } };
+    }
     let audioUrl: string | undefined;
     if (say !== '' && !controller.signal.aborted) {
       const call = derivedSignal(controller.signal);
@@ -337,7 +400,12 @@ export function createInteraction(deps: {
     if (current === null || current.version !== version) return;
 
     const { performance, asset } = buildPerformance(item, say, action, audioUrl);
-    current = { eventId: item.eventId, performanceId: performance.id, stage: 'waiting-playback', say, action: performance.action, since: current.since, version, controller };
+    const synthesisDoneAt = now();
+    current = {
+      ...current,
+      performanceId: performance.id, stage: 'waiting-playback', say, action: performance.action,
+      timings: { ...current.timings, synthesisDoneAt, playbackAt: synthesisDoneAt },
+    };
     logger.info('interaction.dispatch', {
       eventId: item.eventId,
       performanceId: performance.id,
@@ -357,6 +425,15 @@ export function createInteraction(deps: {
         history.push({ eventId: item.eventId, performanceId: performance.id, status: result.status, at: now() });
         if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
         logger.info('interaction.task-finished', { eventId: item.eventId, performanceId: performance.id, status: result.status });
+        // P1 第三批:记录本次阶段耗时与用量。用量已在取得结果时累计,此处不再重复。
+        const endedAt = now();
+        if (result.status === 'ended') completed += 1;
+        lastMetrics = {
+          eventId: item.eventId,
+          ...stageTimings(current, endedAt),
+          usage: current.usage,
+          provider: current.provider,
+        };
         current = null;
         notify();
         tick();
@@ -415,6 +492,14 @@ export function createInteraction(deps: {
     paused = true;
     taskVersion += 1;
     if (current) {
+      // 停止时保留当前任务的阶段统计与已取得的用量,避免迟到终态被丢弃后无记录(WT-P1-022)。
+      const endedAt = now();
+      lastMetrics = {
+        eventId: current.eventId,
+        ...stageTimings(current, endedAt),
+        usage: current.usage,
+        provider: current.provider,
+      };
       current.controller.abort();
       current = null;
     }
@@ -457,6 +542,11 @@ export function createInteraction(deps: {
               action: current.action,
               since: current.since,
             },
+      metrics: {
+        last: lastMetrics,
+        totals: { ...totals },
+        completed,
+      },
     };
   }
 

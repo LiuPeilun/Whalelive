@@ -51,6 +51,7 @@ function validSettings(petId = 'main'): UserSettings {
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
     lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 800 },
     tts: { provider: 'fixed-local', voice: 'zh-CN-XiaoxiaoNeural' },
+    llm: { provider: 'fixed-local' },
   };
 }
 

@@ -45,7 +45,17 @@ export type UserSettings = {
   playback: PlaybackSettings;
   lease: LeaseSettings;
   tts: TtsSettings;
+  llm: LlmSettings;
 };
+
+/** 回复提供方(P1 第三批):fixed-local 为离线罐头回复,deepseek 为真实模型。 */
+export type LlmSettings = {
+  provider: 'fixed-local' | 'deepseek';
+};
+
+export function isLlmProvider(value: unknown): value is LlmSettings['provider'] {
+  return value === 'fixed-local' || value === 'deepseek';
+}
 
 /** 合成后的有效配置(含只读的服务器与平台项)。 */
 export type EffectiveSettings = UserSettings & {
