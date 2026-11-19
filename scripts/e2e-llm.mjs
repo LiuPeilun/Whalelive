@@ -1,0 +1,147 @@
+// P1 第三批端到端:零配置启动、模型配置状态、回复预览降级与阶段耗时统计。
+// 脚本自启隔离服务(临时数据目录,不设 DEEPSEEK_API_KEY),不触碰调用者日常实例。
+// 用法:node scripts/e2e-llm.mjs
+
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import http from 'node:http';
+import { fileURLToPath } from 'node:url';
+import { tsImport } from 'tsx/esm/api';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+let passed = 0;
+let failed = 0;
+function check(name, ok, detail = '') {
+  if (ok) { passed += 1; console.log(`PASS ${name}`); }
+  else { failed += 1; console.log(`FAIL ${name}${detail ? ` — ${detail}` : ''}`); }
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function main() {
+  const tempRoot = fs.realpathSync(os.tmpdir());
+  const fixture = fs.mkdtempSync(path.join(tempRoot, 'whaletalk-llm-'));
+  if (path.dirname(fixture) !== tempRoot) throw new Error('测试目录不在系统临时目录下');
+  const dataDir = path.join(fixture, 'data');
+  process.once('exit', () => fs.rmSync(fixture, { recursive: true, force: true, maxRetries: 5 }));
+  let app;
+  try {
+    // 显式清空模型密钥,模拟零配置环境;其余沿用隔离默认值。
+    const env = { WHALETALK_DATA_DIR: dataDir, PORT: '0', HOST: '127.0.0.1', PLATFORM: 'mock', DEEPSEEK_API_KEY: '' };
+    const { createApp } = await tsImport('../src/server/app.ts', import.meta.url);
+    app = await createApp({ env });
+    const base = app.urls.base;
+    const token = new URL(app.urls.control).hash.slice(1);
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const get = async (p) => {
+      const r = await fetch(`${base}${p}`, { headers: auth, signal: AbortSignal.timeout(5000) });
+      return { status: r.status, body: await r.json() };
+    };
+    const post = async (p, body) => {
+      const r = await fetch(`${base}${p}`, { method: 'POST', headers: auth, body: JSON.stringify(body), signal: AbortSignal.timeout(8000) });
+      return { status: r.status, body: await r.json() };
+    };
+
+    // 1. 零配置启动:健康检查正常
+    const health = await get('/api/health');
+    check('零配置服务启动且健康检查正常', health.status === 200 && health.body.ok === true, JSON.stringify(health.body));
+
+    // 2. 配置状态:provider=fixed-local,密钥未配置,不含密钥字段
+    const cfg = await get('/api/llm/config');
+    check('配置状态可读且密钥未配置', cfg.status === 200 && cfg.body.configured === false && cfg.body.active === 'fixed-local', JSON.stringify(cfg.body));
+    check('配置状态不泄漏密钥', !JSON.stringify(cfg.body).includes('sk-'), JSON.stringify(cfg.body));
+
+    // 3. 回复预览:零配置走固定回复,带来源与耗时
+    const preview = await post('/api/llm/preview', { text: '大家晚上好' });
+    check('回复预览返回成功', preview.status === 200, JSON.stringify(preview.body));
+    check('预览来源为 fixed-local 且含耗时', preview.body?.provider === 'fixed-local' && typeof preview.body?.elapsedMs === 'number', JSON.stringify(preview.body));
+    check('预览文本非空', typeof preview.body?.say === 'string' && preview.body.say.length > 0, JSON.stringify(preview.body));
+
+    // 4. 预览参数校验
+    const badPreview = await post('/api/llm/preview', { text: '' });
+    check('空文本预览被拒绝(400)', badPreview.status === 400, JSON.stringify(badPreview.body));
+
+    // 5. 模拟弹幕走完整链路,状态快照出现 metrics
+    const mock = await post('/api/mock/events', { type: 'chat', text: '随便聊聊', userId: 'llm-e2e', userName: '统计员' });
+    check('模拟弹幕入队成功', mock.status === 200 && mock.body?.enqueue?.accepted === true, JSON.stringify(mock.body));
+    let snapshot = null;
+    for (let i = 0; i < 40; i++) {
+      await sleep(250);
+      const s = await get('/api/state');
+      if (s.body?.metrics?.last) { snapshot = s.body; break; }
+    }
+    check('状态快照包含耗时与用量统计', snapshot !== null, '未等到 metrics.last');
+    check('统计含阶段耗时字段', snapshot && ['queueWaitMs', 'generationMs', 'synthesisMs', 'playbackMs', 'totalMs'].every((k) => k in snapshot.metrics.last), JSON.stringify(snapshot?.metrics?.last));
+    check('统计来源为 rule 或 fixed-local', snapshot && ['rule', 'fixed-local', 'fallback'].includes(snapshot.metrics.last.provider), JSON.stringify(snapshot?.metrics?.last));
+
+    console.log(`\n零配置场景:${passed} 通过,${failed} 失败`);
+    return failed === 0;
+  } finally {
+    await app?.close();
+  }
+}
+
+/** 假 Key 场景:本地假模型端点验证 env 配置贯通(填 Key 后自动生效)。 */
+async function runWithFakeKey() {
+  // 本地假模型服务:返回合法短回复 JSON 与 token 用量,记录是否收到 Bearer 与系统提示。
+  let sawAuth = false;
+  let sawSystem = false;
+  const fake = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      sawAuth = typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ');
+      const body = JSON.parse(raw || '{}');
+      sawSystem = Array.isArray(body.messages) && body.messages.some((m) => m.role === 'system');
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message: { content: '{"say":"今晚吃什么好呀","action":null,"emotion":"happy"}' } }],
+        usage: { prompt_tokens: 20, completion_tokens: 12, total_tokens: 32 },
+      }));
+    });
+  });
+  await new Promise((resolve) => fake.listen(0, '127.0.0.1', resolve));
+  const fakePort = fake.address().port;
+
+  const tempRoot = fs.realpathSync(os.tmpdir());
+  const fixture = fs.mkdtempSync(path.join(tempRoot, 'whaletalk-llm-key-'));
+  if (path.dirname(fixture) !== tempRoot) throw new Error('测试目录不在系统临时目录下');
+  const dataDir = path.join(fixture, 'data');
+  process.once('exit', () => fs.rmSync(fixture, { recursive: true, force: true, maxRetries: 5 }));
+  let app;
+  try {
+    // 预置设置:provider=deepseek;env 提供假 Key 与本地端点。
+    const settingsDir = path.join(dataDir, 'config');
+    fs.mkdirSync(settingsDir, { recursive: true });
+    fs.writeFileSync(path.join(settingsDir, 'settings.json'), JSON.stringify({
+      formatVersion: 1, savedVersion: 1, settings: { llm: { provider: 'deepseek' } },
+    }));
+    const env = {
+      WHALETALK_DATA_DIR: dataDir, PORT: '0', HOST: '127.0.0.1', PLATFORM: 'mock',
+      DEEPSEEK_API_KEY: 'sk-fake-key', DEEPSEEK_BASE_URL: `http://127.0.0.1:${fakePort}`,
+    };
+    const { createApp } = await tsImport('../src/server/app.ts', import.meta.url);
+    app = await createApp({ env });
+    const base = app.urls.base;
+    const token = new URL(app.urls.control).hash.slice(1);
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const cfg = await (await fetch(`${base}/api/llm/config`, { headers: auth })).json();
+    check('假 Key 场景:密钥已配置且生效来源为 deepseek', cfg.configured === true && cfg.active === 'deepseek', JSON.stringify(cfg));
+
+    const preview = await (await fetch(`${base}/api/llm/preview`, {
+      method: 'POST', headers: auth, body: JSON.stringify({ text: '吃啥' }),
+    })).json();
+    check('假 Key 场景:预览走模型并解析回复', preview.provider === 'deepseek' && preview.say === '今晚吃什么好呀', JSON.stringify(preview));
+    check('假 Key 场景:上报 token 用量', preview.usage?.totalTokens === 32, JSON.stringify(preview.usage));
+    check('假 Key 场景:请求带 Bearer 与系统提示', sawAuth && sawSystem, `auth=${sawAuth} system=${sawSystem}`);
+    return failed === 0;
+  } finally {
+    await app?.close();
+    await new Promise((resolve) => fake.close(resolve));
+  }
+}
+
+const zeroOk = await main();
+const keyOk = await runWithFakeKey();
+console.log(`\nP1 第三批端到端:${failed === 0 && zeroOk && keyOk ? '全部通过' : `${failed} 失败`}`);
+process.exitCode = (zeroOk && keyOk && failed === 0) ? 0 : 1;

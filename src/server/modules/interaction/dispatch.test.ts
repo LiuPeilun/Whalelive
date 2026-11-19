@@ -27,6 +27,7 @@ function settings(): EffectiveSettings {
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
     lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 0 },
       tts: { provider: 'fixed-local', voice: 'zh-CN-XiaoxiaoNeural' },
+    llm: { provider: 'fixed-local' },
     server: { host: '127.0.0.1', port: 3210 },
     platform: 'mock',
     auth: { timeoutMs: 5_000 },
@@ -98,7 +99,7 @@ function chatEvent(text: string, user = 'u1'): LiveEvent {
 const persona = { name: '大肥鱼', fallbackReplies: ['保底回复A', '保底回复B'], commandReplies: { dance: '看好啦!' } };
 const giftRules = { thanksTemplate: '谢谢 {user} 的 {gift} ×{count}!', celebrateText: '{kind}!' };
 
-function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechProvider> }) {
+function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechProvider> } = {}) {
   const playback = fakePlayback();
   const reply: ReplyProvider = { generate: opts.reply?.generate ?? (async () => ({ say: '生成的话', action: null })) };
   const speech: SpeechProvider = { synthesize: opts.speech?.synthesize ?? (async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' })) };
@@ -200,5 +201,40 @@ describe('interaction 生成链路(P1 第一批)', () => {
     await settle();
     expect(playback.plays.length).toBe(0); // 迟到结果被丢弃
     expect(interaction.state().paused).toBe(true);
+  });
+});
+
+describe('interaction 阶段耗时与用量统计(P1 第三批)', () => {
+  it('完成后记录各阶段耗时、来源与 token 用量并累计', async () => {
+    const generate = async () => ({
+      say: '模型回复', action: null, provider: 'deepseek',
+      usage: { promptTokens: 12, completionTokens: 8, totalTokens: 20 },
+    });
+    const { interaction } = build({ reply: { generate } });
+    interaction.enqueue(chatEvent('统计场景'));
+    await settle();
+    const m = interaction.state().metrics;
+    expect(m.completed).toBe(1);
+    expect(m.last?.provider).toBe('deepseek');
+    expect(m.last?.usage).toEqual({ promptTokens: 12, completionTokens: 8, totalTokens: 20 });
+    expect(m.last?.generationMs).not.toBeNull();
+    expect(m.last?.playbackMs).not.toBeNull();
+    expect(m.totals.totalTokens).toBe(20);
+  });
+
+  it('保底回复来源标记为 fallback', async () => {
+    const { interaction } = build({ reply: { generate: async () => { throw new Error('down'); } } });
+    interaction.enqueue(chatEvent('保底场景'));
+    await settle();
+    expect(interaction.state().metrics.last?.provider).toBe('fallback');
+  });
+
+  it('确定性指令来源标记为 rule,不累计 token', async () => {
+    const { interaction } = build();
+    interaction.enqueue(chatEvent('大肥鱼跳个舞'));
+    await settle();
+    const m = interaction.state().metrics;
+    expect(m.last?.provider).toBe('rule');
+    expect(m.totals.totalTokens).toBe(0);
   });
 });
