@@ -70,27 +70,42 @@ const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 // 「读到旧状态后按路径删除他人新锁」与「空占位被判陈旧」的竞态(前两轮
 // 文件锁方案的残留窗口)。
 //
-// 协调端口属于工作区共享配置:首次使用写入 .tools/startlock-port,此后本工作区
-// 的启动器一律使用该端口(WT-P1-009,2026-11-19_010303)——否则同一工作区内
-// 不同环境变量配置的终端会在各自锁下同时操作同一份 PID 登记,互斥失效。
-// 绑定/创建失败且共享配置与本进程期望不一致时明确报错,不回退到其他端口。
+// 协调端口属于工作区共享配置:首次使用发布到 .tools/startlock-port,此后本
+// 工作区的启动器一律使用该端口(WT-P1-009)——否则同一工作区内不同环境变量
+// 配置的终端会在各自锁下同时操作同一份 PID 登记,互斥失效。
+// 首次发布是原子操作(wx 独占创建,WT-P1-009,2026-11-19_093710):并发首次
+// 启动时只有一方能创建文件,败者读取已发布的完整值并做冲突检查——不存在
+// 「双方都看到缺失、各自发布不同端口」的窗口。已发布的值与环境变量冲突时
+// 明确报错,不回退。
 const START_LOCK_PORT_FILE = path.join(root, '.tools', 'startlock-port');
 
 function sharedStartLockPort() {
   const wanted = Number(process.env.WHALETALK_STARTLOCK_PORT ?? 0);
-  if (fs.existsSync(START_LOCK_PORT_FILE)) {
-    const shared = Number(fs.readFileSync(START_LOCK_PORT_FILE, 'utf8').trim());
-    if (Number.isFinite(shared) && shared > 0) {
-      if (wanted > 0 && wanted !== shared) {
-        throw new Error(`本工作区启动协调端口已固定为 ${shared}(.tools/startlock-port),与环境变量 WHALETALK_STARTLOCK_PORT=${wanted} 不一致;如需更换请先删除该文件并确保没有正在进行的启动`);
-      }
-      return shared;
-    }
-  }
   const chosen = wanted > 0 ? wanted : 32109;
   fs.mkdirSync(path.dirname(START_LOCK_PORT_FILE), { recursive: true });
-  fs.writeFileSync(START_LOCK_PORT_FILE, String(chosen));
-  return chosen;
+  for (;;) {
+    // 已发布:读取完整值并做一致性检查(与 wanted 冲突时明确拒绝)
+    if (fs.existsSync(START_LOCK_PORT_FILE)) {
+      const shared = Number(fs.readFileSync(START_LOCK_PORT_FILE, 'utf8').trim());
+      if (Number.isFinite(shared) && shared > 0) {
+        if (wanted > 0 && wanted !== shared) {
+          throw new Error(`本工作区启动协调端口已固定为 ${shared}(.tools/startlock-port),与环境变量 WHALETALK_STARTLOCK_PORT=${wanted} 不一致;如需更换请先删除该文件并确保没有正在进行的启动`);
+        }
+        return shared;
+      }
+      // 内容无效:极少见(写入中断),按未发布处理,由下方独占创建重写
+    }
+    // 未发布:原子发布 —— wx 独占创建,只有一个进程能成功
+    try {
+      const fd = fs.openSync(START_LOCK_PORT_FILE, 'wx');
+      fs.writeSync(fd, String(chosen));
+      fs.closeSync(fd);
+      return chosen;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      // 另一启动器已抢先发布:回到读取分支,用已发布的值(可能触发冲突拒绝)
+    }
+  }
 }
 
 class StartLock {

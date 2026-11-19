@@ -5,6 +5,8 @@
 // 场景2:无关程序占用启动协调端口 → 启动明确失败且替身不受影响;
 // 场景3:空端口并发两个启动器 → 仅一个服务、败者退出 1、胜者可停止。
 // 场景4:与本工作区固定协调端口不一致的环境配置 → 启动明确拒绝(共享配置互斥)。
+// 场景5:共享配置缺失时两个不同环境值并发首次发布 → 原子发布只允许一个值生效,
+//        胜者唯一、登记保留且可正常停止。
 // 用法:node scripts/e2e-startlock-regression.mjs
 
 import fs from 'node:fs';
@@ -178,6 +180,54 @@ async function scenario4(port) {
   check('该配置下未创建服务子进程', listenerPid(port) === null, `listener=${listenerPid(port)}`);
 }
 
+/** 场景5:共享配置缺失时,两个不同环境值并发首次发布(WT-P1-009 原子发布) */
+async function scenario5(port) {
+  console.log(`---- 场景5:首次并发发布共享配置(端口 ${port}) ----`);
+  fs.rmSync(path.join(root, '.tools', 'startlock-port'), { force: true }); // 确保配置缺失
+  const portA = 32211;
+  const portB = 32213; // 两个不同且有效的协调端口
+  const logA = fs.openSync(path.join(root, '.tools', 'pubrace-a.log'), 'w');
+  const logB = fs.openSync(path.join(root, '.tools', 'pubrace-b.log'), 'w');
+  const a = spawn(process.execPath, [path.join(root, 'scripts', 'e2e-server.mjs'), '--port', String(port)], {
+    stdio: ['ignore', logA, logA],
+    env: { ...process.env, WHALETALK_STARTLOCK_PORT: String(portA) },
+  });
+  const b = spawn(process.execPath, [path.join(root, 'scripts', 'e2e-server.mjs'), '--port', String(port)], {
+    stdio: ['ignore', logB, logB],
+    env: { ...process.env, WHALETALK_STARTLOCK_PORT: String(portB) },
+  });
+
+  // 轮询等待一个启动器退出(胜者保持前台运行)
+  let loserExit = null;
+  const deadline = Date.now() + 25_000;
+  while (Date.now() < deadline) {
+    await sleep(500);
+    if (a.exitCode !== null && b.exitCode === null) { loserExit = { code: a.exitCode, log: 'pubrace-a.log' }; break; }
+    if (b.exitCode !== null && a.exitCode === null) { loserExit = { code: b.exitCode, log: 'pubrace-b.log' }; break; }
+    if (a.exitCode !== null && b.exitCode !== null) break;
+  }
+  check('首次并发发布:恰好一个启动器存活(胜者)', loserExit !== null, `exitA=${a.exitCode} exitB=${b.exitCode}`);
+  if (loserExit !== null) {
+    const loserText = fs.readFileSync(path.join(root, '.tools', loserExit.log), 'utf8');
+    check('败者以冲突/占用信息退出 1', loserExit.code === 1 && /不一致|已有活跃测试服务/.test(loserText), loserText.slice(-160));
+  }
+  const published = Number(fs.readFileSync(path.join(root, '.tools', 'startlock-port'), 'utf8').trim());
+  check('共享配置只发布了一个值(A 或 B 之一)', published === portA || published === portB, `published=${published}`);
+
+  // 胜者健康(带重试:败者退出时胜者可能仍在启动)、登记保留、可正常停止(复审验收口径)
+  let healthy = false;
+  for (let i = 0; i < 20 && !healthy; i += 1) {
+    healthy = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.ok).catch(() => false);
+    if (!healthy) await sleep(1_000);
+  }
+  check('胜者服务健康', healthy);
+  const registered = fs.existsSync(path.join(root, '.tools', `e2e-server-${port}.pid`));
+  check('胜者登记保留(未消失)', registered);
+  try { stopTestServer(port); } catch (err) { /* 已退出 */ }
+  await sleep(800);
+  check('胜者可正常停止', listenerPid(port) === null);
+}
+
 // 主流程:哨兵首尾验证 + 临时端口
 const sentinelPort = await pickFreePort();
 const sentinel = await startSentinel(sentinelPort);
@@ -192,6 +242,7 @@ try {
   await scenario2(port2, sharedLockPort);
   await scenario3(port3);
   await scenario4((await pickFreePort()));
+  await scenario5((await pickFreePort()));
 } catch (err) {
   failures += 1;
   console.error('harness 异常:', err);
