@@ -54,7 +54,8 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   const logger = createLogger({ logsDir: paths.logsDir });
   const runId = `run-${now().toString(36)}-${randomUUID().slice(0, 6)}`;
 
-  const settings = createSettings({ paths, env: opts.env, logger });
+  const env = { ...opts.env };
+  const settings = createSettings({ paths, env, logger });
   const effective = () => settings.effective();
 
   const access = createAccessControl({ paths, logger, port: () => effective().server.port });
@@ -90,9 +91,12 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   const interaction = createInteraction({ settings: effective, characters, playback, replyProvider, speechProvider, persona, giftRules: giftRulesCfg, logger, now });
 
   // 控制台试听:直接经 edge 适配器(验证真实通道),音色可覆盖;超时对齐 generation.ttsTimeoutMs
-  const ttsPreview = (input: { text: string; voice?: string }): Promise<{ audioUrl: string } | null> => {
+  const ttsPreview = async (input: { text: string; voice?: string }): Promise<{ audioUrl: string } | null> => {
     const voice = input.voice ?? effective().tts.voice;
-    return edgeTts.synthesizeWith({ text: input.text, voice, signal: AbortSignal.timeout(effective().generation.ttsTimeoutMs) });
+    const signal = AbortSignal.timeout(effective().generation.ttsTimeoutMs);
+    const result = await edgeTts.synthesizeWith({ text: input.text, voice, signal });
+    if (result === null && !signal.aborted) throw new Error('未生成可用音频');
+    return result;
   };
 
   // 平台适配器 → events → app 连接的回调 → interaction(PROJECT_STRUCTURE《依赖方向》)
@@ -161,8 +165,8 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
     submitMock,
     overlayUrl: () => access.overlayUrl(),
     audioCache,
-  edgeTts,
-  ttsPreview,
+    edgeTts,
+    ttsPreview,
     logger,
   });
 
@@ -237,10 +241,12 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
     playback.tick();
   }, 250);
 
-  const eff = effective();
-  const host = eff.server.host;
-  const port = eff.server.port;
-  await fastify.listen({ host, port });
+  const listen = effective().server;
+  await fastify.listen(listen);
+  // 端口为 0 时由系统分配空闲端口，凭据 URL 和来源检查使用实际监听端口。
+  const address = httpServer.address();
+  if (listen.port === 0 && address && typeof address !== 'string') env.PORT = String(address.port);
+  const { host, port } = effective().server;
 
   // Vite 在监听建立后创建:middleware 模式提供页面,HMR WS 经 server.ws.server 挂同一 server。
   const viteModule = await import('vite');
@@ -256,6 +262,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   async function close(): Promise<void> {
     clearInterval(ticker);
     interaction.stop();
+    edgeTts.close();
     ws.closeAll();
     wss.close();
     if (viteDev) await viteDev.close();

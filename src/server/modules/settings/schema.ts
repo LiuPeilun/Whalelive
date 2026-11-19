@@ -1,4 +1,4 @@
-import type { UserSettings } from '../../../shared/settings.js';
+import { isValidVoiceShortName, type UserSettings } from '../../../shared/settings.js';
 
 // 服务端配置结构校验。手写校验保持零依赖,错误信息面向控制台展示。
 
@@ -48,14 +48,15 @@ export function validateLease(v: unknown): SettingsValidation {
   return { ok: true };
 }
 
-/** 语音合成配置(P1 第二批):提供方枚举 + 音色 ShortName 形态。 */
+/** 语音合成配置(P1 第二批):提供方枚举 + 音色短名(与 TTS 边界统一契约,WT-P1-018:
+ * 覆盖 zh-CN-liaoning-XiaobeiNeural 等带地区变体的真实短名)。 */
 export function validateTts(v: unknown): SettingsValidation {
   if (!isRecord(v)) return { ok: false, field: 'tts', reason: '必须是对象' };
   if (v.provider !== 'fixed-local' && v.provider !== 'edge-tts') {
     return { ok: false, field: 'tts.provider', reason: '需为 fixed-local 或 edge-tts' };
   }
-  if (typeof v.voice !== 'string' || !/^[A-Za-z]{2,3}-[A-Za-z]{2,8}-[A-Za-z0-9]{1,32}Neural$/.test(v.voice)) {
-    return { ok: false, field: 'tts.voice', reason: '需为形如 zh-CN-XiaoxiaoNeural 的音色短名' };
+  if (!isValidVoiceShortName(v.voice)) {
+    return { ok: false, field: 'tts.voice', reason: '需为形如 zh-CN-XiaoxiaoNeural 或 zh-CN-liaoning-XiaobeiNeural 的音色短名' };
   }
   return { ok: true };
 }

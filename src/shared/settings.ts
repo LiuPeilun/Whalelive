@@ -30,6 +30,13 @@ export type TtsSettings = {
   voice: string;
 };
 
+/** 音色短名可包含地区或书写系统，如 zh-CN-liaoning-XiaobeiNeural。 */
+export function isValidVoiceShortName(voice: unknown): voice is string {
+  return typeof voice === 'string'
+    && voice.length <= 128
+    && /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]+)+-[A-Za-z0-9]+Neural$/.test(voice);
+}
+
 /** 界面可编辑并写入 data/config 的用户覆盖。 */
 export type UserSettings = {
   petId: string;
