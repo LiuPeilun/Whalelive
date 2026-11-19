@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createDeepSeekReplyProvider, isDeepSeekConfigured, type DeepSeekConfig } from './deepseek.js';
-import { createReplyRouter, withProviderLabel } from './reply-router.js';
+import { createReplyRouter, withProviderLabel, LlmPreviewError } from './reply-router.js';
 import type { Logger } from '../../infrastructure/logger.js';
 import type { ReplyProvider } from '../../modules/interaction/providers.js';
 
@@ -52,9 +52,13 @@ function build(opts: {
   return { provider, calls: fetch.calls, fetchMock: fetch.fn };
 }
 
-function chat(content: string, usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }): Response {
+function chat(
+  content: string,
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number },
+  finishReason?: string,
+): Response {
   return jsonResponse({
-    choices: [{ message: { content } }],
+    choices: [{ message: { content }, ...(finishReason !== undefined ? { finish_reason: finishReason } : {}) }],
     ...(usage ? { usage } : {}),
   });
 }
@@ -91,6 +95,16 @@ describe('DeepSeek 配置与端点', () => {
     expect(body.messages[0]!.content).toContain('dance');
     expect(body.messages[1]!.role).toBe('user');
     expect(body.messages[1]!.content).toContain('你好');
+  });
+
+  it('关闭思考时仍显式发送 thinking:{type:disabled}(WT-P1-023)', async () => {
+    const { provider, calls } = build({
+      cfg: config({ thinking: false }),
+      script: [chat('{"say":"你好","action":null}')],
+    });
+    await generate(provider);
+    const body = JSON.parse(String(calls[0]!.init.body)) as { thinking?: { type: string } };
+    expect(body.thinking).toEqual({ type: 'disabled' });
   });
 });
 
@@ -152,6 +166,25 @@ describe('空响应、截断与错误兜底', () => {
   it('截断/非法 JSON 抛错,不猜测内容', async () => {
     const { provider } = build({ script: [chat('{"say":"说一半就断了"')] });
     await expect(generate(provider)).rejects.toThrow('格式不合法');
+  });
+
+  it('finish_reason=length 时即使 JSON 完整也判为截断并回退(WT-P1-023)', async () => {
+    const { provider } = build({
+      script: [chat('{"say":"完整但被上游标记截断","action":null,"emotion":"happy"}', undefined, 'length')],
+    });
+    await expect(generate(provider)).rejects.toThrow('截断');
+  });
+
+  it('finish_reason=stop 的合法回复正常返回', async () => {
+    const { provider } = build({ script: [chat('{"say":"正常回复","action":null}', undefined, 'stop')] });
+    const result = await generate(provider);
+    expect(result.say).toBe('正常回复');
+  });
+
+  it('无 finish_reason 的自定义端点保持兼容(WT-P1-023)', async () => {
+    const { provider } = build({ script: [chat('{"say":"兼容端点回复","action":null}')] });
+    const result = await generate(provider);
+    expect(result.say).toBe('兼容端点回复');
   });
 
   it('非 2xx 响应抛错', async () => {
@@ -234,5 +267,75 @@ describe('回复路由降级', () => {
     });
     const result = await generate(router);
     expect(result.say).toBe('罐头回复');
+  });
+});
+
+describe('预览诊断与回退来源(WT-P1-021)', () => {
+  const fixed: ReplyProvider = { generate: async () => ({ say: '罐头回复', action: null, provider: 'fixed-local' }) };
+
+  it('主动选择 fixed-local 无回退原因', () => {
+    const router = createReplyRouter({
+      fixed,
+      deepseek: build({ script: [] }).provider,
+      settings: () => ({ llm: { provider: 'fixed-local' } }),
+      logger: silentLogger,
+    });
+    const diag = router.diagnose();
+    expect(diag.requested).toBe('fixed-local');
+    expect(diag.active).toBe('fixed-local');
+    expect(diag.fallbackReason).toBeNull(); // 主动选择,不是回退
+  });
+
+  it('选 deepseek 但缺 Key:诊断给出 DEEPSEEK_KEY_MISSING,直播仍降级', async () => {
+    const router = createReplyRouter({
+      fixed,
+      deepseek: build({ cfg: config({ apiKey: '' }), script: [] }).provider,
+      settings: () => ({ llm: { provider: 'deepseek' } }),
+      logger: silentLogger,
+    });
+    const diag = router.diagnose();
+    expect(diag.active).toBe('fixed-local');
+    expect(diag.fallbackReason).toBe('DEEPSEEK_KEY_MISSING');
+    expect((await generate(router)).say).toBe('罐头回复'); // 直播降级
+    await expect(router.generateStrict({ text: 'x', userKey: 'p', signal: new AbortController().signal }))
+      .rejects.toMatchObject({ reason: 'NOT_CONFIGURED' }); // 预览报错
+  });
+
+  it('预览遇上游 401 抛 UPSTREAM_ERROR,不返回固定回复', async () => {
+    const router = createReplyRouter({
+      fixed,
+      deepseek: build({ script: [jsonResponse({ message: 'invalid key' }, 401)] }).provider,
+      settings: () => ({ llm: { provider: 'deepseek' } }),
+      logger: silentLogger,
+    });
+    await expect(router.generateStrict({ text: 'x', userKey: 'p', signal: new AbortController().signal }))
+      .rejects.toBeInstanceOf(LlmPreviewError);
+    await expect(router.generateStrict({ text: 'x', userKey: 'p', signal: new AbortController().signal }))
+      .rejects.toMatchObject({ reason: 'UPSTREAM_ERROR' });
+  });
+
+  it('预览超时映射 TIMEOUT', async () => {
+    const ctl = new AbortController();
+    ctl.abort();
+    const router = createReplyRouter({
+      fixed,
+      deepseek: build({ script: [chat('{"say":"x","action":null}')] }).provider,
+      settings: () => ({ llm: { provider: 'deepseek' } }),
+      logger: silentLogger,
+    });
+    await expect(router.generateStrict({ text: 'x', userKey: 'p', signal: ctl.signal }))
+      .rejects.toMatchObject({ reason: 'TIMEOUT' });
+  });
+
+  it('预览正常走模型时返回模型来源', async () => {
+    const router = createReplyRouter({
+      fixed,
+      deepseek: build({ script: [chat('{"say":"模型","action":null}')] }).provider,
+      settings: () => ({ llm: { provider: 'deepseek' } }),
+      logger: silentLogger,
+    });
+    const result = await router.generateStrict({ text: 'x', userKey: 'p', signal: new AbortController().signal });
+    expect(result.provider).toBe('deepseek');
+    expect(result.say).toBe('模型');
   });
 });

@@ -18,6 +18,17 @@ function check(name, ok, detail = '') {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** 预置测试实例为离线语音:标称离线的检查不得调用在线 Edge TTS(WT-P1-024)。 */
+function prepareOfflineTts(dataDir) {
+  const dir = path.join(dataDir, 'config');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({
+    formatVersion: 1,
+    savedVersion: 1,
+    settings: { tts: { provider: 'fixed-local', voice: 'zh-CN-XiaoxiaoNeural' } },
+  }));
+}
+
 async function main() {
   const tempRoot = fs.realpathSync(os.tmpdir());
   const fixture = fs.mkdtempSync(path.join(tempRoot, 'whaletalk-llm-'));
@@ -26,7 +37,8 @@ async function main() {
   process.once('exit', () => fs.rmSync(fixture, { recursive: true, force: true, maxRetries: 5 }));
   let app;
   try {
-    // 显式清空模型密钥,模拟零配置环境;其余沿用隔离默认值。
+    // 显式清空模型密钥,模拟零配置环境;语音固定为离线罐头,不触网。
+    prepareOfflineTts(dataDir);
     const env = { WHALETALK_DATA_DIR: dataDir, PORT: '0', HOST: '127.0.0.1', PLATFORM: 'mock', DEEPSEEK_API_KEY: '' };
     const { createApp } = await tsImport('../src/server/app.ts', import.meta.url);
     app = await createApp({ env });
@@ -114,7 +126,9 @@ async function runWithFakeKey() {
     const settingsDir = path.join(dataDir, 'config');
     fs.mkdirSync(settingsDir, { recursive: true });
     fs.writeFileSync(path.join(settingsDir, 'settings.json'), JSON.stringify({
-      formatVersion: 1, savedVersion: 1, settings: { llm: { provider: 'deepseek' } },
+      formatVersion: 1, savedVersion: 1,
+      // 语音固定离线:本场景只验证模型配置贯通,不依赖在线 Edge TTS(WT-P1-024)
+      settings: { llm: { provider: 'deepseek' }, tts: { provider: 'fixed-local', voice: 'zh-CN-XiaoxiaoNeural' } },
     }));
     const env = {
       WHALETALK_DATA_DIR: dataDir, PORT: '0', HOST: '127.0.0.1', PLATFORM: 'mock',
@@ -141,7 +155,41 @@ async function runWithFakeKey() {
   }
 }
 
+/** 预览诊断场景:选了 DeepSeek 但缺 Key,控制台应能看到具体原因(WT-P1-021)。 */
+async function runDiagnostics() {
+  const tempRoot = fs.realpathSync(os.tmpdir());
+  const fixture = fs.mkdtempSync(path.join(tempRoot, 'whaletalk-llm-diag-'));
+  if (path.dirname(fixture) !== tempRoot) throw new Error('测试目录不在系统临时目录下');
+  const dataDir = path.join(fixture, 'data');
+  process.once('exit', () => fs.rmSync(fixture, { recursive: true, force: true, maxRetries: 5 }));
+  const settingsDir = path.join(dataDir, 'config');
+  fs.mkdirSync(settingsDir, { recursive: true });
+  fs.writeFileSync(path.join(settingsDir, 'settings.json'), JSON.stringify({
+    formatVersion: 1, savedVersion: 1,
+    settings: { llm: { provider: 'deepseek' }, tts: { provider: 'fixed-local', voice: 'zh-CN-XiaoxiaoNeural' } },
+  }));
+  let app;
+  try {
+    const env = { WHALETALK_DATA_DIR: dataDir, PORT: '0', HOST: '127.0.0.1', PLATFORM: 'mock', DEEPSEEK_API_KEY: '' };
+    const { createApp } = await tsImport('../src/server/app.ts', import.meta.url);
+    app = await createApp({ env });
+    const base = app.urls.base;
+    const token = new URL(app.urls.control).hash.slice(1);
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const cfg = await (await fetch(`${base}/api/llm/config`, { headers: auth })).json();
+    check('诊断场景:配置暴露缺 Key 回退原因', cfg.fallbackReason === 'DEEPSEEK_KEY_MISSING', JSON.stringify(cfg));
+    const res = await fetch(`${base}/api/llm/preview`, { method: 'POST', headers: auth, body: JSON.stringify({ text: '测试' }) });
+    const body = await res.json();
+    check('诊断场景:缺 Key 预览返回 502', res.status === 502, JSON.stringify({ status: res.status, body }));
+    check('诊断场景:缺 Key 预览返回 LLM_UNAVAILABLE', body?.code === 'LLM_UNAVAILABLE', JSON.stringify(body));
+    return failed === 0;
+  } finally {
+    await app?.close();
+  }
+}
+
 const zeroOk = await main();
 const keyOk = await runWithFakeKey();
-console.log(`\nP1 第三批端到端:${failed === 0 && zeroOk && keyOk ? '全部通过' : `${failed} 失败`}`);
-process.exitCode = (zeroOk && keyOk && failed === 0) ? 0 : 1;
+const diagOk = await runDiagnostics();
+console.log(`\nP1 第三批端到端:${failed === 0 && zeroOk && keyOk && diagOk ? '全部通过' : `${failed} 失败`}`);
+process.exitCode = (zeroOk && keyOk && diagOk && failed === 0) ? 0 : 1;

@@ -99,7 +99,7 @@ function chatEvent(text: string, user = 'u1'): LiveEvent {
 const persona = { name: '大肥鱼', fallbackReplies: ['保底回复A', '保底回复B'], commandReplies: { dance: '看好啦!' } };
 const giftRules = { thanksTemplate: '谢谢 {user} 的 {gift} ×{count}!', celebrateText: '{kind}!' };
 
-function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechProvider> } = {}) {
+function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechProvider>; now?: () => number } = {}) {
   const playback = fakePlayback();
   const reply: ReplyProvider = { generate: opts.reply?.generate ?? (async () => ({ say: '生成的话', action: null })) };
   const speech: SpeechProvider = { synthesize: opts.speech?.synthesize ?? (async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' })) };
@@ -112,7 +112,7 @@ function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechPr
     persona,
     giftRules,
     logger: silentLogger,
-    now: () => Date.now(),
+    now: opts.now ?? (() => Date.now()),
   });
   return { interaction, playback };
 }
@@ -236,5 +236,70 @@ describe('interaction 阶段耗时与用量统计(P1 第三批)', () => {
     const m = interaction.state().metrics;
     expect(m.last?.provider).toBe('rule');
     expect(m.totals.totalTokens).toBe(0);
+  });
+
+  it('规则语音回复也记录合成耗时(synthesisMs 非空)(WT-P1-022)', async () => {
+    const { interaction } = build();
+    interaction.enqueue(chatEvent('大肥鱼跳个舞')); // 确定性指令,有 say 且有音频
+    await settle();
+    const last = interaction.state().metrics.last;
+    expect(last?.provider).toBe('rule');
+    expect(last?.synthesisMs).not.toBeNull();
+    expect(last?.generationMs).toBeNull(); // 规则回复无生成阶段
+  });
+
+  it('非法输出但上游有用量时仍累计 token(WT-P1-022)', async () => {
+    const { interaction } = build({
+      reply: {
+        generate: async () => ({
+          say: '   ', action: null, provider: 'deepseek',
+          usage: { promptTokens: 10, completionTokens: 22, totalTokens: 32 },
+        }),
+      },
+    });
+    interaction.enqueue(chatEvent('非法输出'));
+    await settle();
+    const m = interaction.state().metrics;
+    expect(m.last?.provider).toBe('fallback'); // 空 say 走保底
+    expect(m.totals.totalTokens).toBe(32); // 用量不丢
+  });
+
+  it('模型响应后紧急停止,用量仍计入且留下统计(WT-P1-022)', async () => {
+    const { interaction } = build({
+      reply: {
+        generate: async () => ({
+          say: '回复', action: null, provider: 'deepseek',
+          usage: { promptTokens: 10, completionTokens: 22, totalTokens: 32 },
+        }),
+      },
+    });
+    interaction.enqueue(chatEvent('停止场景'));
+    await settle();
+    interaction.stop();
+    const m = interaction.state().metrics;
+    expect(m.totals.totalTokens).toBe(32);
+    expect(m.last?.usage?.totalTokens).toBe(32);
+  });
+
+  it('排队耗时不含生成耗时:出队即截止排队(WT-P1-022)', async () => {
+    let clock = 1000;
+    // 生成耗时 500ms:出队时 clock=1000,生成结束 clock=1500
+    const { interaction } = build({
+      now: () => clock,
+      reply: {
+        generate: async () => {
+          clock += 500;
+          return { say: '慢回复', action: null, usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+        },
+      },
+    });
+    interaction.enqueue(chatEvent('计时场景'));
+    // 入队时 clock=1000;tick 出队需等一个周期,推进时钟
+    await new Promise((r) => setTimeout(r, 20));
+    const last = interaction.state().metrics.last;
+    expect(last).not.toBeNull();
+    // 排队 = 出队 - 入队,二者都在入队后很近;生成 500ms 不应计入排队
+    expect(last!.queueWaitMs).toBeLessThan(100);
+    expect(last!.generationMs).toBe(500);
   });
 });
