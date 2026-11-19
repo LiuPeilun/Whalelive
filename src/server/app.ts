@@ -17,6 +17,8 @@ import { createInteraction, type InteractionModule } from './modules/interaction
 import { createPlayback, type PlaybackModule } from './modules/playback/index.js';
 import { mockEvent, type MockEventInput } from './integrations/platforms/mock.js';
 import { createFixedReplyProvider } from './integrations/llm/fixed.js';
+import { createDeepSeekReplyProvider, type DeepSeekConfig } from './integrations/llm/deepseek.js';
+import { createReplyRouter, withProviderLabel } from './integrations/llm/reply-router.js';
 import { createFixedLocalSpeech } from './integrations/tts/fixed-local.js';
 import { createEdgeTtsSpeech, createSpeechRouter } from './integrations/tts/edge-tts.js';
 import type { GiftRuleConfig, PersonaConfig } from './modules/interaction/rules.js';
@@ -80,9 +82,23 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   const persona = readJson<PersonaConfig>(path.join(paths.versionedConfigDir, 'persona.json'), personaFallback, logger, 'persona');
   const giftRulesCfg = readJson<GiftRuleConfig>(path.join(paths.versionedConfigDir, 'gift-rules.json'), giftFallback, logger, 'gift-rules');
 
-  // P1 第一批提供方:固定回复 + 本地 WAV 合成(后续替换为 DeepSeek / edge-tts 适配器)
+  // P1 第三批:DeepSeek 配置全部来自服务端 env;密钥不进入设置视图与浏览器。
+  const deepSeekConfig: DeepSeekConfig = {
+    apiKey: env.DEEPSEEK_API_KEY?.trim() ?? '',
+    baseUrl: env.DEEPSEEK_BASE_URL?.trim() || 'https://api.deepseek.com',
+    model: env.DEEPSEEK_MODEL?.trim() || 'deepseek-chat',
+    thinking: env.DEEPSEEK_THINKING?.trim().toLowerCase() === 'enabled',
+  };
   const audioCache = createAudioCache({ audioDir: paths.audioCacheDir, logger, now });
-  const replyProvider = createFixedReplyProvider({ fallbackReplies: persona.fallbackReplies });
+  const fixedReply = withProviderLabel(createFixedReplyProvider({ fallbackReplies: persona.fallbackReplies }), 'fixed-local');
+  const deepseek = createDeepSeekReplyProvider({
+    config: deepSeekConfig,
+    personaName: persona.name,
+    personaPrompt: persona.systemPrompt ?? '',
+    isAllowedAction: (id) => characters.resolveAction(id) !== null,
+    logger,
+  });
+  const replyProvider = createReplyRouter({ fixed: fixedReply, deepseek, settings: effective, logger });
   // P1 第二批:edge-tts 真实合成(默认),fixed-local 保留为离线备选;按设置热切换
   const fixedSpeech = createFixedLocalSpeech({ cache: audioCache });
   const edgeTts = createEdgeTtsSpeech({ cache: audioCache, logger, now, voice: () => effective().tts.voice });
@@ -141,6 +157,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
       current: st.current,
       playback: { ...playback.view(), action: st.current?.action ?? null },
       renderers: playback.renderersView(),
+      metrics: st.metrics,
       settingsVersion: view.savedVersion,
       serverTime: now(),
     };
@@ -167,6 +184,14 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
     audioCache,
     edgeTts,
     ttsPreview,
+    llm: {
+      generate: (input) => replyProvider.generate(input),
+      active: () => replyProvider.active(),
+      configured: () => deepseek.configured(),
+      model: deepSeekConfig.model,
+      baseUrl: deepSeekConfig.baseUrl,
+      thinking: deepSeekConfig.thinking,
+    },
     logger,
   });
 

@@ -9,6 +9,7 @@ import type { InteractionModule } from '../../modules/interaction/index.js';
 import type { SettingsModule } from '../../modules/settings/index.js';
 import type { MockEventInput } from '../../integrations/platforms/mock.js';
 import type { EdgeTtsSpeech } from '../../integrations/tts/edge-tts.js';
+import type { ReplyProvider } from '../../modules/interaction/providers.js';
 import type { createAccessControl } from '../auth.js';
 
 // 路由、请求校验、响应与资源传输(PROJECT_STRUCTURE《接口与页面路径》)。
@@ -29,6 +30,15 @@ export type HttpDeps = {
   edgeTts: Pick<EdgeTtsSpeech, 'voices'>;
   /** 试听合成:按当前(或覆盖)音色合成一段文本,返回音频地址;失败抛错由路由映射 */
   ttsPreview(input: { text: string; voice?: string }): Promise<{ audioUrl: string } | null>;
+  /** P1 第三批:回复提供方(用于预览与配置状态),不入队、不播放。 */
+  llm: {
+    generate(input: { text: string; userKey: string; signal: AbortSignal }): Promise<Awaited<ReturnType<ReplyProvider['generate']>>>;
+    active(): 'fixed-local' | 'deepseek';
+    configured(): boolean;
+    model: string;
+    baseUrl: string;
+    thinking: boolean;
+  };
   logger: Logger;
 };
 
@@ -47,6 +57,15 @@ function sendTtsError(reply: FastifyReply, err: unknown, action: string): Fastif
     timedOut ? ErrorCodes.TTS_TIMEOUT : ErrorCodes.TTS_UNAVAILABLE,
     `${action}${timedOut ? '超时' : '失败'}`,
     'tts',
+  ));
+}
+
+function sendLlmError(reply: FastifyReply, err: unknown): FastifyReply {
+  const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+  return reply.code(timedOut ? 504 : 502).send(apiError(
+    timedOut ? ErrorCodes.LLM_TIMEOUT : ErrorCodes.LLM_UNAVAILABLE,
+    `回复预览${timedOut ? '超时' : '失败'}:${err instanceof Error ? err.message : String(err)}`,
+    'llm',
   ));
 }
 
@@ -173,6 +192,38 @@ export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): vo
     } catch (err) {
       deps.logger.warn('http.tts-preview-failed', { error: String(err) });
       return sendTtsError(reply, err, '试听合成');
+    }
+  });
+
+  // P1 第三批:模型配置状态(脱敏,不含密钥)与回复预览(调模型但不入队、不播放)。
+  fastify.get('/api/llm/config', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    return {
+      provider: deps.settings.effective().llm.provider,
+      active: deps.llm.active(),
+      configured: deps.llm.configured(),
+      model: deps.llm.model,
+      baseUrl: deps.llm.baseUrl,
+      thinking: deps.llm.thinking,
+    };
+  });
+
+  fastify.post('/api/llm/preview', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    const body = request.body as { text?: unknown } | undefined;
+    const text = typeof body?.text === 'string' ? body.text.trim().slice(0, 120) : '';
+    if (text === '') {
+      reply.code(400).send(apiError(ErrorCodes.VALIDATION_FAILED, 'text 需为 1-120 字的文本', 'llm'));
+      return reply;
+    }
+    const startedAt = Date.now();
+    try {
+      const signal = AbortSignal.timeout(deps.settings.effective().generation.llmTimeoutMs);
+      const result = await deps.llm.generate({ text, userKey: 'preview', signal });
+      return { ...result, elapsedMs: Date.now() - startedAt };
+    } catch (err) {
+      deps.logger.warn('http.llm-preview-failed', { error: String(err) });
+      return sendLlmError(reply, err);
     }
   });
 

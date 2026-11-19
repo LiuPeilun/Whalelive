@@ -5,6 +5,8 @@ export type PersonaConfig = {
   name: string;
   fallbackReplies: string[];
   commandReplies: Record<string, string>;
+  /** P1 第三批:注入模型系统提示的人设描述;缺省时只用 name。 */
+  systemPrompt?: string;
 };
 
 export type GiftRuleConfig = {

@@ -19,6 +19,7 @@ export function mountQueueView(context: ControlContext): void {
   const current = document.getElementById('current') as HTMLElement;
   const list = document.getElementById('queue-list') as HTMLUListElement;
   const dropList = document.getElementById('drop-list') as HTMLUListElement;
+  const metricsBox = document.getElementById('metrics') as HTMLElement | null;
 
   function renderDrops(drops: DropRecordView[]): void {
     clear(dropList);
@@ -66,5 +67,14 @@ export function mountQueueView(context: ControlContext): void {
       );
     }
     renderDrops(state.queue.dropped);
+    if (metricsBox) {
+      const ms = (v: number | null): string => (v === null ? '-' : `${v}ms`);
+      const m = state.metrics;
+      const last = m.last;
+      const lastLine = last
+        ? `最近:${last.eventId} 来源:${last.provider} 排队${ms(last.queueWaitMs)} 生成${ms(last.generationMs)} 合成${ms(last.synthesisMs)} 播放${ms(last.playbackMs)} 合计${ms(last.totalMs)} token:${last.usage?.totalTokens ?? 0}`
+        : '暂无完成记录';
+      metricsBox.textContent = `${lastLine}\n累计:完成 ${m.completed} 次,token ${m.totals.totalTokens}(提示 ${m.totals.promptTokens}/完成 ${m.totals.completionTokens})`;
+    }
   });
 }

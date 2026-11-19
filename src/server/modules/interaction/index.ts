@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { LiveEvent } from '../../../shared/live-event.js';
-import type { TaskView } from '../../../shared/protocol.js';
+import type { MetricsView, StageTimings, TaskView, TokenUsageView } from '../../../shared/protocol.js';
 import type { Performance } from '../../../shared/performance.js';
 import type { EffectiveSettings } from '../../../shared/settings.js';
 import type { Logger } from '../../infrastructure/logger.js';
@@ -24,6 +24,7 @@ export type InteractionState = {
   paused: boolean;
   queue: { capacity: number; length: number; items: QueueItem[]; drops: DropRecord[] };
   current: TaskView | null;
+  metrics: MetricsView;
 };
 
 export type InteractionModule = {
@@ -51,6 +52,15 @@ type CurrentTask = {
   since: number;
   version: number;
   controller: AbortController;
+  /** P1 第三批计时:enqueuedAt 用于排队耗时,其余为各阶段开始时刻。 */
+  timings: {
+    enqueuedAt: number;
+    generatedAt: number | null;
+    synthesizedAt: number | null;
+    playbackAt: number | null;
+  };
+  usage: TokenUsageView | null;
+  provider: string;
 };
 
 /** 派生 signal:父任务中止传导给提供方调用;超时只取消调用本身,不杀任务。 */
@@ -108,6 +118,28 @@ export function createInteraction(deps: {
   let current: CurrentTask | null = null;
   let taskVersion = 0;
   let paused = false;
+  // P1 第三批:累计 token 与最近一次任务的阶段耗时,随状态快照推送到控制台。
+  const totals: TokenUsageView = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  let completed = 0;
+  let lastMetrics: MetricsView['last'] = null;
+
+  function addUsage(usage: TokenUsageView | null): void {
+    if (!usage) return;
+    totals.promptTokens += usage.promptTokens;
+    totals.completionTokens += usage.completionTokens;
+    totals.totalTokens += usage.totalTokens;
+  }
+
+  function stageTimings(task: CurrentTask, endedAt: number): StageTimings {
+    const t = task.timings;
+    return {
+      queueWaitMs: Math.max(0, (t.generatedAt ?? t.synthesizedAt ?? t.playbackAt ?? endedAt) - t.enqueuedAt),
+      generationMs: t.generatedAt !== null && task.since <= t.generatedAt ? t.generatedAt - task.since : null,
+      synthesisMs: t.generatedAt !== null && t.synthesizedAt !== null ? Math.max(0, t.synthesizedAt - t.generatedAt) : null,
+      playbackMs: t.playbackAt !== null ? Math.max(0, endedAt - t.playbackAt) : null,
+      totalMs: Math.max(0, endedAt - t.enqueuedAt),
+    };
+  }
 
   function notify(): void {
     for (const cb of listeners) cb();
@@ -274,7 +306,13 @@ export function createInteraction(deps: {
 
     let say = item.say;
     let action = item.action;
-    current = { eventId: item.eventId, performanceId: null, stage: 'generating', say: '', action, since: now(), version, controller };
+    let usage: TokenUsageView | null = null;
+    let provider = item.isCommand ? 'rule' : 'fixed-local';
+    current = {
+      eventId: item.eventId, performanceId: null, stage: 'generating', say: '', action, since: now(), version, controller,
+      timings: { enqueuedAt: item.enqueuedAt, generatedAt: null, synthesizedAt: null, playbackAt: null },
+      usage: null, provider,
+    };
     notify();
 
     // 生成:语义弹幕调用回复提供方;指令/礼物等确定性文本跳过。
@@ -304,10 +342,19 @@ export function createInteraction(deps: {
         }
       } else {
         say = rules.fallbackReply();
+        provider = 'fallback';
         logger.warn('interaction.reply-fallback', { eventId: item.eventId, why: result === null ? 'timeout-or-error' : 'empty-or-invalid' });
       }
       if (!alive()) return;
-      current = { ...current, say, action, stage: 'synthesizing' };
+      if (result !== null) {
+        const u = result.usage;
+        if (u) usage = { promptTokens: u.promptTokens, completionTokens: u.completionTokens, totalTokens: u.totalTokens };
+        if (result.provider && result.provider !== '') provider = result.provider;
+      }
+      current = {
+        ...current, say, action, usage, provider, stage: 'synthesizing',
+        timings: { ...current.timings, generatedAt: now() },
+      };
       notify();
     }
 
@@ -337,7 +384,12 @@ export function createInteraction(deps: {
     if (current === null || current.version !== version) return;
 
     const { performance, asset } = buildPerformance(item, say, action, audioUrl);
-    current = { eventId: item.eventId, performanceId: performance.id, stage: 'waiting-playback', say, action: performance.action, since: current.since, version, controller };
+    const synthesizedAt = now();
+    current = {
+      ...current,
+      performanceId: performance.id, stage: 'waiting-playback', say, action: performance.action,
+      timings: { ...current.timings, synthesizedAt, playbackAt: synthesizedAt },
+    };
     logger.info('interaction.dispatch', {
       eventId: item.eventId,
       performanceId: performance.id,
@@ -357,6 +409,16 @@ export function createInteraction(deps: {
         history.push({ eventId: item.eventId, performanceId: performance.id, status: result.status, at: now() });
         if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
         logger.info('interaction.task-finished', { eventId: item.eventId, performanceId: performance.id, status: result.status });
+        // P1 第三批:记录本次阶段耗时与用量,累计 token;取消/失败同样计入(仍有耗时)。
+        const endedAt = now();
+        addUsage(current.usage);
+        if (result.status === 'ended') completed += 1;
+        lastMetrics = {
+          eventId: item.eventId,
+          ...stageTimings(current, endedAt),
+          usage: current.usage,
+          provider: current.provider,
+        };
         current = null;
         notify();
         tick();
@@ -457,6 +519,11 @@ export function createInteraction(deps: {
               action: current.action,
               since: current.since,
             },
+      metrics: {
+        last: lastMetrics,
+        totals: { ...totals },
+        completed,
+      },
     };
   }
 

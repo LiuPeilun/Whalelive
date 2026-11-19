@@ -72,6 +72,30 @@ export type PlaybackView = {
   action: string | null;
 };
 
+/** P1 第三批:一次互动各阶段耗时(毫秒)与 token 用量,均为脱敏统计。 */
+export type StageTimings = {
+  queueWaitMs: number | null;
+  generationMs: number | null;
+  synthesisMs: number | null;
+  playbackMs: number | null;
+  totalMs: number | null;
+};
+
+export type TokenUsageView = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
+
+export type MetricsView = {
+  /** 最近一次完成任务(eventId + 阶段耗时 + 用量),未完成时为 null。 */
+  last: ({ eventId: string } & StageTimings & { usage: TokenUsageView | null; provider: string }) | null;
+  /** 进程启动以来累计 token 用量。 */
+  totals: TokenUsageView;
+  /** 累计完成互动数。 */
+  completed: number;
+};
+
 export type RenderersView = {
   count: number;
   primaryRendererId: string | null;
@@ -94,6 +118,7 @@ export type StateSnapshot = {
   current: TaskView | null;
   playback: PlaybackView;
   renderers: RenderersView;
+  metrics: MetricsView;
   settingsVersion: number;
   serverTime: number;
 };
