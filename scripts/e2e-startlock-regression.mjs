@@ -79,11 +79,15 @@ function freshTools(tag) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `wt-${tag}-`));
 }
 
-/** 在指定工具目录环境内启动 CLI,等待健康;返回 { ok, child, out } */
+/** 在指定工具目录环境内启动 CLI,等待健康;返回 { ok, child, out }。
+ * 未显式提供协调端口时清除继承的 WHALETALK_STARTLOCK_PORT,让子进程读取
+ * 临时目录的配置文件(WT-P1-014:调用者的自定义端口不应影响隔离回归) */
 async function launchCli(tools, port, extraEnv = {}, timeoutMs = 20_000) {
+  const env = { ...process.env, WHALETALK_TOOLS_DIR: tools, ...extraEnv };
+  if (extraEnv.WHALETALK_STARTLOCK_PORT === undefined) delete env.WHALETALK_STARTLOCK_PORT;
   const child = spawn(process.execPath, [path.join(root, 'scripts', 'e2e-server.mjs'), '--port', String(port)], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, WHALETALK_TOOLS_DIR: tools, ...extraEnv },
+    env,
   });
   let out = '';
   child.stdout.on('data', (d) => { out += d; });
@@ -100,11 +104,13 @@ async function launchCli(tools, port, extraEnv = {}, timeoutMs = 20_000) {
   return { ok: false, child, out, timeout: true };
 }
 
-/** 在指定工具目录环境内停止 CLI 服务;返回退出码 */
+/** 在指定工具目录环境内停止 CLI 服务;返回退出码(清除继承的协调端口变量) */
 async function stopCli(tools, port) {
+  const env = { ...process.env, WHALETALK_TOOLS_DIR: tools };
+  delete env.WHALETALK_STARTLOCK_PORT;
   const proc = spawn(process.execPath, [path.join(root, 'scripts', 'e2e-server.mjs'), '--stop', '--port', String(port)], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, WHALETALK_TOOLS_DIR: tools },
+    env,
   });
   return await new Promise((resolve) => { proc.on('exit', (c) => resolve(c)); });
 }
@@ -197,16 +203,19 @@ async function scenario3(port) {
   console.log(`---- 场景3:并发两个启动器(端口 ${port},隔离工作区) ----`);
   const tools = freshTools('s3');
   fs.writeFileSync(path.join(tools, 'startlock-port'), '32295'); // 预置共享配置,双方同锁
+  // 显式设置与临时文件一致的协调端口(WT-P1-014):调用者若已设置自定义
+  // WHALETALK_STARTLOCK_PORT,原样继承会让两个子进程因"配置不一致"全部退出
+  const env3 = { ...process.env, WHALETALK_TOOLS_DIR: tools, WHALETALK_STARTLOCK_PORT: '32295' };
   const a = spawn(process.execPath, [path.join(root, 'scripts', 'e2e-server.mjs'), '--port', String(port)], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, WHALETALK_TOOLS_DIR: tools },
+    env: env3,
   });
   let outA = '';
   a.stdout.on('data', (d) => { outA += d; });
   a.stderr.on('data', (d) => { outA += d; });
   const b = spawn(process.execPath, [path.join(root, 'scripts', 'e2e-server.mjs'), '--port', String(port)], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, WHALETALK_TOOLS_DIR: tools },
+    env: env3,
   });
   let outB = '';
   b.stdout.on('data', (d) => { outB += d; });
