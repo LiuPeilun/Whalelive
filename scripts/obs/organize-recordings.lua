@@ -40,7 +40,7 @@ local function handle_event(event)
   local day = os.date("%Y-%m-%d")
   local dest_dir = target_root .. "\\" .. day
   os.execute('mkdir "' .. dest_dir .. '" 2>NUL')
-  local name = string.match(src, "([^\\]+)$")
+  local name = string.match(src, "[^/\\]+$")  -- 兼容 / 与 \ 两种分隔符(OBS 返回正斜杠)
   if name == nil then
     return
   end
