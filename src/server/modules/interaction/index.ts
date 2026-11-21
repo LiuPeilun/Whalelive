@@ -9,7 +9,7 @@ import type { PlaybackModule } from '../playback/index.js';
 import type { ReplyProvider, SpeechProvider } from './providers.js';
 import { createGiftAggregator } from './gifts.js';
 import { createQueue, type DropRecord, type QueueItem } from './queue.js';
-import { createRules, type GiftRuleConfig, type PersonaConfig } from './rules.js';
+import { createRules, tierFor, type GiftTierKey, type PersonaConfig, type ResolvedGiftRules } from './rules.js';
 
 // 互动编排:唯一待播队列、冷却、礼物合并、任务生命周期与紧急停止。
 // 任务串行执行:出队 → 生成(指令短路/回复提供方)→ 语音合成 → playback.play 唯一终态
@@ -60,6 +60,10 @@ const HISTORY_LIMIT = 30;
 const COOLDOWN_LIMIT = 1000;
 const REJECT_LOG_LIMIT = 20;
 const SAY_MAX_LENGTH = 120;
+/** 高峰合并播报的人名上限:超出以"等朋友"收尾,防止长名单拖长语音(v1.1 修正 3)。 */
+const MERGED_NAMES_LIMIT = 5;
+/** 礼物答谢优先级栈(v1.1):大额/SC/大航海 80 > 中额 66 > 小额 60 > 普通聊天 40。 */
+const GIFT_TIER_PRIORITY: Record<GiftTierKey, number> = { small: 60, mid: 66, large: 80 };
 
 type CurrentTask = {
   eventId: string;
@@ -122,7 +126,7 @@ export function createInteraction(deps: {
   replyProvider: ReplyProvider;
   speechProvider: SpeechProvider;
   persona: PersonaConfig;
-  giftRules: GiftRuleConfig;
+  giftRules: ResolvedGiftRules;
   logger: Logger;
   now(): number;
 }): InteractionModule {
@@ -197,18 +201,22 @@ export function createInteraction(deps: {
         giftId: gift.id,
         giftName: gift.name,
         quantity: gift.quantity,
+        coinType: gift.coinType,
+        unitPriceYuan: gift.unitPrice,
       });
       return { accepted: true, eventId };
     }
     if (event.type === 'guard' || event.type === 'superchat') {
+      // SC 与大航海同属大额答谢档(v1.1 修正 2):动作取大额档配置,文案沿用大额模板。
+      const kind = event.type === 'guard' ? '大航海' : '醒目留言';
       const item: QueueItem = {
         eventId,
         type: event.type,
-        priority: 80,
+        priority: GIFT_TIER_PRIORITY.large,
         enqueuedAt: now(),
         expiresAt: now() + 60_000,
-        say: rules.celebrate(event.user.name, event.type === 'guard' ? '大航海' : '醒目留言'),
-        action: 'celebrate',
+        say: rules.thanksText('large', { user: event.user.name, gift: kind }),
+        action: deps.giftRules.tiers.large.action,
         text: null,
         isCommand: true,
         userKey: `${event.source}:${event.user.id}`,
@@ -480,27 +488,79 @@ export function createInteraction(deps: {
       });
   }
 
+  /**
+   * 高峰降级(v1.1 修正 3):待播小额答谢达到阈值时,合并为一句跨用户播报。
+   * 定位在调度层而非聚合层——合并的是"待播队列"里的低档答谢,与连击聚合(同用户同礼物、
+   * 入队前)是两层;大额/SC/大航海答谢始终独立保留。
+   */
+  function mergePeakSmallThanks(): boolean {
+    const threshold = deps.settings().gift.tiering.peakMergeCount;
+    const smalls = queue.snapshot().filter((item) => item.type === 'gift' && item.giftTier === 'small');
+    if (smalls.length < threshold) return false;
+    const removed = queue.removeMany(new Set(smalls.map((item) => item.eventId)), 'peak-merged');
+    if (removed.length === 0) return false;
+    const names: string[] = [];
+    for (const item of removed) {
+      const name = item.userName ?? '朋友';
+      if (!names.includes(name)) names.push(name);
+      if (names.length >= MERGED_NAMES_LIMIT) break;
+    }
+    const namesText = names.join('、') + (names.length >= MERGED_NAMES_LIMIT ? ' 等朋友' : '');
+    const merged: QueueItem = {
+      eventId: `gift-merged-${randomUUID().slice(0, 8)}`,
+      type: 'gift',
+      giftTier: 'small',
+      priority: GIFT_TIER_PRIORITY.small,
+      enqueuedAt: now(),
+      expiresAt: now() + 60_000,
+      say: rules.mergedThanks(namesText),
+      action: deps.giftRules.tiers.small.action,
+      text: null,
+      isCommand: true,
+      userKey: null,
+    };
+    const pushed = queue.push(merged);
+    if (!pushed.ok) {
+      recordReject(merged.eventId, pushed.reason);
+      // 合并结果入队失败(极端容量竞争):原答谢放回,不静默丢感谢。
+      for (const item of removed) queue.push(item);
+      return false;
+    }
+    logger.info('interaction.gift-peak-merged', { mergedCount: removed.length, names: namesText });
+    return true;
+  }
+
   /** 调度心跳:礼物窗口出队 → 容量同步 → 空闲时取下一条。由 app 统一定时调用。 */
   function tick(): void {
     queue.setCapacity(deps.settings().queue.capacity);
     const emissions = gifts.sweep();
     for (const emission of emissions) {
+      const tiering = deps.settings().gift.tiering;
+      const tier = tierFor(emission.totalPaidYuan, emission.paidKnown, tiering);
       const item: QueueItem = {
         eventId: `gift-${randomUUID().slice(0, 8)}`,
         type: 'gift',
-        priority: 60,
+        giftTier: tier,
+        priority: GIFT_TIER_PRIORITY[tier],
         enqueuedAt: now(),
         expiresAt: now() + 60_000,
-        say: rules.thanks(emission.userName, emission.giftName, emission.totalQuantity),
-        action: 'gift',
+        say: rules.thanksText(tier, {
+          user: emission.userName,
+          gift: emission.giftName,
+          count: emission.totalQuantity,
+          ...(emission.totalPaidYuan > 0 ? { amountYuan: emission.totalPaidYuan } : {}),
+        }),
+        action: deps.giftRules.tiers[tier].action,
         text: null,
         isCommand: true,
         userKey: emission.userKey,
+        userName: emission.userName,
       };
       const pushed = queue.push(item);
       if (!pushed.ok) recordReject(item.eventId, pushed.reason);
     }
-    if (emissions.length > 0) notify();
+    const merged = mergePeakSmallThanks();
+    if (emissions.length > 0 || merged) notify();
     if (paused || current !== null) return;
     const next = queue.popBest();
     if (next) void dispatch(next);

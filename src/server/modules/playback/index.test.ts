@@ -20,7 +20,7 @@ function settings(): EffectiveSettings {
   return {
     petId: 'main',
     queue: { capacity: 20, chatTtlMs: 30_000, userCooldownMs: 10_000 },
-    gift: { mergeWindowMs: 2_000 },
+    gift: { mergeWindowMs: 2_000, tiering: { smallMaxYuan: 1, largeMinYuan: 10, peakMergeCount: 6 } },
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
     lease: { ttlMs: 3_000, renewIntervalMs: 1_000, takeoverSafetyMs: 0 },
       tts: { provider: 'fixed-local', voice: 'zh-CN-XiaoxiaoNeural' },

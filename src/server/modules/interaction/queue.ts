@@ -18,6 +18,10 @@ export type QueueItem = {
   /** true = 出队时不再调用回复提供方(指令/礼物/人工已确定文本)。 */
   isCommand: boolean;
   userKey: string | null;
+  /** 礼物答谢档位(仅 type=gift,内部调度字段,不进状态快照协议)。 */
+  giftTier?: 'small' | 'mid' | 'large';
+  /** 礼物观众显示名(内部字段,供高峰合并取人名)。 */
+  userName?: string;
 };
 
 export type DropRecord = { eventId: string; reason: string; at: number };
@@ -110,6 +114,25 @@ export function createQueue(opts: { capacity: number; now(): number }) {
     return cleared;
   }
 
+  /**
+   * 按 ID 批量移除(高峰合并取回待播小额答谢用):命中者记 drop 原因并返回,
+   * 未命中的 ID 忽略;保持剩余条目的相对顺序。
+   */
+  function removeMany(eventIds: ReadonlySet<string>, reason: string): QueueItem[] {
+    const removed: QueueItem[] = [];
+    const kept: QueueItem[] = [];
+    for (const item of items) {
+      if (eventIds.has(item.eventId)) {
+        removed.push(item);
+        recordDrop(item.eventId, reason);
+      } else {
+        kept.push(item);
+      }
+    }
+    if (removed.length > 0) items = kept;
+    return removed;
+  }
+
   /** 缩容:按“优先级最低、同优先级先挤普通聊天、再按最旧”淘汰至新上限。 */
   function setCapacity(next: number): void {
     capacity = next;
@@ -155,5 +178,5 @@ export function createQueue(opts: { capacity: number; now(): number }) {
     return [...drops].slice(-20);
   }
 
-  return { push, popBest, clear, sweepExpired, setCapacity, getCapacity, length, snapshot, dropLog };
+  return { push, popBest, clear, removeMany, sweepExpired, setCapacity, getCapacity, length, snapshot, dropLog };
 }

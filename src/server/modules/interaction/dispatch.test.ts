@@ -7,6 +7,7 @@ import type { CharactersModule } from '../characters/index.js';
 import type { PlaybackModule } from '../playback/index.js';
 import type { ReplyProvider, SpeechProvider } from './providers.js';
 import { createInteraction } from './index.js';
+import { resolveGiftRules } from './rules.js';
 
 // P1 第一批:生成移到出队后 —— 指令短路、语义弹幕经回复提供方、
 // 提供方超时/空回复走保底、语音合成挂到表演、人工停止丢弃迟到结果。
@@ -23,7 +24,7 @@ function settings(): EffectiveSettings {
   return {
     petId: 'main',
     queue: { capacity: 20, chatTtlMs: 30_000, userCooldownMs: 0 },
-    gift: { mergeWindowMs: 2_000 },
+    gift: { mergeWindowMs: 2_000, tiering: { smallMaxYuan: 1, largeMinYuan: 10, peakMergeCount: 6 } },
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
     lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 0 },
       tts: { provider: 'fixed-local', voice: 'zh-CN-XiaoxiaoNeural' },
@@ -97,7 +98,7 @@ function chatEvent(text: string, user = 'u1'): LiveEvent {
 }
 
 const persona = { name: '大肥鱼', fallbackReplies: ['保底回复A', '保底回复B'], commandReplies: { dance: '看好啦!' } };
-const giftRules = { thanksTemplate: '谢谢 {user} 的 {gift} ×{count}!', celebrateText: '{kind}!' };
+const giftRules = resolveGiftRules({ thanksTemplate: '谢谢 {user} 的 {gift} ×{count}!', celebrateText: '{kind}!' });
 
 function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechProvider>; now?: () => number } = {}) {
   const playback = fakePlayback();

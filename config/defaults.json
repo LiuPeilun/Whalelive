@@ -7,7 +7,12 @@
     "userCooldownMs": 10000
   },
   "gift": {
-    "mergeWindowMs": 2000
+    "mergeWindowMs": 2000,
+    "tiering": {
+      "smallMaxYuan": 1,
+      "largeMinYuan": 10,
+      "peakMergeCount": 6
+    }
   },
   "playback": {
     "preloadTimeoutMs": 8000,

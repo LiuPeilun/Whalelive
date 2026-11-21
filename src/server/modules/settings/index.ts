@@ -77,7 +77,11 @@ export function createSettings(deps: { paths: AppPaths; env: Record<string, stri
     return {
       petId: user?.petId ?? defaults.petId,
       queue: { ...defaults.queue, ...user?.queue },
-      gift: { ...defaults.gift, ...user?.gift },
+      gift: {
+        ...defaults.gift,
+        ...user?.gift,
+        tiering: { ...defaults.gift.tiering, ...user?.gift?.tiering },
+      },
       playback: { ...defaults.playback, ...user?.playback },
       lease: { ...defaults.lease, ...user?.lease },
       tts: { ...defaults.tts, ...user?.tts },

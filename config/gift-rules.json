@@ -1,5 +1,18 @@
 {
   "formatVersion": 1,
-  "thanksTemplate": "谢谢 {user} 的 {gift} ×{count}!",
-  "celebrateText": "哇,{user} 的{kind}!大肥鱼记你一辈子!"
+  "tiers": {
+    "small": {
+      "action": "talk-nod",
+      "template": "谢谢 {user} 的 {gift} ×{count}!"
+    },
+    "mid": {
+      "action": "laugh",
+      "template": "哇,{user} 送的{gift}大肥鱼超喜欢!"
+    },
+    "large": {
+      "action": "stamp-letter",
+      "template": "{user} 的{gift}!大肥鱼给你盖个章,记一辈子!"
+    }
+  },
+  "mergedThanksTemplate": "感谢 {names} 送来的礼物,大肥鱼都记好啦!"
 }

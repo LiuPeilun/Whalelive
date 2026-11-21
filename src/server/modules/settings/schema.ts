@@ -8,6 +8,10 @@ function isInt(v: unknown, min: number, max: number): v is number {
   return typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
 }
 
+function isNumber(v: unknown, min: number, max: number): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
+}
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
 }
@@ -23,6 +27,12 @@ export function validateQueue(v: unknown): SettingsValidation {
 export function validateGift(v: unknown): SettingsValidation {
   if (!isRecord(v)) return { ok: false, field: 'gift', reason: '必须是对象' };
   if (!isInt(v.mergeWindowMs, 100, 30_000)) return { ok: false, field: 'gift.mergeWindowMs', reason: '需为 0.1-30秒 的毫秒数' };
+  const tiering = v.tiering;
+  if (!isRecord(tiering)) return { ok: false, field: 'gift.tiering', reason: '必须是对象' };
+  if (!isNumber(tiering.smallMaxYuan, 0, 10_000)) return { ok: false, field: 'gift.tiering.smallMaxYuan', reason: '需为 0-10000 的金额(元)' };
+  if (!isNumber(tiering.largeMinYuan, 0.01, 100_000)) return { ok: false, field: 'gift.tiering.largeMinYuan', reason: '需为 0.01-100000 的金额(元)' };
+  if (!(tiering.largeMinYuan > tiering.smallMaxYuan)) return { ok: false, field: 'gift.tiering.largeMinYuan', reason: '需大于小额上限' };
+  if (!isInt(tiering.peakMergeCount, 2, 100)) return { ok: false, field: 'gift.tiering.peakMergeCount', reason: '需为 2-100 的整数' };
   return { ok: true };
 }
 

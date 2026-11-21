@@ -7,8 +7,19 @@ export type QueueSettings = {
   userCooldownMs: number;
 };
 
+/** 礼物分层(P2 互动第二批):按已确认实付金额分档答谢,金额口径仅金瓜子计价。 */
+export type GiftTieringSettings = {
+  /** 小额上限(元):实付低于该值为小额档;免费/银瓜子/未知价格一律按小额普通感谢。 */
+  smallMaxYuan: number;
+  /** 大额下限(元):实付达到该值为大额档,SC 与大航海同属大额档。 */
+  largeMinYuan: number;
+  /** 待播小额答谢达到该数量时合并为一句播报(高峰降级)。 */
+  peakMergeCount: number;
+};
+
 export type GiftSettings = {
   mergeWindowMs: number;
+  tiering: GiftTieringSettings;
 };
 
 export type PlaybackSettings = {

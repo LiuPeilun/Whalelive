@@ -13,6 +13,9 @@ const FIELDS: FieldSpec[] = [
   { key: 'chatTtlMs', label: '普通聊天有效期(毫秒)', get: (v) => v.user.queue.chatTtlMs, min: 1000, max: 600000, step: 500 },
   { key: 'userCooldownMs', label: '同用户回复冷却(毫秒)', get: (v) => v.user.queue.userCooldownMs, min: 0, max: 600000, step: 500 },
   { key: 'mergeWindowMs', label: '礼物合并窗口(毫秒)', get: (v) => v.user.gift.mergeWindowMs, min: 100, max: 30000, step: 100 },
+  { key: 'smallMaxYuan', label: '小额礼物上限(元)', get: (v) => v.user.gift.tiering.smallMaxYuan, min: 0, max: 10000, step: 0.5 },
+  { key: 'largeMinYuan', label: '大额礼物下限(元)', get: (v) => v.user.gift.tiering.largeMinYuan, min: 0.01, max: 100000, step: 1 },
+  { key: 'peakMergeCount', label: '高峰合并条数(待播小额达此数合并播报)', get: (v) => v.user.gift.tiering.peakMergeCount, min: 2, max: 100, step: 1 },
   { key: 'preloadTimeoutMs', label: '预加载超时(毫秒)', get: (v) => v.user.playback.preloadTimeoutMs, min: 1000, max: 60000, step: 500 },
   { key: 'overallTimeoutMs', label: '播放整体超时(毫秒)', get: (v) => v.user.playback.overallTimeoutMs, min: 5000, max: 600000, step: 500 },
   { key: 'ttlMs', label: '播放端租约时长(毫秒)', get: (v) => v.user.lease.ttlMs, min: 3000, max: 120000, step: 500 },
@@ -214,6 +217,12 @@ export function mountSettingsPanel(context: ControlContext): void {
       const parsed = Number(raw);
       return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
     };
+    // 金额类字段允许小数(如 0.5 元小额上限),不截断,保留两位内精度。
+    const decimal = (key: string, fallback: number): number => {
+      const raw = inputs.get(key)?.value;
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) ? Math.round(parsed * 100) / 100 : fallback;
+    };
     const draft = {
       petId: view.user.petId,
       queue: {
@@ -221,7 +230,14 @@ export function mountSettingsPanel(context: ControlContext): void {
         chatTtlMs: number('chatTtlMs', view.user.queue.chatTtlMs),
         userCooldownMs: number('userCooldownMs', view.user.queue.userCooldownMs),
       },
-      gift: { mergeWindowMs: number('mergeWindowMs', view.user.gift.mergeWindowMs) },
+      gift: {
+        mergeWindowMs: number('mergeWindowMs', view.user.gift.mergeWindowMs),
+        tiering: {
+          smallMaxYuan: decimal('smallMaxYuan', view.user.gift.tiering.smallMaxYuan),
+          largeMinYuan: decimal('largeMinYuan', view.user.gift.tiering.largeMinYuan),
+          peakMergeCount: number('peakMergeCount', view.user.gift.tiering.peakMergeCount),
+        },
+      },
       playback: {
         preloadTimeoutMs: number('preloadTimeoutMs', view.user.playback.preloadTimeoutMs),
         overallTimeoutMs: number('overallTimeoutMs', view.user.playback.overallTimeoutMs),

@@ -1,5 +1,7 @@
 // 明确动作指令与回复策略:P0 无 DeepSeek,聊天经确定性规则或人设兜底回复。
 // P1 接入 DeepSeek 后,本文件保留“确定性指令”部分,语义回复切换到 reply.ts + providers。
+// P2 互动第二批:礼物三档分层答谢——小额/中额/大额各配动作与模板,SC 与大航海同属大额档;
+// 免费礼物、银瓜子、未知价格一律按小额普通感谢,不冒进高档(v1.1 修正 2)。
 
 export type PersonaConfig = {
   name: string;
@@ -9,10 +11,75 @@ export type PersonaConfig = {
   systemPrompt?: string;
 };
 
-export type GiftRuleConfig = {
-  thanksTemplate: string; // 例:"谢谢 {user} 的 {gift} ×{count}!"
-  celebrateText: string;
+/** 礼物答谢档位:小额(<smallMaxYuan)/中额/大额(≥largeMinYuan 或 SC/大航海)。 */
+export type GiftTierKey = 'small' | 'mid' | 'large';
+
+export type GiftTierRule = {
+  /** 该档答谢动作(须在角色清单内;stamp-letter 为大额专属仪式)。 */
+  action: string;
+  /** 答谢模板:支持 {user} {gift}(={kind}) {count} {amount} 占位符。 */
+  template: string;
 };
+
+/**
+ * gift-rules.json 的原始形态(允许缺省分层配置,兼容既有文件);
+ * 经 resolveGiftRules 归一后交付运行时。
+ */
+export type GiftRuleConfig = {
+  /** 兼容旧字段:未配置分层时作为小额档模板。 */
+  thanksTemplate?: string;
+  /** 兼容旧字段:未配置分层时作为大额档模板。 */
+  celebrateText?: string;
+  tiers?: Partial<Record<GiftTierKey, GiftTierRule>>;
+  /** 高峰合并播报模板:支持 {names} 占位符。 */
+  mergedThanksTemplate?: string;
+};
+
+export type ResolvedGiftRules = {
+  tiers: Record<GiftTierKey, GiftTierRule>;
+  mergedThanksTemplate: string;
+};
+
+const DEFAULT_SMALL_TEMPLATE = '谢谢 {user} 的 {gift} ×{count}!';
+const DEFAULT_MERGED_THANKS = '感谢 {names} 送来的礼物,大肥鱼都记好啦!';
+
+/** 内置默认档位:动作均已在角色清单登记(talk-nod 循环口型/laugh/stamp-letter 盖章仪式)。 */
+const DEFAULT_TIERS: Record<GiftTierKey, GiftTierRule> = {
+  small: { action: 'talk-nod', template: DEFAULT_SMALL_TEMPLATE },
+  mid: { action: 'laugh', template: '哇,{user} 送的{gift}大肥鱼超喜欢!' },
+  large: { action: 'stamp-letter', template: '{user} 的{gift}!大肥鱼给你盖个章,记一辈子!' },
+};
+
+/** 归一化礼物规则:旧字段(thanksTemplate/celebrateText)作为缺档回退,缺省项用内置默认。 */
+export function resolveGiftRules(raw: GiftRuleConfig): ResolvedGiftRules {
+  return {
+    tiers: {
+      small: raw.tiers?.small ?? { action: DEFAULT_TIERS.small.action, template: raw.thanksTemplate ?? DEFAULT_TIERS.small.template },
+      mid: raw.tiers?.mid ?? DEFAULT_TIERS.mid,
+      large: raw.tiers?.large ?? { action: DEFAULT_TIERS.large.action, template: raw.celebrateText ?? DEFAULT_TIERS.large.template },
+    },
+    mergedThanksTemplate: raw.mergedThanksTemplate ?? DEFAULT_MERGED_THANKS,
+  };
+}
+
+/** 分层阈值(来自设置 gift.tiering,可热更新)。 */
+export type GiftTierThresholds = { smallMaxYuan: number; largeMinYuan: number };
+
+/**
+ * 档位判定:v1.1 定稿边界——实付 <smallMaxYuan 小额、[smallMaxYuan, largeMinYuan) 中额、
+ * ≥largeMinYuan 大额;免费/银瓜子/未知价格(paidKnown=false 或金额为 0)一律小额。
+ */
+export function tierFor(paidYuan: number, paidKnown: boolean, thresholds: GiftTierThresholds): GiftTierKey {
+  if (!paidKnown || paidYuan <= 0) return 'small';
+  if (paidYuan >= thresholds.largeMinYuan) return 'large';
+  if (paidYuan >= thresholds.smallMaxYuan) return 'mid';
+  return 'small';
+}
+
+/** 金额展示:保留两位内小数,整除则去掉小数点(0.5→"0.5",10→"10")。 */
+function formatYuan(v: number): string {
+  return String(Math.round(v * 100) / 100);
+}
 
 /**
  * 明确口令:弹幕 trim 后整句全等才触发,含口令词的普通提问不命中(走问答流程)。
@@ -33,7 +100,7 @@ const COMMAND_PATTERNS: { action: string; pattern: RegExp }[] = [
   { action: 'gift', pattern: /(拆礼物|开礼物)/ },
 ];
 
-export function createRules(persona: PersonaConfig, giftRules: GiftRuleConfig) {
+export function createRules(persona: PersonaConfig, giftRules: ResolvedGiftRules) {
   let fallbackCursor = 0;
 
   /** 确定性指令检测:先查整句口令(全等),含彩蛋词但非整句的普通提问跳过包含类指令走问答,再查其余包含类指令。 */
@@ -62,13 +129,27 @@ export function createRules(persona: PersonaConfig, giftRules: GiftRuleConfig) {
     return reply;
   }
 
-  function thanks(user: string, gift: string, count: number): string {
-    return giftRules.thanksTemplate.replaceAll('{user}', user).replaceAll('{gift}', gift).replaceAll('{count}', String(count));
+  /**
+   * 按档取答谢文案。{gift} 与 {kind} 等值(大航海/醒目留言复用大额模板);
+   * count/amount 未提供时对应占位符替换为空串。
+   */
+  function thanksText(
+    tier: GiftTierKey,
+    input: { user: string; gift: string; count?: number; amountYuan?: number },
+  ): string {
+    const template = giftRules.tiers[tier]?.template ?? DEFAULT_SMALL_TEMPLATE;
+    return template
+      .replaceAll('{user}', input.user)
+      .replaceAll('{gift}', input.gift)
+      .replaceAll('{kind}', input.gift)
+      .replaceAll('{count}', input.count !== undefined ? String(input.count) : '')
+      .replaceAll('{amount}', input.amountYuan !== undefined ? formatYuan(input.amountYuan) : '');
   }
 
-  function celebrate(user: string, kind: string): string {
-    return giftRules.celebrateText.replaceAll('{user}', user).replaceAll('{kind}', kind);
+  /** 高峰合并播报:{names} 已由调用方按人名数量截断(超出以"等朋友"收尾)。 */
+  function mergedThanks(names: string): string {
+    return giftRules.mergedThanksTemplate.replaceAll('{names}', names);
   }
 
-  return { detectCommand, fallbackReply, thanks, celebrate };
+  return { detectCommand, fallbackReply, thanksText, mergedThanks };
 }
