@@ -29,7 +29,7 @@ export type InteractionState = {
 
 export type InteractionModule = {
   enqueue(event: LiveEvent): EnqueueResult;
-  manualAction(actionId: string): EnqueueResult;
+  manualAction(actionId: string, say?: string): EnqueueResult;
   pause(): void;
   resume(): void;
   stop(): void;
@@ -235,7 +235,7 @@ export function createInteraction(deps: {
     return { accepted: true, eventId };
   }
 
-  function manualAction(actionId: string): EnqueueResult {
+  function manualAction(actionId: string, say = ''): EnqueueResult {
     const eventId = `manual-${randomUUID().slice(0, 8)}`;
     const item: QueueItem = {
       eventId,
@@ -243,7 +243,8 @@ export function createInteraction(deps: {
       priority: 100,
       enqueuedAt: now(),
       expiresAt: now() + 60_000,
-      say: '',
+      // 试播台词:非空时随表演走 TTS,用于控制台验证口型循环与素材效果。
+      say: say.trim().slice(0, SAY_MAX_LENGTH),
       action: actionId,
       text: null,
       isCommand: true,

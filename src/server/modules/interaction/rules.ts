@@ -14,6 +14,15 @@ export type GiftRuleConfig = {
   celebrateText: string;
 };
 
+/**
+ * 明确口令:弹幕 trim 后整句全等才触发,含口令词的普通提问不命中(走问答流程)。
+ * 与 COMMAND_PATTERNS(包含匹配)区分,避免高频词误触。
+ */
+const PHRASE_COMMANDS: { action: string; phrase: string }[] = [
+  { action: 'salute', phrase: '敬个礼' },
+  { action: 'sip-tea', phrase: '喝口茶' },
+];
+
 const COMMAND_PATTERNS: { action: string; pattern: RegExp }[] = [
   { action: 'dance', pattern: /(跳个舞|跳舞|跳一支舞|来段舞)/ },
   { action: 'wave', pattern: /(挥手|打个招呼|say hi|嗨|哈喽|你好呀|大家好)/ },
@@ -25,8 +34,14 @@ const COMMAND_PATTERNS: { action: string; pattern: RegExp }[] = [
 export function createRules(persona: PersonaConfig, giftRules: GiftRuleConfig) {
   let fallbackCursor = 0;
 
-  /** 确定性指令检测:命中返回动作与固定回复,语义弹幕返回 null(出队后走回复提供方)。 */
+  /** 确定性指令检测:先查整句口令(全等),再查包含类指令;语义弹幕返回 null(出队后走回复提供方)。 */
   function detectCommand(text: string): { action: string; say: string } | null {
+    const trimmed = text.trim();
+    for (const cmd of PHRASE_COMMANDS) {
+      if (trimmed === cmd.phrase) {
+        return { action: cmd.action, say: persona.commandReplies[cmd.action] ?? `${persona.name}收到!` };
+      }
+    }
     for (const cmd of COMMAND_PATTERNS) {
       if (cmd.pattern.test(text)) {
         return { action: cmd.action, say: persona.commandReplies[cmd.action] ?? `${persona.name}收到!` };

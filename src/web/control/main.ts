@@ -1,4 +1,3 @@
-import { CANONICAL_ACTION_IDS } from '../../shared/character.js';
 import type { StateSnapshot } from '../../shared/protocol.js';
 import { createWsClient, readCredentialFromHash, apiFetch, type WsClientHandle } from '../shared/ws-client.js';
 import { errorMessage } from '../shared/dom.js';
@@ -75,7 +74,7 @@ function main(): void {
 
   mountStatusBar(context);
   mountSimulator(context);
-  mountManualAction(context, [...CANONICAL_ACTION_IDS]);
+  mountManualAction(context);
   mountQueueView(context);
   mountSettingsPanel(context);
   mountOverlayLink(context);

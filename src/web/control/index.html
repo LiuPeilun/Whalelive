@@ -70,12 +70,13 @@
       <p class="muted">连击模拟会以 10 条独立事件快速提交,验证 2 秒窗口内的礼物合并感谢。</p>
     </section>
     <section id="sec-manual">
-      <h2>手动动作</h2>
+      <h2>角色试播</h2>
       <div class="row">
         <select id="manual-action"></select>
-        <button class="primary" id="manual-send">点播动作</button>
+        <input id="manual-say" type="text" placeholder="试播台词(留空=只播动作)" maxlength="120" style="flex:1; min-width:200px" />
+        <button class="primary" id="manual-send">试播</button>
       </div>
-      <p class="muted">手动动作优先级最高,入队后等待当前表演结束。</p>
+      <p class="muted">动作清单来自角色视图;台词非空时随动作合成语音——口型类动作会循环到语音结束,用于验证素材与口型衔接。</p>
     </section>
     <section id="sec-overlay">
       <h2>OBS 播放页链接</h2>

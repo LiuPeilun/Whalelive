@@ -238,7 +238,7 @@ export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): vo
 
   fastify.post('/api/control/action', async (request, reply) => {
     if (!guardControl(deps, request, reply)) return reply;
-    const body = request.body as { actionId?: unknown } | undefined;
+    const body = request.body as { actionId?: unknown; say?: unknown } | undefined;
     if (typeof body?.actionId !== 'string' || body.actionId === '') {
       reply.code(400).send(apiError(ErrorCodes.VALIDATION_FAILED, '缺少 actionId', 'control'));
       return reply;
@@ -247,7 +247,15 @@ export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): vo
       reply.code(400).send(apiError(ErrorCodes.VALIDATION_FAILED, `动作 ${body.actionId} 不在角色清单白名单`, 'control'));
       return reply;
     }
-    return deps.interaction.manualAction(body.actionId);
+    // 可选试播台词:非空时随表演合成语音,用于验证口型循环到语音结束。
+    const say = typeof body.say === 'string' && body.say.trim() !== '' ? body.say : undefined;
+    return deps.interaction.manualAction(body.actionId, say);
+  });
+
+  // 角色视图(含动作清单):控制台试播器的下拉数据源。
+  fastify.get('/api/control/character', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    return deps.characters.view();
   });
 
   fastify.post('/api/control/pause', async (request, reply) => {
