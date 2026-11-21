@@ -98,6 +98,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
     personaName: persona.name,
     personaPrompt: persona.systemPrompt ?? '',
     isAllowedAction: (id) => characters.resolveAction(id) !== null,
+    availableActions: () => characters.view().actions.filter((a) => a.available).map((a) => a.id),
     logger,
   });
   const replyProvider = createReplyRouter({ fixed: fixedReply, deepseek, settings: effective, logger });

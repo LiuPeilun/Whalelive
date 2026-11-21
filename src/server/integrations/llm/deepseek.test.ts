@@ -38,6 +38,7 @@ function build(opts: {
   script?: Array<Response | Error>;
   allowed?: string[];
   personaPrompt?: string;
+  available?: string[];
 } = {}) {
   const fetch = fakeFetch(opts.script ?? []);
   const allowed = opts.allowed ?? ['dance', 'wave', 'talk', 'idle'];
@@ -46,6 +47,7 @@ function build(opts: {
     personaName: '大肥鱼',
     personaPrompt: opts.personaPrompt ?? '活泼可爱的桌宠。',
     isAllowedAction: (id) => allowed.includes(id),
+    availableActions: () => opts.available ?? allowed.filter((a) => a !== 'idle'),
     logger: silentLogger,
     fetch: fetch.fn,
   });
@@ -126,6 +128,20 @@ describe('短回复 JSON 解析与校验', () => {
     const result = await generate(provider);
     expect(result.say).toBe('收到啦');
     expect(result.action).toBeNull();
+  });
+
+  it('系统提示的动作清单来自 availableActions(新动作登记后自动进入模型选项)', async () => {
+    const { provider, calls } = build({
+      allowed: ['laugh', 'shy', 'salute'],
+      available: ['laugh', 'shy', 'surprise', 'salute', 'sip-tea', 'talk-nod', 'idle'],
+      script: [chat('{"say":"好","action":null}')],
+    });
+    await generate(provider);
+    const body = JSON.parse(String(calls[0]!.init.body)) as { messages: Array<{ role: string; content: string }> };
+    const system = body.messages[0]!.content;
+    expect(system).toContain('laugh');
+    expect(system).toContain('talk-nod');
+    expect(system).toContain('sip-tea');
   });
 
   it('动作在白名单外被丢弃,say 仍保留', async () => {
