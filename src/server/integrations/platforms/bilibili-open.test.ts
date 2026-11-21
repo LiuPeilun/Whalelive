@@ -179,6 +179,30 @@ describe('推送消息映射(WT:事件契约)', () => {
     expect(e?.sourceKey).toBe('gift-u-1-5-123');
   });
 
+  it('礼物:盲盒(blind_gift.status=true)的爆出价值不计实付,保留普通感谢(WT-P2-004 复审)', () => {
+    const blind = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', {
+      uid: 0, open_id: 'u', uname: 'x', gift_id: 31169, gift_name: '花香园', gift_num: 1,
+      paid: true, price: 15000, r_price: 15000, blind_gift: { status: true, blind_gift_id: 10086 },
+    }, 1_000);
+    expect(blind?.gift?.paidMilliYuan).toBeUndefined();
+    expect(blind?.gift?.name).toBe('花香园'); // 名称与数量保留,走小额普通感谢
+    // 对照:同价值的普通付费礼物(无 blind_gift)仍正常计价升档
+    const normal = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', {
+      uid: 0, open_id: 'u', uname: 'x', gift_id: 31169, gift_name: '花香园', gift_num: 1,
+      paid: true, price: 15000, r_price: 15000,
+    }, 1_000);
+    expect(normal?.gift?.paidMilliYuan).toBe(15000);
+  });
+
+  it('礼物:无 msg_id 回退键采用嵌套 combo_count,同秒不同连击不撞键(WT-P2-004 复审)', () => {
+    const base = { uid: 0, open_id: 'u', uname: 'x', gift_id: 1, gift_name: 'y', gift_num: 1, timestamp: 123, combo_info: {} as Record<string, unknown> };
+    const first = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', { ...base, combo_info: { combo_id: 'c', combo_count: 1 } }, 1_000);
+    const second = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', { ...base, combo_info: { combo_id: 'c', combo_count: 2 } }, 1_000);
+    expect(first?.sourceKey).toBe('gift-u-1-1-123');
+    expect(second?.sourceKey).toBe('gift-u-1-2-123');
+    expect(first?.sourceKey).not.toBe(second?.sourceKey);
+  });
+
   it('大航海与 SC:官方命令与 user_info 嵌套用户(WT-P2-005),旧命令与顶层字段保留', () => {
     const guard = mapPushMessage('LIVE_OPEN_PLATFORM_GUARD', {
       room_id: 1796120001,

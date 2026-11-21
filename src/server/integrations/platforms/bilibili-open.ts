@@ -165,18 +165,24 @@ export function mapPushMessage(cmd: string, data: Record<string, unknown>, nowMs
       if (!ok || uname === '' || giftId === '' || giftName === '' || quantity < 1) return null;
       const combo = (typeof data.combo_info === 'object' && data.combo_info !== null ? data.combo_info : {}) as Record<string, unknown>;
       const comboId = str(combo.combo_id) || str(data.combo_id);
+      // 连击累计官方字段为嵌套 combo_count(combo_base_num 为基准数);无 msg_id 的回退键
+      // 用它区分同秒的连击推送,顶层 combo_num 仅作旧口径回退(复审 WT-P2-004)。
+      const comboCount = num(combo.combo_count) || num(data.combo_num);
       // 实付口径:paid=true 且有实际价值(r_price)才计价;仅有标价/爆出价值(price)属于现金实付未确认,
-      // 保留普通感谢不计金额(盲盒的两种价格官方均解释为爆出物价值)。
+      // 保留普通感谢不计金额。盲盒(blind_gift.status=true)的 price 与 r_price 官方均定义为爆出物价值,
+      // 现金实付无法确认,同样只走普通感谢(复审 WT-P2-004)。
+      const blind = (typeof data.blind_gift === 'object' && data.blind_gift !== null ? data.blind_gift : {}) as Record<string, unknown>;
+      const isBlind = blind.status === true;
       const paid = data.paid === true;
       const rPrice = num(data.r_price);
-      const paidMilliYuan = paid && rPrice > 0 ? rPrice : undefined;
+      const paidMilliYuan = paid && rPrice > 0 && !isBlind ? rPrice : undefined;
       const msgId = str(data.msg_id);
       return {
         id: `evt-${msgId !== '' ? msgId : randomUUID().slice(0, 8)}`,
         // 去重键带 msg_id:同用户同礼物同秒的不同消息不互斥;同 msg_id 重推保持幂等。
         sourceKey: msgId !== ''
           ? `gift-${userId}-${giftId}-${msgId}`
-          : `gift-${userId}-${giftId}-${num(data.combo_num)}-${num(data.timestamp) || nowMs}`,
+          : `gift-${userId}-${giftId}-${comboCount}-${num(data.timestamp) || nowMs}`,
         source: 'bilibili-open',
         roomId: roomId || 'open-live',
         type: 'gift',

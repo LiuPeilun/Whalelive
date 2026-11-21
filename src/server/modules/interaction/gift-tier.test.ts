@@ -340,6 +340,39 @@ describe('高峰降级合并(P2 第二批)', () => {
     expect(says).not.toContain('朋友、乙1');
     interaction.resume();
   });
+
+  it('持续高峰:满队列含已合并条目时,大额/大航海/醒目留言仍能分别进入队列(WT-P2-006 复审)', async () => {
+    t = 0;
+    const { interaction } = build();
+    interaction.pause();
+    // 审核回放:16 批 × 6 位观众,每批结算合并为 1 条;第 16 批仅 5 人入队到满载,
+    // 队列为 15 条合并条目 + 5 条普通小额 = 20 满
+    for (let batch = 0; batch < 16; batch++) {
+      for (let i = 0; i < 6; i++) {
+        interaction.enqueue(giftEvent({ user: `b${batch}u${i}`, giftId: `g-${batch}-${i}`, giftName: '小心心' }));
+      }
+      t += 2000;
+      interaction.tick();
+    }
+    const afterBatches = interaction.state().queue;
+    expect(afterBatches.length).toBe(20);
+    expect(afterBatches.items.filter((i) => i.type === 'gift' && i.say.includes('等朋友')).length).toBe(15);
+    // 三种高档答谢相继到达:合并候选不足阈值,各自取代一条普通小额让位,均入队且被取代者有记录
+    interaction.enqueue(guardEvent('舰长戊'));
+    interaction.enqueue(superchatEvent('SC己'));
+    interaction.enqueue(giftEvent({ user: '土豪', giftId: 'rocket', giftName: '火箭', quantity: 1, paidMilliYuan: 15000 }));
+    t += 2000;
+    interaction.tick();
+    const snapshot = interaction.state().queue;
+    expect(snapshot.items.some((i) => i.type === 'guard')).toBe(true);
+    expect(snapshot.items.some((i) => i.type === 'superchat')).toBe(true);
+    expect(snapshot.items.filter((i) => i.priority === 80).length).toBe(3);
+    expect(snapshot.drops.filter((d) => d.reason === 'displaced-for-high-tier').length).toBe(3);
+    // 两批点名的既有行为保持:最早的合并条目原点名仍在
+    const firstMerged = snapshot.items.find((i) => i.type === 'gift' && i.say.includes('等朋友'));
+    expect(firstMerged?.say).toContain('b0u0、b0u1、b0u2、b0u3、b0u4');
+    interaction.resume();
+  });
 });
 
 describe('缺档动作回退(WT-P2-008)', () => {

@@ -503,11 +503,35 @@ export function createInteraction(deps: {
   /**
    * 入队;队列满载时先执行高峰合并腾位再入队(WT-P2-006):
    * 满是小额答谢的队列不得拒收后到的大额/SC/大航海答谢。
-   * 腾位发生在拒收之前,不产生 queue-full 丢弃记录;无候选可合并时保持原腾位规则。
+   * 合并仍腾不出位置(如候选已耗尽)且为本档答谢(优先级 80)时,按"有界小额腾位"取代
+   * 一条小额答谢让位——优先普通条目、其次已合并条目,取最新;被取代者以
+   * displaced-for-high-tier 记录(复审 004725)。每次高档入队至多取代一条;
+   * 中额及以下不触发取代,两批点名的既有行为不受影响。
    */
   function pushWithPeakRelief(item: QueueItem): { ok: true } | { ok: false; reason: string } {
     if (queue.length() >= queue.getCapacity()) mergePeakSmallThanks();
-    return queue.push(item);
+    let pushed = queue.push(item);
+    if (!pushed.ok && pushed.reason === 'queue-full' && item.priority >= GIFT_TIER_PRIORITY.large) {
+      const victim = newestSmallThank();
+      if (victim !== null) {
+        queue.removeMany(new Set([victim.eventId]), 'displaced-for-high-tier');
+        pushed = queue.push(item);
+      }
+    }
+    return pushed;
+  }
+
+  /** 腾位候选:小额答谢条目;优先普通条目(未合并,信息量小),其次已合并条目;取入队最新。 */
+  function newestSmallThank(): QueueItem | null {
+    const smalls = queue.snapshot().filter((i) => i.type === 'gift' && i.giftTier === 'small');
+    if (smalls.length === 0) return null;
+    const plain = smalls.filter((i) => i.merged !== true);
+    const pool = plain.length > 0 ? plain : smalls;
+    let newest: QueueItem | null = null;
+    for (const item of pool) {
+      if (newest === null || item.enqueuedAt > newest.enqueuedAt) newest = item;
+    }
+    return newest;
   }
 
   /**
