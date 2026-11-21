@@ -6,7 +6,7 @@ import type { Logger } from '../../infrastructure/logger.js';
 import type { CharactersModule } from '../characters/index.js';
 import type { PlaybackModule } from '../playback/index.js';
 import type { ReplyProvider, SpeechProvider } from './providers.js';
-import { createInteraction } from './index.js';
+import { createInteraction, resolveAdoptableAction } from './index.js';
 
 // P2 第一批:明确口令彩蛋(整句全等)与控制台试播台词。
 // 口令与包含类指令的边界:「敬个礼」独立触发;含口令词的正常提问走问答流程。
@@ -42,7 +42,7 @@ function fakeCharacters(): CharactersModule {
     view: () => ({ petId: 'main', name: 'x', licenseName: 'x', actions: [] }),
     // known:清单登记集合;missing:登记但素材缺失(模拟迁移/分批复制场景,WT-P2-002)
     resolveAction: (id: string) => {
-      const known = ['idle', 'talk', 'wave', 'dance', 'salute', 'sip-tea', 'talk-nod', 'stamp-letter', 'spin'];
+      const known = ['idle', 'talk', 'wave', 'dance', 'eat', 'salute', 'sip-tea', 'talk-nod', 'stamp-letter', 'spin'];
       if (!known.includes(id)) return null;
       const missing = ['spin'];
       return { actionId: id, file: `animations/${id}.webm`, loop: id === 'talk' || id === 'talk-nod', available: !missing.includes(id) };
@@ -264,5 +264,62 @@ describe('控制台试播台词(P2 第一批)', () => {
     interaction.manualAction('talk', '长'.repeat(200));
     await settle();
     expect(playback.plays[0]!.performance.say?.length ?? 0).toBeLessThanOrEqual(120);
+  });
+});
+
+describe('候选校验统一口径(WT-P2-002 复验)', () => {
+  const resolve = (id: string) => {
+    const known = ['talk', 'salute', 'stamp-letter', 'spin'];
+    if (!known.includes(id)) return null;
+    return { available: id !== 'spin' };
+  };
+
+  it('正常可用的动作采纳', () => {
+    expect(resolveAdoptableAction('salute', resolve)).toBe('salute');
+    expect(resolveAdoptableAction('talk', resolve)).toBe('talk');
+  });
+
+  it('空/idle/清单外/缺素材/答谢专属一律返回 null', () => {
+    expect(resolveAdoptableAction(null, resolve)).toBeNull();
+    expect(resolveAdoptableAction('', resolve)).toBeNull();
+    expect(resolveAdoptableAction('idle', resolve)).toBeNull();
+    expect(resolveAdoptableAction('dance', resolve)).toBeNull();
+    expect(resolveAdoptableAction('spin', resolve)).toBeNull();
+    expect(resolveAdoptableAction('stamp-letter', resolve)).toBeNull();
+  });
+});
+
+describe('含彩蛋词的普通提问不被任何旧指令截获(WT-P2-003 复验)', () => {
+  it('「吃饭前喝口茶对肠胃有影响吗?」走问答(审核复验样本)', async () => {
+    const { interaction, playback, generate } = build();
+    interaction.enqueue(chatEvent('吃饭前喝口茶对肠胃有影响吗?'));
+    await settle();
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(generate.mock.calls[0]![0].text).toBe('吃饭前喝口茶对肠胃有影响吗?');
+    expect(playback.plays[0]!.performance.say).toBe('生成的话');
+  });
+
+  it('「为什么要喝口茶?」走问答(上一轮复验样本保留)', async () => {
+    const { interaction, playback, generate } = build();
+    interaction.enqueue(chatEvent('为什么要喝口茶?'));
+    await settle();
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(playback.plays[0]!.performance.say).toBe('生成的话');
+  });
+
+  it('eat 点播意图回归:「今天吃什么」仍触发 eat', async () => {
+    const { interaction, playback, generate } = build();
+    interaction.enqueue(chatEvent('今天吃什么'));
+    await settle();
+    expect(generate).not.toHaveBeenCalled();
+    expect(playback.plays[0]!.performance.action).toBe('eat');
+  });
+
+  it('明确旧指令回归:「来跳个舞」仍触发 dance', async () => {
+    const { interaction, playback, generate } = build();
+    interaction.enqueue(chatEvent('来跳个舞'));
+    await settle();
+    expect(generate).not.toHaveBeenCalled();
+    expect(playback.plays[0]!.performance.action).toBe('dance');
   });
 });

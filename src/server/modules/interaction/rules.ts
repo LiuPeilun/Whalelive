@@ -26,7 +26,8 @@ const PHRASE_COMMANDS: { action: string; phrase: string }[] = [
 const COMMAND_PATTERNS: { action: string; pattern: RegExp }[] = [
   { action: 'dance', pattern: /(跳个舞|跳舞|跳一支舞|来段舞)/ },
   { action: 'wave', pattern: /(挥手|打个招呼|say hi|嗨|哈喽|你好呀|大家好)/ },
-  { action: 'eat', pattern: /(吃什么|吃饭|干饭|吃点啥)/ },
+  // 「吃饭」为高频名词(吃饭前/后类提问),移除;点播意图由「吃什么/干饭/开饭/来点吃的」覆盖。
+  { action: 'eat', pattern: /(吃什么|吃点啥|干饭|开饭|来点吃的)/ },
   // 「为什么」是高频疑问词,与普通提问高冲突(带口令词的提问会被截获),移除;思考类仍可由口令/模型路由触发。
   { action: 'think', pattern: /(想想|思考一下|想一下)/ },
   { action: 'gift', pattern: /(拆礼物|开礼物)/ },
@@ -35,7 +36,7 @@ const COMMAND_PATTERNS: { action: string; pattern: RegExp }[] = [
 export function createRules(persona: PersonaConfig, giftRules: GiftRuleConfig) {
   let fallbackCursor = 0;
 
-  /** 确定性指令检测:先查整句口令(全等),再查包含类指令;语义弹幕返回 null(出队后走回复提供方)。 */
+  /** 确定性指令检测:先查整句口令(全等),含彩蛋词但非整句的普通提问跳过包含类指令走问答,再查其余包含类指令。 */
   function detectCommand(text: string): { action: string; say: string } | null {
     const trimmed = text.trim();
     for (const cmd of PHRASE_COMMANDS) {
@@ -43,6 +44,9 @@ export function createRules(persona: PersonaConfig, giftRules: GiftRuleConfig) {
         return { action: cmd.action, say: persona.commandReplies[cmd.action] ?? `${persona.name}收到!` };
       }
     }
+    // 含彩蛋词但非整句命中(如「为什么要喝口茶?」「吃饭前喝口茶对肠胃有影响吗?」)
+    // 属于含彩蛋词的普通提问,按第一批约定走问答,不被包含类指令截获(WT-P2-003)。
+    if (PHRASE_COMMANDS.some((cmd) => trimmed.includes(cmd.phrase))) return null;
     for (const cmd of COMMAND_PATTERNS) {
       if (cmd.pattern.test(text)) {
         return { action: cmd.action, say: persona.commandReplies[cmd.action] ?? `${persona.name}收到!` };

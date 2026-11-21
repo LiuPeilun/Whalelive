@@ -25,8 +25,10 @@ export function mountManualAction(context: ControlContext): void {
     for (const action of view.actions) {
       const option = document.createElement('option');
       option.value = action.id;
-      option.textContent = action.loop ? `${action.id} (循环)` : action.id;
-      if (!action.available) option.textContent += ' (素材缺失)';
+      option.textContent = action.available
+        ? (action.loop ? `${action.id} (循环)` : action.id)
+        : `${action.id} (素材缺失)`;
+      option.disabled = !action.available;
       select.append(option);
     }
   })();

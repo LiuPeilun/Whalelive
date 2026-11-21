@@ -5,6 +5,7 @@ import type { StateSnapshot } from '../../../shared/protocol.js';
 import { isValidVoiceShortName, type SettingsUpdateRequest } from '../../../shared/settings.js';
 import type { Logger } from '../../infrastructure/logger.js';
 import type { CharactersModule } from '../../modules/characters/index.js';
+import { resolveAdoptableAction } from '../../modules/interaction/index.js';
 import type { InteractionModule } from '../../modules/interaction/index.js';
 import type { SettingsModule } from '../../modules/settings/index.js';
 import type { MockEventInput } from '../../integrations/platforms/mock.js';
@@ -229,7 +230,9 @@ export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): vo
     try {
       const signal = AbortSignal.timeout(deps.settings.effective().generation.llmTimeoutMs);
       const result = await deps.llm.generateStrict({ text, userKey: 'preview', signal });
-      return { ...result, elapsedMs: Date.now() - startedAt };
+      // 预览与直播派发同口径校验动作候选:边界外保留回复文本、动作置空(WT-P2-002)。
+      const action = resolveAdoptableAction(result.action ?? null, (id) => deps.characters.resolveAction(id));
+      return { ...result, action, elapsedMs: Date.now() - startedAt };
     } catch (err) {
       deps.logger.warn('http.llm-preview-failed', { error: String(err) });
       return sendLlmError(reply, err);
