@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { WebSocket } from 'ws';
 import type { LiveEvent } from '../../../shared/live-event.js';
 import type { Logger } from '../../infrastructure/logger.js';
 
@@ -21,8 +22,10 @@ const RECONNECT_MAX_MS = 60_000;
 const HEADER_LENGTH = 16;
 
 const OP_HEARTBEAT = 2;
+const OP_HEARTBEAT_REPLY = 3;
 const OP_SERVER_NOTIFY = 5;
 const OP_AUTHORITY = 7;
+const OP_AUTHORITY_REPLY = 8;
 const PV_HEARTBEAT = 1;
 const PV_UNCOMPRESSED = 0;
 
@@ -71,7 +74,7 @@ export function signHeaders(cfg: BilibiliOpenConfig, rawBody: string, nowMs: num
     ['x-bili-timestamp', timestamp],
   ].map((p) => [p[0], p[1]] as [string, string])
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  const signingString = pairs.map(([k, v]) => `${k}:${v}\n`).join('');
+  const signingString = pairs.map(([k, v]) => `${k}:${v}`).join('\n');
   const signature = createHmac('sha256', cfg.accessKeySecret).update(signingString).digest('hex');
   const headers: Record<string, string> = {
     accept: 'application/json',
@@ -116,41 +119,48 @@ export function mapPushMessage(cmd: string, data: Record<string, unknown>, nowMs
   const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : 0);
   const str = (v: unknown): string => (typeof v === 'string' ? v : '');
   const roomId = num(data.room_id).toString();
+  // 开放平台隐私口径:uid 恒为 0,用户标识用 open_id;旧字段 uid 仅作回退
+  const uidOf = (): { id: string; ok: boolean } => {
+    const openId = str(data.open_id);
+    const uid = num(data.uid);
+    if (openId !== '') return { id: openId, ok: true };
+    return { id: String(uid), ok: uid !== 0 };
+  };
   switch (cmd) {
     case 'LIVE_OPEN_PLATFORM_DM': {
-      const uid = num(data.uid);
+      const { id: userId, ok } = uidOf();
       const uname = str(data.uname);
       const msg = str(data.msg);
       const msgId = str(data.msg_id);
-      if (uid === 0 || uname === '' || msg === '' || msgId === '') return null;
+      if (!ok || uname === '' || msg === '' || msgId === '') return null;
       return {
         id: `evt-${msgId}`,
-        sourceKey: `dm-${uid}-${msgId}`,
+        sourceKey: `dm-${userId}-${msgId}`,
         source: 'bilibili-open',
         roomId: roomId || 'open-live',
         type: 'chat',
-        user: { id: String(uid), name: uname },
+        user: { id: userId, name: uname },
         text: msg,
         receivedAt: nowMs,
       };
     }
     case 'LIVE_OPEN_PLATFORM_SEND_GIFT': {
-      const uid = num(data.uid);
+      const { id: userId, ok } = uidOf();
       const uname = str(data.uname);
       const giftId = str(data.gift_id);
       const giftName = str(data.gift_name);
       const quantity = num(data.gift_num); // 本次新增数量;连击累计为 combo_num,由 events 去重链路处理
-      if (uid === 0 || uname === '' || giftId === '' || giftName === '' || quantity < 1) return null;
+      if (!ok || uname === '' || giftId === '' || giftName === '' || quantity < 1) return null;
       const coinType = str(data.coin_type);
       const price = num(data.price); // 单价(以 0.01 元/瓜子为单位)
       const comboId = str(data.combo_id);
       return {
         id: `evt-${randomUUID().slice(0, 8)}`,
-        sourceKey: `gift-${uid}-${giftId}-${num(data.combo_num)}-${num(data.timestamp) || nowMs}`,
+        sourceKey: `gift-${userId}-${giftId}-${num(data.combo_num)}-${num(data.timestamp) || nowMs}`,
         source: 'bilibili-open',
         roomId: roomId || 'open-live',
         type: 'gift',
-        user: { id: String(uid), name: uname },
+        user: { id: userId, name: uname },
         gift: {
           id: giftId,
           name: giftName,
@@ -163,31 +173,31 @@ export function mapPushMessage(cmd: string, data: Record<string, unknown>, nowMs
       };
     }
     case 'LIVE_OPEN_PLATFORM_GUARD_BUY': {
-      const uid = num(data.uid);
+      const { id: userId, ok } = uidOf();
       const uname = str(data.uname);
-      if (uid === 0 || uname === '') return null;
+      if (!ok || uname === '') return null;
       return {
         id: `evt-${randomUUID().slice(0, 8)}`,
-        sourceKey: `guard-${uid}-${num(data.start_time) || nowMs}`,
+        sourceKey: `guard-${userId}-${num(data.start_time) || nowMs}`,
         source: 'bilibili-open',
         roomId: roomId || 'open-live',
         type: 'guard',
-        user: { id: String(uid), name: uname },
+        user: { id: userId, name: uname },
         receivedAt: nowMs,
       };
     }
     case 'LIVE_OPEN_PLATFORM_SUPER_CHAT_MESSAGE': {
-      const uid = num(data.uid);
+      const { id: userId, ok } = uidOf();
       const uname = str(data.uname);
       const msg = str(data.message);
-      if (uid === 0 || uname === '' || msg === '') return null;
+      if (!ok || uname === '' || msg === '') return null;
       return {
         id: `evt-${randomUUID().slice(0, 8)}`,
-        sourceKey: `sc-${uid}-${num(data.sc_id) || nowMs}`,
+        sourceKey: `sc-${userId}-${num(data.sc_id) || nowMs}`,
         source: 'bilibili-open',
         roomId: roomId || 'open-live',
         type: 'superchat',
-        user: { id: String(uid), name: uname },
+        user: { id: userId, name: uname },
         text: msg,
         receivedAt: nowMs,
       };
@@ -305,6 +315,14 @@ export function createBilibiliOpenClient(deps: {
     socket.on('message', (frame: Buffer) => {
       try {
         for (const packet of decodePackets(frame)) {
+          // 诊断:记录每个入站封包(op/pv/body 摘要),鉴权回包(op=8)与压缩推送(pv!=0)靠它可见
+          if (packet.operation === OP_SERVER_NOTIFY && packet.protocolVersion === PV_UNCOMPRESSED) {
+            deps.logger.info('bilibili.open-push', { bodyLen: packet.body.length, body: packet.body.toString('utf8').slice(0, 700) });
+          } else if (packet.operation === OP_HEARTBEAT_REPLY) {
+            deps.logger.info('bilibili.open-packet', { op: packet.operation, pv: packet.protocolVersion });
+          } else {
+            deps.logger.info('bilibili.open-packet', { op: packet.operation, pv: packet.protocolVersion, head: packet.body.toString('utf8').slice(0, 120) });
+          }
           if (packet.operation === OP_SERVER_NOTIFY && packet.protocolVersion === PV_UNCOMPRESSED) {
             const msg = JSON.parse(packet.body.toString('utf8')) as PushMessage;
             const cmd = typeof msg.cmd === 'string' ? msg.cmd : '';
@@ -313,7 +331,7 @@ export function createBilibiliOpenClient(deps: {
               setStatus({ lastEventAt: deps.now() });
               deps.onEvent(event);
             } else if (cmd !== '' && cmd !== 'LIVE_OPEN_PLATFORM_LIKE' && cmd !== 'LIVE_OPEN_PLATFORM_USER_ENTER') {
-              deps.logger.debug('bilibili.open-unmapped', { cmd });
+              deps.logger.warn('bilibili.open-unmapped', { cmd });
             }
           }
         }
@@ -370,6 +388,13 @@ export function createBilibiliOpenClient(deps: {
       try { ws?.close(); } catch { /* 已关闭 */ }
       ws = null;
       setStatus({ state: 'disabled' });
+      // 正常结束游戏会话(7002 房间重复游戏的预防:会话绑定房间+app,不 end 则需等 60s 过期)
+      const gameId = String(status.gameId ?? '');
+      if (gameId !== '') {
+        signedPost('/v2/app/end', { game_id: gameId }).catch((err) => {
+          deps.logger.warn('bilibili.open-end-failed', { error: String(err) });
+        });
+      }
     },
     status() {
       return { ...status };

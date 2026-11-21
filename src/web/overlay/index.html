@@ -8,13 +8,14 @@
     /* OBS 透明播放页:body 保持透明,仅角色与字幕可见。 */
     html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
     #stage { position: fixed; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; padding-bottom: 4vh; }
-    #videos { position: relative; width: 640px; max-width: 90vw; aspect-ratio: 16 / 9; }
+    #videos { position: relative; width: clamp(640px, 66.667vw, 1280px); max-width: min(90vw, 150vh); aspect-ratio: 16 / 9; }
     #videos video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
     #videos video.hidden { display: none; }
     #placeholder { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 6px; border: 3px dashed rgba(255,255,255,.75); border-radius: 16px; color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,.8); }
     #placeholder .emoji { font-size: 72px; }
     #placeholder .label { font-size: 18px; }
-    #caption { margin-top: 10px; max-width: 80vw; background: rgba(16, 49, 79, 0.78); color: #fff; font-size: 22px; line-height: 1.4; padding: 8px 18px; border-radius: 12px; display: none; text-align: center; }
+    /* 字幕挂在角色容器上缘(头顶上方),绝对定位不参与文档流——出现/消失不再顶动角色位置。 */
+    #caption { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); width: max-content; max-width: 80vw; background: rgba(16, 49, 79, 0.78); color: #fff; font-size: 22px; line-height: 1.4; padding: 8px 18px; border-radius: 12px; display: none; text-align: center; }
     #status { position: fixed; top: 8px; left: 8px; background: rgba(164, 38, 44, 0.85); color: #fff; font-size: 12px; padding: 3px 10px; border-radius: 999px; display: none; }
     #status.ok { background: rgba(31, 122, 77, 0.85); }
   </style>
@@ -29,8 +30,8 @@
         <div class="emoji">🐋</div>
         <div class="label" id="placeholder-label">待机(素材未配置)</div>
       </div>
+      <div id="caption"></div>
     </div>
-    <div id="caption"></div>
   </div>
   <script type="module" src="./main.ts"></script>
 </body>

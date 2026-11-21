@@ -127,8 +127,11 @@ export function createCharacters(deps: { paths: AppPaths; petId: string; logger:
       const full = path.resolve(petRoot, rel);
       const realRoot = fs.realpathSync(petRoot);
       const realFull = fs.realpathSync(full);
-      return realFull === realRoot || realFull.startsWith(realRoot + path.sep);
-    } catch {
+      const ok = realFull === realRoot || realFull.startsWith(realRoot + path.sep);
+      if (!ok) deps.logger.warn('characters.checkfile-reject', { rel, realRoot, realFull });
+      return ok;
+    } catch (err) {
+      deps.logger.warn('characters.checkfile-error', { rel, petRoot, error: String(err) });
       return false;
     }
   }

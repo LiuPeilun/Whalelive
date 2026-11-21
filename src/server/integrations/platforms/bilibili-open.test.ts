@@ -110,25 +110,38 @@ describe('签名(WT:开放平台)', () => {
 });
 
 describe('推送消息映射(WT:事件契约)', () => {
-  it('弹幕 → chat,sourceKey 含 msg_id(重连幂等)', () => {
+  it('弹幕 → chat:真实口径 uid=0 用 open_id 标识,sourceKey 含 msg_id(重连幂等)', () => {
+    const e = mapPushMessage('LIVE_OPEN_PLATFORM_DM', {
+      uid: 0, open_id: 'bee49542', uname: '福尔摩仑', msg: '你好', msg_id: 'm-real-1', room_id: 1796120001,
+    }, 1_000);
+    expect(e).toMatchObject({ source: 'bilibili-open', type: 'chat', text: '你好', sourceKey: 'dm-bee49542-m-real-1' });
+    expect(e?.user).toMatchObject({ id: 'bee49542', name: '福尔摩仑' });
+  });
+
+  it('弹幕 → chat:旧 uid 口径回退可用', () => {
     const e = mapPushMessage('LIVE_OPEN_PLATFORM_DM', { uid: 42, uname: '观众', msg: '你好', msg_id: 'm-1' }, 1_000);
     expect(e).toMatchObject({ source: 'bilibili-open', type: 'chat', text: '你好', sourceKey: 'dm-42-m-1' });
-    expect(e?.user.name).toBe('观众');
+  });
+
+  it('弹幕:uid=0 且无 open_id 时拒绝(无用户标识)', () => {
+    expect(mapPushMessage('LIVE_OPEN_PLATFORM_DM', { uid: 0, uname: 'x', msg: 'hi', msg_id: 'm-2' }, 1_000)).toBeNull();
   });
 
   it('礼物 → gift:quantity 取本次新增(gift_num),连击与瓜子单价随行', () => {
     const e = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', {
-      uid: 7, uname: '投喂人', gift_id: '31036', gift_name: '小心心', gift_num: 3,
+      uid: 0, open_id: 'gift-user-1', uname: '投喂人', gift_id: '31036', gift_name: '小心心', gift_num: 3,
       combo_id: 'c-9', combo_num: 9, coin_type: 'gold', price: 100,
     }, 2_000);
     expect(e?.type).toBe('gift');
     expect(e?.gift).toMatchObject({ id: '31036', name: '小心心', quantity: 3, comboId: 'c-9', unitPrice: 1, priceUnit: '金瓜子' });
+    expect(e?.user.id).toBe('gift-user-1');
   });
 
-  it('大航海与 SC 映射', () => {
-    const g = mapPushMessage('LIVE_OPEN_PLATFORM_GUARD_BUY', { uid: 9, uname: '舰长甲', room_id: 1796120001 }, 3_000);
+  it('大航海与 SC 映射(open_id 口径)', () => {
+    const g = mapPushMessage('LIVE_OPEN_PLATFORM_GUARD_BUY', { uid: 0, open_id: 'guard-u', uname: '舰长甲', room_id: 1796120001 }, 3_000);
     expect(g?.type).toBe('guard');
-    const sc = mapPushMessage('LIVE_OPEN_PLATFORM_SUPER_CHAT_MESSAGE', { uid: 9, uname: 'SC 甲', message: '你好', sc_id: 55 }, 3_000);
+    expect(g?.user.id).toBe('guard-u');
+    const sc = mapPushMessage('LIVE_OPEN_PLATFORM_SUPER_CHAT_MESSAGE', { uid: 0, open_id: 'sc-u', uname: 'SC 甲', message: '你好', sc_id: 55 }, 3_000);
     expect(sc?.type).toBe('superchat');
     expect(sc?.text).toBe('你好');
   });
