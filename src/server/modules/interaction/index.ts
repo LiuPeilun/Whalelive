@@ -201,8 +201,7 @@ export function createInteraction(deps: {
         giftId: gift.id,
         giftName: gift.name,
         quantity: gift.quantity,
-        coinType: gift.coinType,
-        unitPriceYuan: gift.unitPrice,
+        paidMilliYuan: gift.paidMilliYuan,
       });
       return { accepted: true, eventId };
     }
@@ -216,12 +215,12 @@ export function createInteraction(deps: {
         enqueuedAt: now(),
         expiresAt: now() + 60_000,
         say: rules.thanksText('large', { user: event.user.name, gift: kind }),
-        action: deps.giftRules.tiers.large.action,
+        action: tierActionFor('large'),
         text: null,
         isCommand: true,
         userKey: `${event.source}:${event.user.id}`,
       };
-      const pushed = queue.push(item);
+      const pushed = pushWithPeakRelief(item);
       if (!pushed.ok) recordReject(eventId, pushed.reason);
       notify();
       return pushed.ok ? { accepted: true, eventId } : { accepted: false, eventId, reason: pushed.reason };
@@ -489,13 +488,37 @@ export function createInteraction(deps: {
   }
 
   /**
+   * 档位动作解析(WT-P2-008):档位配置动作缺失或素材不可用时回退旧礼物动作,
+   * 保证旧角色包/默认包不出现"有台词没动画"。正式角色包的档位资源仍优先使用。
+   */
+  function tierActionFor(tier: GiftTierKey): string {
+    const preferred = deps.giftRules.tiers[tier].action;
+    const resolved = characters.resolveAction(preferred);
+    if (resolved !== null && resolved.available) return preferred;
+    const fallback = tier === 'large' ? 'celebrate' : 'gift';
+    logger.warn('interaction.tier-action-fallback', { tier, preferred, fallback });
+    return fallback;
+  }
+
+  /**
+   * 入队;队列满载时先执行高峰合并腾位再入队(WT-P2-006):
+   * 满是小额答谢的队列不得拒收后到的大额/SC/大航海答谢。
+   * 腾位发生在拒收之前,不产生 queue-full 丢弃记录;无候选可合并时保持原腾位规则。
+   */
+  function pushWithPeakRelief(item: QueueItem): { ok: true } | { ok: false; reason: string } {
+    if (queue.length() >= queue.getCapacity()) mergePeakSmallThanks();
+    return queue.push(item);
+  }
+
+  /**
    * 高峰降级(v1.1 修正 3):待播小额答谢达到阈值时,合并为一句跨用户播报。
    * 定位在调度层而非聚合层——合并的是"待播队列"里的低档答谢,与连击聚合(同用户同礼物、
    * 入队前)是两层;大额/SC/大航海答谢始终独立保留。
+   * 合并产物标记 merged,退出后续合并候选:二次高峰不会用「朋友」抹掉已点名的人(WT-P2-006)。
    */
   function mergePeakSmallThanks(): boolean {
     const threshold = deps.settings().gift.tiering.peakMergeCount;
-    const smalls = queue.snapshot().filter((item) => item.type === 'gift' && item.giftTier === 'small');
+    const smalls = queue.snapshot().filter((item) => item.type === 'gift' && item.giftTier === 'small' && item.merged !== true);
     if (smalls.length < threshold) return false;
     const removed = queue.removeMany(new Set(smalls.map((item) => item.eventId)), 'peak-merged');
     if (removed.length === 0) return false;
@@ -510,11 +533,12 @@ export function createInteraction(deps: {
       eventId: `gift-merged-${randomUUID().slice(0, 8)}`,
       type: 'gift',
       giftTier: 'small',
+      merged: true,
       priority: GIFT_TIER_PRIORITY.small,
       enqueuedAt: now(),
       expiresAt: now() + 60_000,
       say: rules.mergedThanks(namesText),
-      action: deps.giftRules.tiers.small.action,
+      action: tierActionFor('small'),
       text: null,
       isCommand: true,
       userKey: null,
@@ -550,13 +574,13 @@ export function createInteraction(deps: {
           count: emission.totalQuantity,
           ...(emission.totalPaidYuan > 0 ? { amountYuan: emission.totalPaidYuan } : {}),
         }),
-        action: deps.giftRules.tiers[tier].action,
+        action: tierActionFor(tier),
         text: null,
         isCommand: true,
         userKey: emission.userKey,
         userName: emission.userName,
       };
-      const pushed = queue.push(item);
+      const pushed = pushWithPeakRelief(item);
       if (!pushed.ok) recordReject(item.eventId, pushed.reason);
     }
     const merged = mergePeakSmallThanks();

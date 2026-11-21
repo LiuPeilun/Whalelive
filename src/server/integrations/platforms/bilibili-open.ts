@@ -126,6 +126,15 @@ export function mapPushMessage(cmd: string, data: Record<string, unknown>, nowMs
     if (openId !== '') return { id: openId, ok: true };
     return { id: String(uid), ok: uid !== 0 };
   };
+  // 官方 SC/GUARD 推送的用户信息在 user_info 对象内(WT-P2-005);旧格式为顶层字段,两者兼容。
+  const userOf = (d: Record<string, unknown>): { id: string; name: string; ok: boolean } => {
+    const ui = (typeof d.user_info === 'object' && d.user_info !== null ? d.user_info : {}) as Record<string, unknown>;
+    const name = str(ui.uname) || str(d.uname);
+    const openId = str(ui.open_id) || str(d.open_id);
+    const uid = num(ui.uid) || num(d.uid);
+    if (openId !== '') return { id: openId, name, ok: name !== '' };
+    return { id: String(uid), name, ok: name !== '' && uid !== 0 };
+  };
   switch (cmd) {
     case 'LIVE_OPEN_PLATFORM_DM': {
       const { id: userId, ok } = uidOf();
@@ -145,18 +154,29 @@ export function mapPushMessage(cmd: string, data: Record<string, unknown>, nowMs
       };
     }
     case 'LIVE_OPEN_PLATFORM_SEND_GIFT': {
+      // 官方口径(WT-P2-004):gift_id 为数字;paid 表示是否付费;r_price 为实际价值,
+      // price 为标价或盲盒爆出价值,金额单位 1000 = 1 元;msg_id 标识每条消息;连击在 combo_info 对象内。
       const { id: userId, ok } = uidOf();
       const uname = str(data.uname);
-      const giftId = str(data.gift_id);
+      const giftIdRaw = data.gift_id;
+      const giftId = typeof giftIdRaw === 'number' && Number.isFinite(giftIdRaw) ? String(giftIdRaw) : str(giftIdRaw);
       const giftName = str(data.gift_name);
-      const quantity = num(data.gift_num); // 本次新增数量;连击累计为 combo_num,由 events 去重链路处理
+      const quantity = num(data.gift_num); // 本次新增数量;连击累计在 combo_info.combo_num,由 events 去重链路处理
       if (!ok || uname === '' || giftId === '' || giftName === '' || quantity < 1) return null;
-      const coinType = str(data.coin_type);
-      const price = num(data.price); // 单价(以 0.01 元/瓜子为单位)
-      const comboId = str(data.combo_id);
+      const combo = (typeof data.combo_info === 'object' && data.combo_info !== null ? data.combo_info : {}) as Record<string, unknown>;
+      const comboId = str(combo.combo_id) || str(data.combo_id);
+      // 实付口径:paid=true 且有实际价值(r_price)才计价;仅有标价/爆出价值(price)属于现金实付未确认,
+      // 保留普通感谢不计金额(盲盒的两种价格官方均解释为爆出物价值)。
+      const paid = data.paid === true;
+      const rPrice = num(data.r_price);
+      const paidMilliYuan = paid && rPrice > 0 ? rPrice : undefined;
+      const msgId = str(data.msg_id);
       return {
-        id: `evt-${randomUUID().slice(0, 8)}`,
-        sourceKey: `gift-${userId}-${giftId}-${num(data.combo_num)}-${num(data.timestamp) || nowMs}`,
+        id: `evt-${msgId !== '' ? msgId : randomUUID().slice(0, 8)}`,
+        // 去重键带 msg_id:同用户同礼物同秒的不同消息不互斥;同 msg_id 重推保持幂等。
+        sourceKey: msgId !== ''
+          ? `gift-${userId}-${giftId}-${msgId}`
+          : `gift-${userId}-${giftId}-${num(data.combo_num)}-${num(data.timestamp) || nowMs}`,
         source: 'bilibili-open',
         roomId: roomId || 'open-live',
         type: 'gift',
@@ -166,38 +186,43 @@ export function mapPushMessage(cmd: string, data: Record<string, unknown>, nowMs
           name: giftName,
           quantity,
           ...(comboId !== '' ? { comboId } : {}),
-          ...(coinType !== '' ? { coinType } : {}),
-          ...(price > 0 ? { unitPrice: price / 100, priceUnit: coinType === 'gold' ? '金瓜子' : '银瓜子' } : {}),
+          ...(paidMilliYuan !== undefined ? { paidMilliYuan } : {}),
         },
         receivedAt: nowMs,
       };
     }
+    // 大航海:官方命令为 LIVE_OPEN_PLATFORM_GUARD,用户信息在 user_info 对象内(WT-P2-005);
+    // 旧命令 LIVE_OPEN_PLATFORM_GUARD_BUY 与顶层用户字段作为已存在格式保留。
+    case 'LIVE_OPEN_PLATFORM_GUARD':
     case 'LIVE_OPEN_PLATFORM_GUARD_BUY': {
-      const { id: userId, ok } = uidOf();
-      const uname = str(data.uname);
-      if (!ok || uname === '') return null;
+      const user = userOf(data);
+      if (!user.ok) return null;
+      const msgId = str(data.msg_id);
       return {
-        id: `evt-${randomUUID().slice(0, 8)}`,
-        sourceKey: `guard-${userId}-${num(data.start_time) || nowMs}`,
+        id: `evt-${msgId !== '' ? msgId : randomUUID().slice(0, 8)}`,
+        sourceKey: `guard-${user.id}-${msgId !== '' ? msgId : `${num(data.start_time) || nowMs}`}`,
         source: 'bilibili-open',
         roomId: roomId || 'open-live',
         type: 'guard',
-        user: { id: userId, name: uname },
+        user: { id: user.id, name: user.name },
         receivedAt: nowMs,
       };
     }
+    // 醒目留言:官方命令为 LIVE_OPEN_PLATFORM_SUPER_CHAT(message_id/msg_id 标识,WT-P2-005);
+    // 旧命令 LIVE_OPEN_PLATFORM_SUPER_CHAT_MESSAGE 作为已存在格式保留。
+    case 'LIVE_OPEN_PLATFORM_SUPER_CHAT':
     case 'LIVE_OPEN_PLATFORM_SUPER_CHAT_MESSAGE': {
-      const { id: userId, ok } = uidOf();
-      const uname = str(data.uname);
+      const user = userOf(data);
       const msg = str(data.message);
-      if (!ok || uname === '' || msg === '') return null;
+      if (!user.ok || msg === '') return null;
+      const msgId = str(data.msg_id) || str(data.message_id);
       return {
-        id: `evt-${randomUUID().slice(0, 8)}`,
-        sourceKey: `sc-${userId}-${num(data.sc_id) || nowMs}`,
+        id: `evt-${msgId !== '' ? msgId : randomUUID().slice(0, 8)}`,
+        sourceKey: `sc-${user.id}-${msgId !== '' ? msgId : `${num(data.sc_id) || num(data.start_time) || nowMs}`}`,
         source: 'bilibili-open',
         roomId: roomId || 'open-live',
         type: 'superchat',
-        user: { id: userId, name: uname },
+        user: { id: user.id, name: user.name },
         text: msg,
         receivedAt: nowMs,
       };

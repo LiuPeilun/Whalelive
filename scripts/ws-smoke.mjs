@@ -195,6 +195,34 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
   check('礼物事件被接收进入合并窗口', first.status === 200 && first.body.ingest === 'accepted', JSON.stringify(first.body));
 }
 
+// 7b. 付费礼物经同一 HTTP 入口进入大额档(WT-P2-007):等待合并窗口结算后,
+//     队列或当前表演中出现优先级 80 的大额答谢(动作取决于角色包,断言只看档位信号)。
+{
+  const paid = await http('/api/mock/events', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...controlAuth },
+    body: JSON.stringify({ type: 'gift', userId: 'smoke-paid', userName: '付费观众', gift: { id: 'rocket', name: '火箭', quantity: 1, paidYuan: 15 } }),
+  });
+  check('付费礼物事件被接收', paid.status === 200 && paid.body.ingest === 'accepted', JSON.stringify(paid.body));
+  const deadline = Date.now() + 5000;
+  let tiered = false;
+  let detail = '超时未见大额档';
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const state = await http('/api/state', { headers: controlAuth });
+    const q = state.body?.queue;
+    const current = state.body?.current;
+    const inQueue = (q?.items ?? []).some((i) => i.priority === 80);
+    const inCurrent = current !== null && current.action === 'stamp-letter';
+    if (inQueue || inCurrent) {
+      tiered = true;
+      detail = JSON.stringify({ inQueue, inCurrent });
+      break;
+    }
+  }
+  check('付费礼物进入大额答谢档(优先级 80/stamp-letter)', tiered, detail);
+}
+
 // 8. 媒体:HEAD 与 Range(素材缺失时返回 ASSET_MISSING/404,有素材时在启动后复测)
 {
   const head = await fetch(`${base}/media/pets/main/animations/idle.webm`, { method: 'HEAD' });

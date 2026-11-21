@@ -54,6 +54,16 @@ export function mountSimulator(context: ControlContext): void {
         for (let i = 0; i < quantity; i++) {
           void submit({ type: 'gift', userId: 'combo-user', userName: '连击测试员', gift: { id: 'xinxin', name: '小心心', quantity: 1 } });
         }
+      } else if (type === 'gift-paid') {
+        // WT-P2-007:付费礼物案例——paidYuan 由服务端归一为整数毫元,用于验收三档分层。
+        const yuan = Number(arg ?? '0');
+        const label = yuan >= 10 ? '火箭' : '礼花';
+        void submit({
+          type: 'gift',
+          userId: `paid-user-${arg}`,
+          userName: `付费观众${yuan}元`,
+          gift: { id: `paid-${arg}`, name: label, quantity: 1, paidYuan: yuan },
+        });
       } else if (type === 'guard' || type === 'superchat') {
         void submit({ type, userId: 'vip-user', userName: '贵宾测试员' });
       }

@@ -9,9 +9,12 @@ export type LiveEventGift = {
   name: string;
   quantity: number;
   comboId?: string;
-  coinType?: string;
-  unitPrice?: number;
-  priceUnit?: string;
+  /**
+   * 已确认实付单价(毫元,1000=1 元,正整数);免费/实付未确认/未知价格为 undefined(WT-P2-004)。
+   * 适配器按官方口径归一:paid=true 且有实际价值(r_price)才计价;仅有标价或盲盒爆出价值
+   * 属于现金实付未确认,保留普通感谢不计金额。
+   */
+  paidMilliYuan?: number;
 };
 
 export type LiveEvent = {
@@ -58,6 +61,9 @@ export function validateLiveEvent(value: unknown): LiveEventValidation {
     if (!isNonEmptyString(g.id) || !isNonEmptyString(g.name)) return { ok: false, reason: 'gift 缺少 id / name' };
     if (typeof g.quantity !== 'number' || !Number.isInteger(g.quantity) || g.quantity < 1) {
       return { ok: false, reason: 'gift.quantity 必须是不小于 1 的整数(本次新增数量)' };
+    }
+    if (g.paidMilliYuan !== undefined && (!Number.isInteger(g.paidMilliYuan) || (g.paidMilliYuan as number) < 1)) {
+      return { ok: false, reason: 'gift.paidMilliYuan 必须是正整数毫元(1000=1元);免费/未确认实付请省略该字段' };
     }
   }
   return { ok: true, event: v as unknown as LiveEvent };

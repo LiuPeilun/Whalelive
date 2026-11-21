@@ -52,40 +52,57 @@ describe('interaction 礼物合并窗口', () => {
     expect(agg.sweep()).toEqual([]); // 清空后的新窗口同样不产出
   });
 
-  it('金瓜子礼物按增量×单价累计实付金额(P2 第二批)', () => {
+  it('付费礼物按增量×单价以整数毫元累计,浮点不丢精度(WT-P2-004)', () => {
     let t = 0;
     const agg = createGiftAggregator({ mergeWindowMs: () => 2000, now: () => t });
-    // 连击 3 次 × 1,单价 0.1 元/个:0.3 元
-    for (let i = 0; i < 3; i++) {
-      agg.add({ userKey: 'u1', userName: '甲', giftId: 'jinhua', giftName: '金花', quantity: 1, coinType: 'gold', unitPriceYuan: 0.1 });
+    // 0.1 元 = 100 毫元,连击 10 次必须精确等于 1 元(旧浮点累计为 0.9999999999999999)
+    for (let i = 0; i < 10; i++) {
+      agg.add({ userKey: 'u1', userName: '甲', giftId: 'jinhua', giftName: '金花', quantity: 1, paidMilliYuan: 100 });
       t += 100;
     }
     t += 2000;
     const emitted = agg.sweep();
-    expect(emitted[0]?.totalQuantity).toBe(3);
-    expect(emitted[0]?.totalPaidYuan).toBeCloseTo(0.3, 6);
+    expect(emitted[0]?.totalQuantity).toBe(10);
+    expect(emitted[0]?.totalPaidMilliYuan).toBe(1000);
+    expect(emitted[0]?.totalPaidYuan).toBe(1);
     expect(emitted[0]?.paidKnown).toBe(true);
   });
 
-  it('银瓜子与未知价格不计金额,按小额普通感谢处理', () => {
+  it('免费与未知价格不计金额,按小额普通感谢处理', () => {
     let t = 0;
     const agg = createGiftAggregator({ mergeWindowMs: () => 2000, now: () => t });
-    agg.add({ userKey: 'u1', userName: '甲', giftId: 'xinxin', giftName: '小心心', quantity: 5, coinType: 'silver', unitPriceYuan: 0.1 });
+    agg.add({ userKey: 'u1', userName: '甲', giftId: 'xinxin', giftName: '小心心', quantity: 5 });
     agg.add({ userKey: 'u2', userName: '乙', giftId: 'mofa', giftName: '魔法棒', quantity: 2 });
     t += 2000;
     const emitted = agg.sweep();
     for (const e of emitted) {
+      expect(e.totalPaidMilliYuan).toBe(0);
       expect(e.totalPaidYuan).toBe(0);
       expect(e.paidKnown).toBe(false);
     }
   });
 
+  it('恰好到达 1 元与 10 元的整数累计(WT-P2-004 边界)', () => {
+    let t = 0;
+    const agg = createGiftAggregator({ mergeWindowMs: () => 2000, now: () => t });
+    // 5 元礼物 ×2 = 10 元(大额下界)
+    agg.add({ userKey: 'u1', userName: '甲', giftId: 'lida', giftName: '礼花', quantity: 1, paidMilliYuan: 5000 });
+    agg.add({ userKey: 'u1', userName: '甲', giftId: 'lida', giftName: '礼花', quantity: 1, paidMilliYuan: 5000 });
+    // 0.5 元礼物 ×2 = 1 元(中额下界)
+    agg.add({ userKey: 'u2', userName: '乙', giftId: 'haitang', giftName: '海棠', quantity: 1, paidMilliYuan: 500 });
+    agg.add({ userKey: 'u2', userName: '乙', giftId: 'haitang', giftName: '海棠', quantity: 1, paidMilliYuan: 500 });
+    t += 2000;
+    const emitted = agg.sweep();
+    expect(emitted[0]?.totalPaidYuan).toBe(10);
+    expect(emitted[1]?.totalPaidYuan).toBe(1);
+  });
+
   it('跨窗口的金额随旧累计转入待产出,不丢失', () => {
     let t = 0;
     const agg = createGiftAggregator({ mergeWindowMs: () => 1000, now: () => t });
-    agg.add({ userKey: 'u1', userName: '甲', giftId: 'lida', giftName: '礼花', quantity: 2, coinType: 'gold', unitPriceYuan: 5 });
+    agg.add({ userKey: 'u1', userName: '甲', giftId: 'lida', giftName: '礼花', quantity: 2, paidMilliYuan: 5000 });
     t += 1500; // 旧窗口过期,金额转入待产出
-    agg.add({ userKey: 'u1', userName: '甲', giftId: 'lida', giftName: '礼花', quantity: 1, coinType: 'gold', unitPriceYuan: 5 });
+    agg.add({ userKey: 'u1', userName: '甲', giftId: 'lida', giftName: '礼花', quantity: 1, paidMilliYuan: 5000 });
     expect(agg.sweep()[0]?.totalPaidYuan).toBe(10);
     t += 1000;
     expect(agg.sweep()[0]?.totalPaidYuan).toBe(5);
