@@ -87,15 +87,18 @@ export function createDeepSeekReplyProvider(deps: {
   isAllowedAction(action: string): boolean;
   /** 当前可用动作清单(素材就位者):写进系统提示供模型按语境选择。 */
   availableActions(): string[];
+  /** 答谢专属动作:不进入普通弹幕的提示候选,保留给付费答谢规则。 */
+  reservedActions(): string[];
   logger: Logger;
   /** 可注入的 fetch 替身(测试用);默认使用全局 fetch。 */
   fetch?: typeof fetch;
 }): ReplyProvider & { configured(): boolean } {
   const doFetch = deps.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
   const configured = () => isDeepSeekConfigured(deps.config);
-  // 提示清单 = 素材就位的动作(角色视图动态取),新动作登记 manifest 后自动进入模型选项。
+  // 提示清单 = 素材就位且非答谢专属的动作(角色视图动态取),新动作登记 manifest 后自动进入模型选项。
   // isAllowedAction 仅作为建议采纳的兜底(防模型幻觉),不参与提示清单过滤。
-  const actions = () => deps.availableActions().filter((a) => a !== 'idle');
+  const reserved = () => new Set(deps.reservedActions());
+  const actions = () => deps.availableActions().filter((a) => a !== 'idle' && !reserved().has(a));
   const endpoint = `${deps.config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
 
   return {

@@ -40,10 +40,13 @@ function fakeCharacters(): CharactersModule {
     reload: () => {},
     petId: () => 'main',
     view: () => ({ petId: 'main', name: 'x', licenseName: 'x', actions: [] }),
-    resolveAction: (id: string) =>
-      (['idle', 'talk', 'wave', 'dance', 'salute', 'sip-tea', 'talk-nod'].includes(id)
-        ? { actionId: id, file: `animations/${id}.webm`, loop: id === 'talk' || id === 'talk-nod', available: true }
-        : null),
+    // known:清单登记集合;missing:登记但素材缺失(模拟迁移/分批复制场景,WT-P2-002)
+    resolveAction: (id: string) => {
+      const known = ['idle', 'talk', 'wave', 'dance', 'salute', 'sip-tea', 'talk-nod', 'stamp-letter', 'spin'];
+      if (!known.includes(id)) return null;
+      const missing = ['spin'];
+      return { actionId: id, file: `animations/${id}.webm`, loop: id === 'talk' || id === 'talk-nod', available: !missing.includes(id) };
+    },
     resolveAsset: () => null,
     missingActions: () => [],
   };
@@ -162,6 +165,77 @@ describe('明确口令彩蛋(P2 第一批)', () => {
     await settle();
     expect(generate).toHaveBeenCalledTimes(1);
     expect(playback.plays[0]!.performance.say).toBe('生成的话');
+  });
+});
+
+describe('带口令词的提问与旧指令边界(WT-P2-003 复验)', () => {
+  it('「为什么要喝口茶?」不被旧 think 指令截获,进入问答流程', async () => {
+    const { interaction, playback, generate } = build();
+    interaction.enqueue(chatEvent('为什么要喝口茶?'));
+    await settle();
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(generate.mock.calls[0]![0].text).toBe('为什么要喝口茶?');
+    expect(playback.plays[0]!.performance.say).toBe('生成的话');
+  });
+
+  it('明确的旧动作指令仍正常触发(跳舞)', async () => {
+    const { interaction, playback, generate } = build();
+    interaction.enqueue(chatEvent('来跳个舞'));
+    await settle();
+    expect(generate).not.toHaveBeenCalled();
+    expect(playback.plays[0]!.performance.action).toBe('dance');
+  });
+});
+
+describe('模型建议动作的来源与素材约束(WT-P2-001/002)', () => {
+  it('模型建议答谢专属动作 stamp-letter 被拒:保留回复文本,动作回落通用口型', async () => {
+    const { interaction, playback } = build({
+      reply: { generate: (async () => ({ say: '这封信我盖个章寄给你!', action: 'stamp-letter', provider: 'rule' })) as unknown as ReplyProvider['generate'] },
+    });
+    interaction.enqueue(chatEvent('普通弹幕内容'));
+    await settle();
+    expect(playback.plays).toHaveLength(1);
+    expect(playback.plays[0]!.performance.action).toBe('talk');
+    expect(playback.plays[0]!.performance.say).toBe('这封信我盖个章寄给你!');
+  });
+
+  it('模型建议缺素材动作(spin)被拒:保留回复文本,动作回落通用口型', async () => {
+    const { interaction, playback } = build({
+      reply: { generate: (async () => ({ say: '给你转个圈!', action: 'spin', provider: 'rule' })) as unknown as ReplyProvider['generate'] },
+    });
+    interaction.enqueue(chatEvent('普通弹幕内容'));
+    await settle();
+    expect(playback.plays).toHaveLength(1);
+    expect(playback.plays[0]!.performance.action).toBe('talk');
+    expect(playback.plays[0]!.performance.say).toBe('给你转个圈!');
+  });
+
+  it('模型建议 idle 被拒:保留回复文本,动作回落通用口型', async () => {
+    const { interaction, playback } = build({
+      reply: { generate: (async () => ({ say: '嗯哼', action: 'idle', provider: 'rule' })) as unknown as ReplyProvider['generate'] },
+    });
+    interaction.enqueue(chatEvent('普通弹幕内容'));
+    await settle();
+    expect(playback.plays[0]!.performance.action).toBe('talk');
+    expect(playback.plays[0]!.performance.say).toBe('嗯哼');
+  });
+
+  it('manualAction 素材缺失时明确拒绝(asset-missing)', async () => {
+    const { interaction, playback } = build();
+    const result = interaction.manualAction('spin');
+    expect(result.accepted).toBe(false);
+    if (!result.accepted) expect(result.reason).toBe('asset-missing');
+    await settle();
+    expect(playback.plays).toHaveLength(0);
+  });
+
+  it('manualAction 素材就位的动作仍正常入队(回归)', async () => {
+    const { interaction, playback } = build();
+    const result = interaction.manualAction('salute');
+    expect(result.accepted).toBe(true);
+    await settle();
+    expect(playback.plays).toHaveLength(1);
+    expect(playback.plays[0]!.performance.action).toBe('salute');
   });
 });
 

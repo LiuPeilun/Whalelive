@@ -16,6 +16,9 @@ import { createRules, type GiftRuleConfig, type PersonaConfig } from './rules.js
 // → 核对任务版本 → 下一条。迟到的终态与生成结果经版本校验后丢弃。
 // 提供方超时只取消当次调用(派生 signal),任务回落保底文本继续;
 
+/** 答谢专属动作:保留给付费答谢规则(大额礼物/SC/大航海),普通弹幕的提示候选与结果采纳均排除。 */
+export const RESERVED_GIFT_ACTIONS: readonly string[] = ['stamp-letter'];
+
 export type EnqueueResult =
   | { accepted: true; eventId: string }
   | { accepted: false; eventId: string; reason: string };
@@ -236,6 +239,12 @@ export function createInteraction(deps: {
   }
 
   function manualAction(actionId: string, say = ''): EnqueueResult {
+    // 试播也要求素材就位:缺失时明确拒绝,而非入队后在派发阶段无声失败(WT-P2-002)。
+    const resolved = characters.resolveAction(actionId);
+    if (resolved === null || !resolved.available) {
+      const eventId = `manual-${randomUUID().slice(0, 8)}`;
+      return { accepted: false, eventId, reason: 'asset-missing' };
+    }
     const eventId = `manual-${randomUUID().slice(0, 8)}`;
     const item: QueueItem = {
       eventId,
@@ -353,10 +362,21 @@ export function createInteraction(deps: {
         say = result.say.trim().slice(0, SAY_MAX_LENGTH);
         if (result.provider && result.provider !== '') provider = result.provider;
         const suggested = typeof result.action === 'string' && result.action !== '' ? result.action : null;
-        if (suggested !== null && characters.resolveAction(suggested) !== null) {
+        // 采纳与提示候选同口径:清单登记且素材就位、非待机、非答谢专属。
+        // 候选外(含 idle/答谢专属/缺素材)保留回复文本,动作回落默认(WT-P2-001/002)。
+        const resolvedSuggested = suggested !== null ? characters.resolveAction(suggested) : null;
+        const adoptable = suggested !== null
+          && suggested !== 'idle'
+          && resolvedSuggested !== null
+          && resolvedSuggested.available
+          && !RESERVED_GIFT_ACTIONS.includes(suggested);
+        if (suggested !== null && adoptable) {
           action = suggested;
         } else if (suggested !== null) {
-          logger.warn('interaction.action-not-whitelisted', { eventId: item.eventId, requested: suggested, fallback: action });
+          const reason = resolvedSuggested === null ? 'not-whitelisted'
+            : resolvedSuggested.available ? (RESERVED_GIFT_ACTIONS.includes(suggested) ? 'reserved-gift' : 'idle-not-in-candidates')
+            : 'asset-missing';
+          logger.warn('interaction.action-not-adopted', { eventId: item.eventId, requested: suggested, reason, fallback: action });
         }
       } else {
         say = rules.fallbackReply();

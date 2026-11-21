@@ -13,7 +13,7 @@ import { createPaths, ensureDir, type AppPaths } from './infrastructure/paths.js
 import { createSettings, type SettingsModule } from './modules/settings/index.js';
 import { createCharacters, type CharactersModule } from './modules/characters/index.js';
 import { createEvents } from './modules/events/index.js';
-import { createInteraction, type InteractionModule } from './modules/interaction/index.js';
+import { createInteraction, RESERVED_GIFT_ACTIONS, type InteractionModule } from './modules/interaction/index.js';
 import { createPlayback, type PlaybackModule } from './modules/playback/index.js';
 import { mockEvent, type MockEventInput } from './integrations/platforms/mock.js';
 import { createBilibiliOpenClient, type BilibiliOpenHandle } from './integrations/platforms/bilibili-open.js';
@@ -99,6 +99,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
     personaPrompt: persona.systemPrompt ?? '',
     isAllowedAction: (id) => characters.resolveAction(id) !== null,
     availableActions: () => characters.view().actions.filter((a) => a.available).map((a) => a.id),
+    reservedActions: () => [...RESERVED_GIFT_ACTIONS],
     logger,
   });
   const replyProvider = createReplyRouter({ fixed: fixedReply, deepseek, settings: effective, logger });

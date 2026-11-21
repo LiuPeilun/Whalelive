@@ -27,7 +27,8 @@ const COMMAND_PATTERNS: { action: string; pattern: RegExp }[] = [
   { action: 'dance', pattern: /(跳个舞|跳舞|跳一支舞|来段舞)/ },
   { action: 'wave', pattern: /(挥手|打个招呼|say hi|嗨|哈喽|你好呀|大家好)/ },
   { action: 'eat', pattern: /(吃什么|吃饭|干饭|吃点啥)/ },
-  { action: 'think', pattern: /(想想|思考一下|想一下|为什么)/ },
+  // 「为什么」是高频疑问词,与普通提问高冲突(带口令词的提问会被截获),移除;思考类仍可由口令/模型路由触发。
+  { action: 'think', pattern: /(想想|思考一下|想一下)/ },
   { action: 'gift', pattern: /(拆礼物|开礼物)/ },
 ];
 

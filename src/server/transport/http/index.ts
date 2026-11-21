@@ -249,7 +249,13 @@ export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): vo
     }
     // 可选试播台词:非空时随表演合成语音,用于验证口型循环到语音结束。
     const say = typeof body.say === 'string' && body.say.trim() !== '' ? body.say : undefined;
-    return deps.interaction.manualAction(body.actionId, say);
+    const result = deps.interaction.manualAction(body.actionId, say);
+    if (!result.accepted && result.reason === 'asset-missing') {
+      // 素材缺失的试播直接拒绝,给出明确反馈而非入队后无声失败(WT-P2-002)。
+      reply.code(400).send(apiError(ErrorCodes.ASSET_MISSING, `动作 ${body.actionId} 的素材缺失,无法试播`, 'control'));
+      return reply;
+    }
+    return result;
   });
 
   // 角色视图(含动作清单):控制台试播器的下拉数据源。
