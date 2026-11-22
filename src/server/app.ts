@@ -108,7 +108,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   const replyProvider = createReplyRouter({ fixed: fixedReply, deepseek, settings: effective, logger });
   // P1 第二批:edge-tts 真实合成(默认),fixed-local 保留为离线备选;按设置热切换
   const fixedSpeech = createFixedLocalSpeech({ cache: audioCache });
-  const edgeTts = createEdgeTtsSpeech({ cache: audioCache, logger, now, voice: () => effective().tts.voice });
+  const edgeTts = createEdgeTtsSpeech({ cache: audioCache, logger, now, voice: () => effective().tts.voice, pitch: () => effective().tts.pitch ?? '' });
   const speechProvider = createSpeechRouter({ fixed: fixedSpeech, edge: edgeTts, settings: () => effective().tts });
 
   const interaction = createInteraction({ settings: effective, characters, playback, replyProvider, speechProvider, persona, giftRules: giftRulesCfg, greetings: greetingsCfg, logger, now });

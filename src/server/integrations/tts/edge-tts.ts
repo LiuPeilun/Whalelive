@@ -21,7 +21,8 @@ import { sanitizeSpeechText } from './speech-text.js';
 /** msedge-tts 客户端的最小面(供测试替身实现) */
 export interface EdgeTtsClient {
   setMetadata(voice: string, format: OUTPUT_FORMAT, options: MetadataOptions): Promise<void>;
-  toStream(input: string): { audioStream: Readable };
+  /** options 为音调等韵律参数(msedge-tts ProsodyOptions 的最小面)。 */
+  toStream(input: string, options?: { pitch?: string }): { audioStream: Readable };
   close(): void;
 }
 
@@ -58,6 +59,8 @@ export function createEdgeTtsSpeech(deps: {
   cache: AudioCache;
   logger: Logger;
   voice(): string;
+  /** 音调微调(SSML pitch,如 "+15Hz";空串=不调,WT:用户选定可爱音色)。 */
+  pitch?(): string;
   now(): number;
   createClient?(): EdgeTtsClient;
   fetchVoices?(signal: AbortSignal): Promise<VoiceListEntry[]>;
@@ -149,9 +152,12 @@ export function createEdgeTtsSpeech(deps: {
   /** 单次合成持有自己的客户端引用，提前关闭的音频流也会报错。 */
   async function synthesizeOnce(text: string, voice: string, signal: AbortSignal) {
     const entry = await acquire(voice, signal);
+    // 音调微调随合成调用传递(ProsodyOptions 为逐次参数,不影响按音色缓存的客户端)
+    const pitch = deps.pitch?.() ?? '';
+    const prosody = pitch !== '' ? { pitch } : undefined;
     try {
       signal.throwIfAborted();
-      const { audioStream } = entry.client.toStream(text);
+      const { audioStream } = entry.client.toStream(text, prosody);
       const chunks: Buffer[] = [];
       for await (const chunk of addAbortSignal(signal, audioStream)) chunks.push(Buffer.from(chunk));
       return Buffer.concat(chunks);

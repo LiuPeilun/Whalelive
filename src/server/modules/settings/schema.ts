@@ -79,6 +79,9 @@ export function validateTts(v: unknown): SettingsValidation {
   if (!isValidVoiceShortName(v.voice)) {
     return { ok: false, field: 'tts.voice', reason: '需为形如 zh-CN-XiaoxiaoNeural 或 zh-CN-liaoning-XiaobeiNeural 的音色短名' };
   }
+  if (v.pitch !== undefined && v.pitch !== '' && (typeof v.pitch !== 'string' || !/^[+-]\d{1,4}Hz$/.test(v.pitch))) {
+    return { ok: false, field: 'tts.pitch', reason: '需为形如 +15Hz / -20Hz 的音调微调,或空串(不调)' };
+  }
   return { ok: true };
 }
 

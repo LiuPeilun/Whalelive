@@ -55,6 +55,8 @@ export type LeaseSettings = {
 export type TtsSettings = {
   provider: 'fixed-local' | 'edge-tts';
   voice: string;
+  /** 音调微调(edge SSML pitch,如 "+15Hz" 更幼更可爱;空串=不调,用户选定音色 P2 定)。 */
+  pitch?: string;
 };
 
 /** 音色短名可包含地区或书写系统，如 zh-CN-liaoning-XiaobeiNeural。 */

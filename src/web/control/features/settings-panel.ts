@@ -253,6 +253,8 @@ export function mountSettingsPanel(context: ControlContext): void {
       tts: {
         provider: providerSelect.value as 'fixed-local' | 'edge-tts',
         voice: voiceSelect.value,
+        // 音调微调本批未提供界面控件,保存时透传当前值避免被丢弃
+        pitch: view.user.tts.pitch ?? '',
       },
       llm: {
         provider: llmProviderSelect.value as 'fixed-local' | 'deepseek',
