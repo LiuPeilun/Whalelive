@@ -22,6 +22,22 @@ export type GiftSettings = {
   tiering: GiftTieringSettings;
 };
 
+/** 问候与冷场(互动第三批):进场聚合、关注/分享播报、冷场自救节奏。 */
+export type GreetingsSettings = {
+  /** 自动播报总开关(进场/关注/分享);冷场话题同受其约束。 */
+  enabled: boolean;
+  /** 进场聚合窗口(毫秒)。 */
+  enterWindowMs: number;
+  /** 窗口内逐个念名的人数上限,超出改发全房欢迎。 */
+  maxNamedCount: number;
+  /** 全房欢迎最小间隔(毫秒),被限流的欢迎直接过期。 */
+  allRoomIntervalMs: number;
+  /** 冷场判定空闲时长(毫秒):期间无任何真实互动且无在播/无待播才触发。 */
+  coldIdleMs: number;
+  /** 两次冷场话题的最小间隔(毫秒)。 */
+  coldIntervalMs: number;
+};
+
 export type PlaybackSettings = {
   preloadTimeoutMs: number;
   overallTimeoutMs: number;
@@ -53,6 +69,7 @@ export type UserSettings = {
   petId: string;
   queue: QueueSettings;
   gift: GiftSettings;
+  greetings: GreetingsSettings;
   playback: PlaybackSettings;
   lease: LeaseSettings;
   tts: TtsSettings;

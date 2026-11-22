@@ -233,6 +233,54 @@ export function mapPushMessage(cmd: string, data: Record<string, unknown>, nowMs
         receivedAt: nowMs,
       };
     }
+    // 进场:USER_ENTER 为实测存在的命令(open_id 口径);舰长进场与 GUARD 付费答谢分开。
+    case 'LIVE_OPEN_PLATFORM_USER_ENTER': {
+      const user = userOf(data);
+      if (!user.ok) return null;
+      const msgId = str(data.msg_id);
+      return {
+        id: `evt-${msgId !== '' ? msgId : randomUUID().slice(0, 8)}`,
+        sourceKey: `enter-${user.id}-${msgId !== '' ? msgId : `${num(data.timestamp) || nowMs}`}`,
+        source: 'bilibili-open',
+        roomId: roomId || 'open-live',
+        type: 'enter',
+        user: { id: user.id, name: user.name },
+        receivedAt: nowMs,
+      };
+    }
+    // 点赞:实测存在的命令;仅作为活跃信号(不进入待播队列),like_count 语义待真实样本核对。
+    case 'LIVE_OPEN_PLATFORM_LIKE': {
+      const { id: userId, ok } = uidOf();
+      if (!ok) return null;
+      const msgId = str(data.msg_id);
+      return {
+        id: `evt-${msgId !== '' ? msgId : randomUUID().slice(0, 8)}`,
+        sourceKey: `like-${userId}-${msgId !== '' ? msgId : `${num(data.timestamp) || nowMs}`}`,
+        source: 'bilibili-open',
+        roomId: roomId || 'open-live',
+        type: 'like',
+        user: { id: userId, name: str(data.uname) || '观众' },
+        receivedAt: nowMs,
+      };
+    }
+    // 关注/分享:命令名来自社区资料,官方文档未核实——映射保持防御性(字段缺失返回 null
+    // 并记 unmapped 日志);真实推送命中即产生播报,未命中不产生副作用(WT-互动第三批,待真实样本核实)。
+    case 'LIVE_OPEN_PLATFORM_FOLLOW':
+    case 'LIVE_OPEN_PLATFORM_SHARE': {
+      const user = userOf(data);
+      if (!user.ok) return null;
+      const msgId = str(data.msg_id);
+      const type = cmd === 'LIVE_OPEN_PLATFORM_FOLLOW' ? 'follow' : 'share';
+      return {
+        id: `evt-${msgId !== '' ? msgId : randomUUID().slice(0, 8)}`,
+        sourceKey: `${type}-${user.id}-${msgId !== '' ? msgId : `${num(data.timestamp) || nowMs}`}`,
+        source: 'bilibili-open',
+        roomId: roomId || 'open-live',
+        type,
+        user: { id: user.id, name: user.name },
+        receivedAt: nowMs,
+      };
+    }
     default:
       return null;
   }

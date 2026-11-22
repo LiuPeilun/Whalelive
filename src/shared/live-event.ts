@@ -2,7 +2,7 @@
 
 export type LiveEventSource = 'mock' | 'bilibili-web' | 'bilibili-open';
 
-export type LiveEventType = 'chat' | 'gift' | 'guard' | 'superchat' | 'enter' | 'like';
+export type LiveEventType = 'chat' | 'gift' | 'guard' | 'superchat' | 'enter' | 'like' | 'follow' | 'share';
 
 export type LiveEventGift = {
   id: string;
@@ -33,7 +33,7 @@ export type LiveEventValidation =
   | { ok: true; event: LiveEvent }
   | { ok: false; reason: string };
 
-const EVENT_TYPES: ReadonlySet<string> = new Set(['chat', 'gift', 'guard', 'superchat', 'enter', 'like']);
+const EVENT_TYPES: ReadonlySet<string> = new Set(['chat', 'gift', 'guard', 'superchat', 'enter', 'like', 'follow', 'share']);
 const SOURCES: ReadonlySet<string> = new Set(['mock', 'bilibili-web', 'bilibili-open']);
 
 function isNonEmptyString(value: unknown): value is string {

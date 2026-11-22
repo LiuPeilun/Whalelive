@@ -40,6 +40,58 @@ export type ResolvedGiftRules = {
   mergedThanksTemplate: string;
 };
 
+/**
+ * 问候规则(互动第三批):进场/关注/分享播报与冷场自救话题。
+ * 原始形态允许缺省,经 resolveGreetings 归一后交付运行时。
+ */
+export type GreetingRuleConfig = {
+  /** 进场念名模板:{names} 为去重观众名列表(≤ 上限)。 */
+  enterNamedTemplate?: string;
+  /** 超出念名上限时的全房欢迎模板。 */
+  enterAllTemplate?: string;
+  /** 关注感谢模板:{user}。 */
+  followTemplate?: string;
+  /** 分享感谢模板:{user}。 */
+  shareTemplate?: string;
+  /** 冷场提示词池(轮换发给回复提供方生成话题);缺省用内置池。 */
+  coldPrompts?: string[];
+};
+
+export type ResolvedGreetings = {
+  enter: { action: string; namedTemplate: string; allTemplate: string };
+  follow: { action: string; template: string };
+  share: { action: string; template: string };
+  cold: { action: string; prompts: string[] };
+};
+
+const DEFAULT_COLD_PROMPTS = [
+  '直播间安静下来了,主动挑一个有意思的话题和观众聊聊',
+  '没人说话的话,分享一个今天遇到的小趣事或冷知识',
+  '主动向大家提问,带动直播间气氛',
+];
+
+/** 问候默认动作:进场挥手迎接,关注/分享开心回应,冷场用认真口型抛话题。 */
+const DEFAULT_GREETING_ACTIONS = {
+  enter: 'wave',
+  follow: 'laugh',
+  share: 'laugh',
+  cold: 'talk-serious',
+};
+
+/** 归一化问候规则:缺省项用内置默认(动作均在角色清单内)。 */
+export function resolveGreetings(raw: GreetingRuleConfig): ResolvedGreetings {
+  return {
+    enter: {
+      action: DEFAULT_GREETING_ACTIONS.enter,
+      namedTemplate: raw.enterNamedTemplate ?? '欢迎 {names} 登船!',
+      allTemplate: raw.enterAllTemplate ?? '欢迎新朋友登船!',
+    },
+    follow: { action: DEFAULT_GREETING_ACTIONS.follow, template: raw.followTemplate ?? '谢谢 {user} 的关注!' },
+    share: { action: DEFAULT_GREETING_ACTIONS.share, template: raw.shareTemplate ?? '谢谢 {user} 的分享!' },
+    cold: { action: DEFAULT_GREETING_ACTIONS.cold, prompts: raw.coldPrompts?.length ? raw.coldPrompts : DEFAULT_COLD_PROMPTS },
+  };
+}
+
 const DEFAULT_SMALL_TEMPLATE = '谢谢 {user} 的 {gift} ×{count}!';
 const DEFAULT_MERGED_THANKS = '感谢 {names} 送来的礼物,大肥鱼都记好啦!';
 
@@ -100,8 +152,9 @@ const COMMAND_PATTERNS: { action: string; pattern: RegExp }[] = [
   { action: 'gift', pattern: /(拆礼物|开礼物)/ },
 ];
 
-export function createRules(persona: PersonaConfig, giftRules: ResolvedGiftRules) {
+export function createRules(persona: PersonaConfig, giftRules: ResolvedGiftRules, greetings: ResolvedGreetings) {
   let fallbackCursor = 0;
+  let coldCursor = 0;
 
   /** 确定性指令检测:先查整句口令(全等),含彩蛋词但非整句的普通提问跳过包含类指令走问答,再查其余包含类指令。 */
   function detectCommand(text: string): { action: string; say: string } | null {
@@ -151,5 +204,25 @@ export function createRules(persona: PersonaConfig, giftRules: ResolvedGiftRules
     return giftRules.mergedThanksTemplate.replaceAll('{names}', names);
   }
 
-  return { detectCommand, fallbackReply, thanksText, mergedThanks };
+  /** 问候播报文案:按问候种类取模板并替换占位符({names}/{user})。 */
+  function greetingText(kind: 'enterNamed' | 'enterAll' | 'follow' | 'share', input: { names?: string; user?: string }): string {
+    const template = kind === 'enterNamed'
+      ? greetings.enter.namedTemplate
+      : kind === 'enterAll'
+        ? greetings.enter.allTemplate
+        : kind === 'follow'
+          ? greetings.follow.template
+          : greetings.share.template;
+    return template.replaceAll('{names}', input.names ?? '').replaceAll('{user}', input.user ?? '');
+  }
+
+  /** 冷场提示词轮换(发给回复提供方生成话题;失败走保底回复)。 */
+  function coldPrompt(): string {
+    const prompts = greetings.cold.prompts;
+    const prompt = prompts[coldCursor % prompts.length] ?? DEFAULT_COLD_PROMPTS[0]!;
+    coldCursor += 1;
+    return prompt;
+  }
+
+  return { detectCommand, fallbackReply, thanksText, mergedThanks, greetingText, coldPrompt };
 }

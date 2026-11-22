@@ -14,6 +14,14 @@
       "peakMergeCount": 6
     }
   },
+  "greetings": {
+    "enabled": true,
+    "enterWindowMs": 10000,
+    "maxNamedCount": 3,
+    "allRoomIntervalMs": 60000,
+    "coldIdleMs": 180000,
+    "coldIntervalMs": 300000
+  },
   "playback": {
     "preloadTimeoutMs": 8000,
     "overallTimeoutMs": 120000,

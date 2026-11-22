@@ -158,8 +158,8 @@ export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): vo
   fastify.post('/api/mock/events', async (request, reply) => {
     if (!guardControl(deps, request, reply)) return reply;
     const body = request.body as Partial<MockEventInput> | undefined;
-    if (!body || typeof body.type !== 'string' || !['chat', 'gift', 'guard', 'superchat'].includes(body.type)) {
-      reply.code(400).send(apiError(ErrorCodes.VALIDATION_FAILED, 'type 需为 chat / gift / guard / superchat', 'mock'));
+    if (!body || typeof body.type !== 'string' || !['chat', 'gift', 'guard', 'superchat', 'enter', 'like', 'follow', 'share'].includes(body.type)) {
+      reply.code(400).send(apiError(ErrorCodes.VALIDATION_FAILED, 'type 需为 chat / gift / guard / superchat / enter / like / follow / share', 'mock'));
       return reply;
     }
     const result = deps.submitMock(body as MockEventInput);

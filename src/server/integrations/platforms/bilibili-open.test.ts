@@ -232,9 +232,43 @@ describe('推送消息映射(WT:事件契约)', () => {
     expect(scOld?.text).toBe('你好呀');
   });
 
-  it('enter/like/未知 cmd 返回 null(不投递,记日志)', () => {
+  it('进场 → enter:USER_ENTER 实测口径,open_id 标识与 msg_id 去重键(互动第三批)', () => {
+    const e = mapPushMessage('LIVE_OPEN_PLATFORM_USER_ENTER', {
+      uid: 0, open_id: 'enter-u', uname: '新观众', room_id: 1796120001, msg_id: 'en-1',
+    }, 3_000);
+    expect(e?.type).toBe('enter');
+    expect(e?.user).toMatchObject({ id: 'enter-u', name: '新观众' });
+    expect(e?.sourceKey).toBe('enter-enter-u-en-1');
+  });
+
+  it('点赞 → like:活跃信号映射,无用户标识时拒绝(互动第三批)', () => {
+    const e = mapPushMessage('LIVE_OPEN_PLATFORM_LIKE', { uid: 0, open_id: 'like-u', uname: '点赞人', like_count: 5, msg_id: 'lk-1' }, 3_000);
+    expect(e?.type).toBe('like');
+    expect(e?.user.id).toBe('like-u');
+    expect(mapPushMessage('LIVE_OPEN_PLATFORM_LIKE', { uid: 0, like_count: 5 }, 3_000)).toBeNull();
+  });
+
+  it('关注/分享 → follow/share:社区口径命令的防御性映射(互动第三批,待真实样本核实)', () => {
+    const follow = mapPushMessage('LIVE_OPEN_PLATFORM_FOLLOW', {
+      room_id: 1796120001,
+      user_info: { uid: 0, open_id: 'follow-u', uname: '新粉' },
+      msg_id: 'fl-1',
+    }, 3_000);
+    expect(follow?.type).toBe('follow');
+    expect(follow?.user).toMatchObject({ id: 'follow-u', name: '新粉' });
+    expect(follow?.sourceKey).toBe('follow-follow-u-fl-1');
+    const share = mapPushMessage('LIVE_OPEN_PLATFORM_SHARE', {
+      uid: 0, open_id: 'share-u', uname: '分享者', msg_id: 'sh-1',
+    }, 3_000);
+    expect(share?.type).toBe('share');
+    expect(share?.user.id).toBe('share-u');
+    // 字段缺失(用户标识不全)返回 null,不产生副作用
+    expect(mapPushMessage('LIVE_OPEN_PLATFORM_FOLLOW', { uid: 0, uname: 'x' }, 3_000)).toBeNull();
+  });
+
+  it('enter/like 缺用户名/未知 cmd 返回 null(不投递,记日志)', () => {
     expect(mapPushMessage('LIVE_OPEN_PLATFORM_LIKE', { like_count: 3 }, 1_000)).toBeNull();
-    expect(mapPushMessage('LIVE_OPEN_PLATFORM_USER_ENTER', { uid: 1, uname: 'x' }, 1_000)).toBeNull();
+    expect(mapPushMessage('LIVE_OPEN_PLATFORM_USER_ENTER', { uid: 0 }, 1_000)).toBeNull();
     expect(mapPushMessage('SOMETHING_NEW', { data: 1 }, 1_000)).toBeNull();
   });
 });

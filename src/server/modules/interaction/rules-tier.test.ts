@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createRules, resolveGiftRules, tierFor } from './rules.js';
+import { createRules, resolveGiftRules, resolveGreetings, tierFor } from './rules.js';
 
 // P2 互动第二批:礼物三档分层——边界、兼容回退与模板占位符。
 
@@ -52,26 +52,26 @@ describe('thanksText 与 mergedThanks 模板', () => {
   const persona = { name: '大肥鱼', fallbackReplies: ['x'], commandReplies: {} };
 
   it('金额格式化:整除去小数,小数保留两位内', () => {
-    const rr = createRules(persona, resolveGiftRules({ tiers: { large: { action: 'stamp-letter', template: '{user} 的{gift}({amount}元)!' } } }));
+    const rr = createRules(persona, resolveGiftRules({ tiers: { large: { action: 'stamp-letter', template: '{user} 的{gift}({amount}元)!' } } }), resolveGreetings({}));
     expect(rr.thanksText('large', { user: '甲', gift: '火箭', amountYuan: 15.5 })).toBe('甲 的火箭(15.5元)!');
     expect(rr.thanksText('large', { user: '甲', gift: '火箭', amountYuan: 10 })).toBe('甲 的火箭(10元)!');
     expect(rr.thanksText('large', { user: '甲', gift: '火箭', amountYuan: 0.1 })).toBe('甲 的火箭(0.1元)!');
   });
 
   it('{kind} 与 {gift} 等值(大航海/醒目留言复用大额模板)', () => {
-    const rr = createRules(persona, resolveGiftRules({ celebrateText: '欢迎 {user} 的{kind}!' }));
+    const rr = createRules(persona, resolveGiftRules({ celebrateText: '欢迎 {user} 的{kind}!' }), resolveGreetings({}));
     expect(rr.thanksText('large', { user: '舰长甲', gift: '大航海' })).toBe('欢迎 舰长甲 的大航海!');
   });
 
   it('count/amount 未提供时占位符替换为空串,不留孤立花括号', () => {
-    const rr = createRules(persona, resolveGiftRules({}));
+    const rr = createRules(persona, resolveGiftRules({}), resolveGreetings({}));
     const text = rr.thanksText('large', { user: '甲', gift: '火箭' });
     expect(text).not.toContain('{');
     expect(text).toContain('甲');
   });
 
   it('mergedThanks 替换 {names}', () => {
-    const rr = createRules(persona, resolveGiftRules({ mergedThanksTemplate: '感谢 {names} 的礼物!' }));
+    const rr = createRules(persona, resolveGiftRules({ mergedThanksTemplate: '感谢 {names} 的礼物!' }), resolveGreetings({}));
     expect(rr.mergedThanks('甲、乙 等朋友')).toBe('感谢 甲、乙 等朋友 的礼物!');
   });
 });

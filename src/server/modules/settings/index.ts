@@ -16,6 +16,7 @@ type DefaultsFile = {
   petId: string;
   queue: UserSettings['queue'];
   gift: UserSettings['gift'];
+  greetings: UserSettings['greetings'];
   playback: UserSettings['playback'];
   lease: UserSettings['lease'];
   tts: UserSettings['tts'];
@@ -82,6 +83,7 @@ export function createSettings(deps: { paths: AppPaths; env: Record<string, stri
         ...user?.gift,
         tiering: { ...defaults.gift.tiering, ...user?.gift?.tiering },
       },
+      greetings: { ...defaults.greetings, ...user?.greetings },
       playback: { ...defaults.playback, ...user?.playback },
       lease: { ...defaults.lease, ...user?.lease },
       tts: { ...defaults.tts, ...user?.tts },
@@ -103,6 +105,7 @@ export function createSettings(deps: { paths: AppPaths; env: Record<string, stri
       petId: envPet || user.petId,
       queue: user.queue,
       gift: user.gift,
+      greetings: user.greetings,
       playback: user.playback,
       lease: user.lease,
       tts: user.tts,

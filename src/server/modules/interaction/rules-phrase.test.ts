@@ -7,7 +7,7 @@ import type { CharactersModule } from '../characters/index.js';
 import type { PlaybackModule } from '../playback/index.js';
 import type { ReplyProvider, SpeechProvider } from './providers.js';
 import { createInteraction, resolveAdoptableAction } from './index.js';
-import { resolveGiftRules } from './rules.js';
+import { resolveGiftRules, resolveGreetings } from './rules.js';
 
 // P2 第一批:明确口令彩蛋(整句全等)与控制台试播台词。
 // 口令与包含类指令的边界:「敬个礼」独立触发;含口令词的正常提问走问答流程。
@@ -25,6 +25,7 @@ function settings(): EffectiveSettings {
     petId: 'main',
     queue: { capacity: 20, chatTtlMs: 30_000, userCooldownMs: 0 },
     gift: { mergeWindowMs: 2_000, tiering: { smallMaxYuan: 1, largeMinYuan: 10, peakMergeCount: 6 } },
+    greetings: { enabled: true, enterWindowMs: 10_000, maxNamedCount: 3, allRoomIntervalMs: 60_000, coldIdleMs: 180_000, coldIntervalMs: 300_000 },
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
     lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 0 },
     tts: { provider: 'fixed-local', voice: 'zh-CN-XiaoxiaoNeural' },
@@ -113,6 +114,7 @@ function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechPr
     speechProvider: speech,
     persona,
     giftRules,
+    greetings: resolveGreetings({}),
     logger: silentLogger,
     now: () => Date.now(),
   });

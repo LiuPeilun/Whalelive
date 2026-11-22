@@ -3,7 +3,7 @@
 // 选“优先级最低、同优先级最旧”的聊天腾位;队内无聊天或优先级不足时拒绝新条目。
 // 缩容时按同一规则淘汰至新上限,淘汰原因 capacity-shrink。
 
-export type QueueItemType = 'chat' | 'gift' | 'guard' | 'superchat' | 'manual' | 'idle';
+export type QueueItemType = 'chat' | 'gift' | 'guard' | 'superchat' | 'enter' | 'follow' | 'share' | 'manual' | 'idle';
 
 export type QueueItem = {
   eventId: string;

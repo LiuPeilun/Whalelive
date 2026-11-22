@@ -8,8 +8,9 @@ import type { CharactersModule } from '../characters/index.js';
 import type { PlaybackModule } from '../playback/index.js';
 import type { ReplyProvider, SpeechProvider } from './providers.js';
 import { createGiftAggregator } from './gifts.js';
+import { createEnterAggregator } from './enter.js';
 import { createQueue, type DropRecord, type QueueItem } from './queue.js';
-import { createRules, tierFor, type GiftTierKey, type PersonaConfig, type ResolvedGiftRules } from './rules.js';
+import { createRules, tierFor, type GiftTierKey, type PersonaConfig, type ResolvedGiftRules, type ResolvedGreetings } from './rules.js';
 
 // 互动编排:唯一待播队列、冷却、礼物合并、任务生命周期与紧急停止。
 // 任务串行执行:出队 → 生成(指令短路/回复提供方)→ 语音合成 → playback.play 唯一终态
@@ -64,6 +65,14 @@ const SAY_MAX_LENGTH = 120;
 const MERGED_NAMES_LIMIT = 5;
 /** 礼物答谢优先级栈(v1.1):大额/SC/大航海 80 > 中额 66 > 小额 60 > 普通聊天 40。 */
 const GIFT_TIER_PRIORITY: Record<GiftTierKey, number> = { small: 60, mid: 66, large: 80 };
+/** 问候与冷场优先级栈(v1.1):彩蛋(聊天 40)> 关注/分享 30 > 进场 25 > 闲聊 10。 */
+const FOLLOW_SHARE_PRIORITY = 30;
+const ENTER_PRIORITY = 25;
+const COLD_PRIORITY = 10;
+/** 问候条目有效期:过时欢迎直接过期(v1.1)。 */
+const GREETING_TTL_MS = 60_000;
+/** 冷场话题有效期:超时未被播出的话题作废。 */
+const COLD_TTL_MS = 120_000;
 
 type CurrentTask = {
   eventId: string;
@@ -127,13 +136,20 @@ export function createInteraction(deps: {
   speechProvider: SpeechProvider;
   persona: PersonaConfig;
   giftRules: ResolvedGiftRules;
+  greetings: ResolvedGreetings;
   logger: Logger;
   now(): number;
 }): InteractionModule {
   const { characters, playback, logger, now } = deps;
-  const rules = createRules(deps.persona, deps.giftRules);
+  const rules = createRules(deps.persona, deps.giftRules, deps.greetings);
   const queue = createQueue({ capacity: deps.settings().queue.capacity, now });
   const gifts = createGiftAggregator({ mergeWindowMs: () => deps.settings().gift.mergeWindowMs, now });
+  const enters = createEnterAggregator({
+    windowMs: () => deps.settings().greetings.enterWindowMs,
+    maxNamedCount: () => deps.settings().greetings.maxNamedCount,
+    allRoomIntervalMs: () => deps.settings().greetings.allRoomIntervalMs,
+    now,
+  });
 
   const listeners = new Set<() => void>();
   const cooldowns = new Map<string, number>();
@@ -146,6 +162,9 @@ export function createInteraction(deps: {
   const totals: TokenUsageView = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   let completed = 0;
   let lastMetrics: MetricsView['last'] = null;
+  // 互动第三批:冷场判定锚点——服务启动即视为一次活跃(冷场只在真实静默满阈值后触发)。
+  let lastActivityAt = now();
+  let lastColdAt = now();
 
   function addUsage(usage: TokenUsageView | null): void {
     if (!usage) return;
@@ -189,10 +208,57 @@ export function createInteraction(deps: {
     cooldowns.set(userKey, now());
   }
 
+  /**
+   * 真实互动到达:刷新冷场判定锚点,并取消尚未开口的冷场话题(v1.1 取消规则——
+   * 真实互动一到,还没开口的闲聊直接让位)。人工试播不视为观众互动。
+   */
+  function bumpActivity(): void {
+    lastActivityAt = now();
+    const coldIds = new Set(queue.snapshot().filter((i) => i.type === 'idle').map((i) => i.eventId));
+    if (coldIds.size > 0) {
+      const removed = queue.removeMany(coldIds, 'cold-superseded');
+      if (removed.length > 0) logger.info('interaction.cold-cancelled', { count: removed.length });
+    }
+  }
+
   function enqueue(event: LiveEvent): EnqueueResult {
     const settings = deps.settings();
     const eventId = event.id;
+    if (event.type === 'enter') {
+      // 进场:真实互动信号(取消未开口闲聊);是否聚合播报受问候开关约束。
+      bumpActivity();
+      if (deps.settings().greetings.enabled) {
+        enters.add({ userKey: `${event.source}:${event.user.id}`, userName: event.user.name });
+      }
+      return { accepted: true, eventId };
+    }
+    if (event.type === 'like') {
+      // 点赞:实测存在的命令,仅作为活跃信号(不进入待播队列);like_count 语义待真实样本核对。
+      bumpActivity();
+      return { accepted: true, eventId };
+    }
+    if (event.type === 'follow' || event.type === 'share') {
+      bumpActivity();
+      if (!deps.settings().greetings.enabled) return { accepted: true, eventId };
+      const item: QueueItem = {
+        eventId,
+        type: event.type,
+        priority: FOLLOW_SHARE_PRIORITY,
+        enqueuedAt: now(),
+        expiresAt: now() + GREETING_TTL_MS,
+        say: rules.greetingText(event.type === 'follow' ? 'follow' : 'share', { user: event.user.name }),
+        action: event.type === 'follow' ? deps.greetings.follow.action : deps.greetings.share.action,
+        text: null,
+        isCommand: true,
+        userKey: `${event.source}:${event.user.id}`,
+      };
+      const pushed = queue.push(item);
+      if (!pushed.ok) recordReject(eventId, pushed.reason);
+      notify();
+      return pushed.ok ? { accepted: true, eventId } : { accepted: false, eventId, reason: pushed.reason };
+    }
     if (event.type === 'gift') {
+      bumpActivity();
       const gift = event.gift;
       if (!gift) return { accepted: false, eventId, reason: 'gift-missing-payload' };
       gifts.add({
@@ -206,6 +272,7 @@ export function createInteraction(deps: {
       return { accepted: true, eventId };
     }
     if (event.type === 'guard' || event.type === 'superchat') {
+      bumpActivity();
       // SC 与大航海同属大额答谢档(v1.1 修正 2):动作取大额档配置,文案沿用大额模板。
       const kind = event.type === 'guard' ? '大航海' : '醒目留言';
       const item: QueueItem = {
@@ -229,6 +296,7 @@ export function createInteraction(deps: {
       recordReject(eventId, 'not-actionable');
       return { accepted: false, eventId, reason: 'not-actionable' };
     }
+    bumpActivity();
     const userKey = `${event.source}:${event.user.id}`;
     if (chatCooldownActive(userKey)) {
       recordReject(eventId, 'user-cooldown');
@@ -581,7 +649,69 @@ export function createInteraction(deps: {
     return true;
   }
 
-  /** 调度心跳:礼物窗口出队 → 容量同步 → 空闲时取下一条。由 app 统一定时调用。 */
+  /** 进场欢迎出窗:按聚合结果生成播报条目(念名或全房),过时欢迎由有效期自然过期。 */
+  function sweepEnterWelcomes(): boolean {
+    if (!deps.settings().greetings.enabled) return false;
+    const emissions = enters.sweep();
+    let pushedAny = false;
+    for (const emission of emissions) {
+      const kind = emission.kind === 'named' ? 'enterNamed' as const : 'enterAll' as const;
+      const item: QueueItem = {
+        eventId: `enter-${randomUUID().slice(0, 8)}`,
+        type: 'enter',
+        priority: ENTER_PRIORITY,
+        enqueuedAt: now(),
+        expiresAt: now() + GREETING_TTL_MS,
+        say: rules.greetingText(kind, { names: emission.names.join('、') }),
+        action: deps.greetings.enter.action,
+        text: null,
+        isCommand: true,
+        userKey: null,
+      };
+      const pushed = queue.push(item);
+      if (!pushed.ok) recordReject(item.eventId, pushed.reason);
+      else pushedAny = true;
+    }
+    return pushedAny;
+  }
+
+  /**
+   * 冷场自救(互动第三批,v1.1):空闲满阈值且无在播/无待播/无待合并礼物时,
+   * 以轮换提示词生成话题任务(经回复提供方生成内容,失败走保底回复)。
+   * 两次话题之间受最小间隔约束;真实互动到达会取消尚未开口的话题(bumpActivity)。
+   */
+  function maybeEnqueueCold(): boolean {
+    const greetings = deps.settings().greetings;
+    if (!greetings.enabled) return false;
+    const ts = now();
+    if (ts - lastActivityAt < greetings.coldIdleMs) return false;
+    if (ts - lastColdAt < greetings.coldIntervalMs) return false;
+    if (current !== null) return false;
+    if (queue.length() > 0) return false;
+    if (gifts.size() > 0 || enters.size() > 0) return false;
+    lastColdAt = ts;
+    const item: QueueItem = {
+      eventId: `cold-${randomUUID().slice(0, 8)}`,
+      type: 'idle',
+      priority: COLD_PRIORITY,
+      enqueuedAt: ts,
+      expiresAt: ts + COLD_TTL_MS,
+      say: '',
+      action: deps.greetings.cold.action,
+      text: rules.coldPrompt(),
+      isCommand: false,
+      userKey: null,
+    };
+    const pushed = queue.push(item);
+    if (!pushed.ok) {
+      recordReject(item.eventId, pushed.reason);
+      return false;
+    }
+    logger.info('interaction.cold-field', { prompt: item.text });
+    return true;
+  }
+
+  /** 调度心跳:礼物窗口出队 → 进场欢迎出窗 → 容量同步 → 高峰合并 → 冷场判定 → 空闲时取下一条。 */
   function tick(): void {
     queue.setCapacity(deps.settings().queue.capacity);
     const emissions = gifts.sweep();
@@ -611,7 +741,9 @@ export function createInteraction(deps: {
       if (!pushed.ok) recordReject(item.eventId, pushed.reason);
     }
     const merged = mergePeakSmallThanks();
-    if (emissions.length > 0 || merged) notify();
+    const greeted = sweepEnterWelcomes();
+    const cold = maybeEnqueueCold();
+    if (emissions.length > 0 || merged || greeted || cold) notify();
     if (paused || current !== null) return;
     const next = queue.popBest();
     if (next) void dispatch(next);

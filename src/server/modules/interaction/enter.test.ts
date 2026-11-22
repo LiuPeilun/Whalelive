@@ -1,0 +1,67 @@
+import { describe, expect, it } from 'vitest';
+import { createEnterAggregator } from './enter.js';
+
+// P2 互动第三批:进场欢迎聚合——窗口去重、念名上限、全房欢迎间隔限流。
+
+describe('进场欢迎聚合(互动第三批)', () => {
+  it('窗口内 3 人逐个念名,窗口关闭产出一条念名播报', () => {
+    let t = 0;
+    const agg = createEnterAggregator({ windowMs: () => 10_000, maxNamedCount: () => 3, allRoomIntervalMs: () => 60_000, now: () => t });
+    agg.add({ userKey: 'u1', userName: '甲' });
+    t += 100;
+    agg.add({ userKey: 'u2', userName: '乙' });
+    t += 100;
+    agg.add({ userKey: 'u3', userName: '丙' });
+    t += 10_000;
+    expect(agg.sweep()).toEqual([{ kind: 'named', names: ['甲', '乙', '丙'] }]);
+    expect(agg.size()).toBe(0);
+  });
+
+  it('同一观众窗口内重复进场只计一次', () => {
+    let t = 0;
+    const agg = createEnterAggregator({ windowMs: () => 10_000, maxNamedCount: () => 3, allRoomIntervalMs: () => 60_000, now: () => t });
+    agg.add({ userKey: 'u1', userName: '甲' });
+    agg.add({ userKey: 'u1', userName: '甲' });
+    t += 10_000;
+    expect(agg.sweep()).toEqual([{ kind: 'named', names: ['甲'] }]);
+  });
+
+  it('窗口内超出念名上限改发全房欢迎', () => {
+    let t = 0;
+    const agg = createEnterAggregator({ windowMs: () => 10_000, maxNamedCount: () => 3, allRoomIntervalMs: () => 60_000, now: () => t });
+    for (const u of ['甲', '乙', '丙', '丁']) agg.add({ userKey: u, userName: u });
+    t += 10_000;
+    expect(agg.sweep()).toEqual([{ kind: 'all', names: [] }]);
+  });
+
+  it('全房欢迎受最小间隔限流:间隔内的新批次直接过期不产出', () => {
+    let t = 0;
+    const agg = createEnterAggregator({ windowMs: () => 10_000, maxNamedCount: () => 3, allRoomIntervalMs: () => 60_000, now: () => t });
+    for (const u of ['甲', '乙', '丙', '丁']) agg.add({ userKey: u, userName: u });
+    t += 10_000;
+    expect(agg.sweep().length).toBe(1); // 第一批:全房欢迎产出
+    for (const u of ['戊', '己', '庚', '辛']) agg.add({ userKey: u, userName: u });
+    t += 10_000;
+    expect(agg.sweep()).toEqual([]); // 间隔未到:直接过期
+    for (const u of ['壬', '癸', '子', '丑']) agg.add({ userKey: u, userName: u });
+    t += 61_000;
+    expect(agg.sweep().length).toBe(1); // 间隔已过:再次产出
+  });
+
+  it('念名上限为 0 时一律全房欢迎', () => {
+    let t = 0;
+    const agg = createEnterAggregator({ windowMs: () => 10_000, maxNamedCount: () => 0, allRoomIntervalMs: () => 60_000, now: () => t });
+    agg.add({ userKey: 'u1', userName: '甲' });
+    t += 10_000;
+    expect(agg.sweep()).toEqual([{ kind: 'all', names: [] }]);
+  });
+
+  it('clear 清空未出窗的进场累计', () => {
+    let t = 0;
+    const agg = createEnterAggregator({ windowMs: () => 10_000, maxNamedCount: () => 3, allRoomIntervalMs: () => 60_000, now: () => t });
+    agg.add({ userKey: 'u1', userName: '甲' });
+    agg.clear();
+    t += 10_000;
+    expect(agg.sweep()).toEqual([]);
+  });
+});

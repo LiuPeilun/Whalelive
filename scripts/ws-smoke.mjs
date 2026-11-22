@@ -260,6 +260,22 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
   }
 }
 
+// 7c. 进场/关注模拟事件(互动第三批):接收进入问候链路(聚合/播报细节由单测覆盖)
+{
+  const enter = await http('/api/mock/events', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...controlAuth },
+    body: JSON.stringify({ type: 'enter', userId: 'smoke-enter', userName: '新观众' }),
+  });
+  check('进场事件被接收进入问候链路', enter.status === 200 && enter.body.ingest === 'accepted', JSON.stringify(enter.body));
+  const follow = await http('/api/mock/events', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...controlAuth },
+    body: JSON.stringify({ type: 'follow', userId: 'smoke-follow', userName: '新粉丝' }),
+  });
+  check('关注事件被接收', follow.status === 200 && follow.body.ingest === 'accepted', JSON.stringify(follow.body));
+}
+
 // 8. 媒体:HEAD 与 Range(素材缺失时返回 ASSET_MISSING/404,有素材时在启动后复测)
 {
   const head = await fetch(`${base}/media/pets/main/animations/idle.webm`, { method: 'HEAD' });

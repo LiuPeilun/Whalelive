@@ -7,7 +7,7 @@ import type { CharactersModule } from '../characters/index.js';
 import type { PlaybackModule } from '../playback/index.js';
 import type { ReplyProvider, SpeechProvider } from './providers.js';
 import { createInteraction } from './index.js';
-import { resolveGiftRules } from './rules.js';
+import { resolveGiftRules, resolveGreetings } from './rules.js';
 
 // P1 第一批:生成移到出队后 —— 指令短路、语义弹幕经回复提供方、
 // 提供方超时/空回复走保底、语音合成挂到表演、人工停止丢弃迟到结果。
@@ -25,6 +25,7 @@ function settings(): EffectiveSettings {
     petId: 'main',
     queue: { capacity: 20, chatTtlMs: 30_000, userCooldownMs: 0 },
     gift: { mergeWindowMs: 2_000, tiering: { smallMaxYuan: 1, largeMinYuan: 10, peakMergeCount: 6 } },
+    greetings: { enabled: true, enterWindowMs: 10_000, maxNamedCount: 3, allRoomIntervalMs: 60_000, coldIdleMs: 180_000, coldIntervalMs: 300_000 },
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
     lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 0 },
       tts: { provider: 'fixed-local', voice: 'zh-CN-XiaoxiaoNeural' },
@@ -112,6 +113,7 @@ function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechPr
     speechProvider: speech,
     persona,
     giftRules,
+    greetings: resolveGreetings({}),
     logger: silentLogger,
     now: opts.now ?? (() => Date.now()),
   });

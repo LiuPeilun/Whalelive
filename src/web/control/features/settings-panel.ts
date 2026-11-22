@@ -238,6 +238,8 @@ export function mountSettingsPanel(context: ControlContext): void {
           peakMergeCount: number('peakMergeCount', view.user.gift.tiering.peakMergeCount),
         },
       },
+      // 问候与冷场(互动第三批):本批未提供界面控件,保存时透传当前值避免被丢弃
+      greetings: { ...view.user.greetings },
       playback: {
         preloadTimeoutMs: number('preloadTimeoutMs', view.user.playback.preloadTimeoutMs),
         overallTimeoutMs: number('overallTimeoutMs', view.user.playback.overallTimeoutMs),

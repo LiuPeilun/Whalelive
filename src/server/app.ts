@@ -22,7 +22,7 @@ import { createDeepSeekReplyProvider, type DeepSeekConfig } from './integrations
 import { createReplyRouter, withProviderLabel } from './integrations/llm/reply-router.js';
 import { createFixedLocalSpeech } from './integrations/tts/fixed-local.js';
 import { createEdgeTtsSpeech, createSpeechRouter } from './integrations/tts/edge-tts.js';
-import { resolveGiftRules, type GiftRuleConfig, type PersonaConfig } from './modules/interaction/rules.js';
+import { resolveGiftRules, resolveGreetings, type GiftRuleConfig, type GreetingRuleConfig, type PersonaConfig } from './modules/interaction/rules.js';
 
 // 依赖组装与资源关闭(PROJECT_STRUCTURE《依赖方向》):
 // app.ts 只做创建、连接与生命周期;任务选择与调度在业务模块。
@@ -83,6 +83,8 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   const persona = readJson<PersonaConfig>(path.join(paths.versionedConfigDir, 'persona.json'), personaFallback, logger, 'persona');
   // P2 互动第二批:礼物规则归一化——旧字段(thanksTemplate/celebrateText)作为缺档回退,缺省档位用内置默认。
   const giftRulesCfg = resolveGiftRules(readJson<GiftRuleConfig>(path.join(paths.versionedConfigDir, 'gift-rules.json'), giftFallback, logger, 'gift-rules'));
+  // P2 互动第三批:问候规则(进场/关注/分享播报与冷场提示词),缺省项用内置默认。
+  const greetingsCfg = resolveGreetings(readJson<GreetingRuleConfig>(path.join(paths.versionedConfigDir, 'greetings-rules.json'), {}, logger, 'greetings-rules'));
 
   // P1 第三批:DeepSeek 配置全部来自服务端 env;密钥不进入设置视图与浏览器。
   const deepSeekConfig: DeepSeekConfig = {
@@ -109,7 +111,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   const edgeTts = createEdgeTtsSpeech({ cache: audioCache, logger, now, voice: () => effective().tts.voice });
   const speechProvider = createSpeechRouter({ fixed: fixedSpeech, edge: edgeTts, settings: () => effective().tts });
 
-  const interaction = createInteraction({ settings: effective, characters, playback, replyProvider, speechProvider, persona, giftRules: giftRulesCfg, logger, now });
+  const interaction = createInteraction({ settings: effective, characters, playback, replyProvider, speechProvider, persona, giftRules: giftRulesCfg, greetings: greetingsCfg, logger, now });
 
   // 控制台试听:直接经 edge 适配器(验证真实通道),音色可覆盖;超时对齐 generation.ttsTimeoutMs
   const ttsPreview = async (input: { text: string; voice?: string }): Promise<{ audioUrl: string } | null> => {

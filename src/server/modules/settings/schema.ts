@@ -36,6 +36,17 @@ export function validateGift(v: unknown): SettingsValidation {
   return { ok: true };
 }
 
+export function validateGreetings(v: unknown): SettingsValidation {
+  if (!isRecord(v)) return { ok: false, field: 'greetings', reason: '必须是对象' };
+  if (v.enabled !== true && v.enabled !== false) return { ok: false, field: 'greetings.enabled', reason: '需为布尔值' };
+  if (!isInt(v.enterWindowMs, 1_000, 60_000)) return { ok: false, field: 'greetings.enterWindowMs', reason: '需为 1秒-60秒 的毫秒数' };
+  if (!isInt(v.maxNamedCount, 0, 10)) return { ok: false, field: 'greetings.maxNamedCount', reason: '需为 0-10 的整数' };
+  if (!isInt(v.allRoomIntervalMs, 0, 600_000)) return { ok: false, field: 'greetings.allRoomIntervalMs', reason: '需为 0-10分钟 的毫秒数' };
+  if (!isInt(v.coldIdleMs, 30_000, 900_000)) return { ok: false, field: 'greetings.coldIdleMs', reason: '需为 30秒-15分钟 的毫秒数' };
+  if (!isInt(v.coldIntervalMs, 0, 1_800_000)) return { ok: false, field: 'greetings.coldIntervalMs', reason: '需为 0-30分钟 的毫秒数' };
+  return { ok: true };
+}
+
 export function validatePlayback(v: unknown): SettingsValidation {
   if (!isRecord(v)) return { ok: false, field: 'playback', reason: '必须是对象' };
   if (!isInt(v.preloadTimeoutMs, 1000, 60_000)) return { ok: false, field: 'playback.preloadTimeoutMs', reason: '需为 1-60秒 的毫秒数' };
@@ -88,6 +99,7 @@ export function validateUserSettings(v: unknown): SettingsValidation {
   const checks = [
     validateQueue(v.queue),
     validateGift(v.gift),
+    validateGreetings(v.greetings),
     validatePlayback(v.playback),
     validateLease(v.lease),
     validateTts(v.tts),

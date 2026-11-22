@@ -24,3 +24,21 @@ describe('mock 礼物金额归一(WT-P2-007)', () => {
     expect(invalid.gift?.paidMilliYuan).toBeUndefined();
   });
 });
+
+describe('mock 进场/关注/分享透传(互动第三批)', () => {
+  const now = () => 1_000;
+  const seq = () => 1;
+
+  it('enter/follow/share 事件直接透传为对应类型', () => {
+    for (const type of ['enter', 'follow', 'share'] as const) {
+      const e = mockEvent({ type, userId: 'u', userName: '观众甲' }, now, seq);
+      expect(e.type).toBe(type);
+      expect(e.user).toMatchObject({ id: 'u', name: '观众甲' });
+    }
+  });
+
+  it('like 事件透传(活跃信号)', () => {
+    const e = mockEvent({ type: 'like', userId: 'u', userName: '观众甲' }, now, seq);
+    expect(e.type).toBe('like');
+  });
+});

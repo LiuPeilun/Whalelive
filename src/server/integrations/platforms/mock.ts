@@ -5,7 +5,7 @@ import type { LiveEvent } from '../../../shared/live-event.js';
 // quantity 一律是本次新增数量;连击语义用 combo.ts 的快照换算测试覆盖。
 
 export type MockEventInput = {
-  type: 'chat' | 'gift' | 'guard' | 'superchat';
+  type: 'chat' | 'gift' | 'guard' | 'superchat' | 'enter' | 'like' | 'follow' | 'share';
   text?: string;
   userName?: string;
   userId?: string;
@@ -41,7 +41,7 @@ export function mockEvent(input: MockEventInput, now: () => number, seq: () => n
       },
     };
   }
-  if (input.type === 'guard' || input.type === 'superchat') {
+  if (input.type === 'guard' || input.type === 'superchat' || input.type === 'enter' || input.type === 'like' || input.type === 'follow' || input.type === 'share') {
     return { ...base, type: input.type };
   }
   return { ...base, type: 'chat', text: input.text?.slice(0, 200) ?? '' };

@@ -340,6 +340,27 @@ P1 第一批的审核问题（WT-P1-001～014，共十四项，跨 `2026-11-18_1
 - **未就绪零请求保护**：7b 的暂停/提交/轮询全部收进 `healthy` 分支——就绪失败（端口碰撞等）即终止本次检查、清理子进程与临时目录，绝不向占用端口的既有服务发送任何控制请求。端口碰撞 drill：普通实例占用端口时 `waitHealthy=false` 且既有服务前后状态完全一致（paused/queue 零变化）；已登记测试服务占用时工装直接拒绝启动（更强保护）。紧急停止不被撤销场景复测：冒烟运行中注入紧急停止 → 25/25 完成 → 目标服务保持 `paused:true`。
 - 验证：`npm run check` **204/204**；隔离冒烟 **25/25**；修复沿用分支 `fix/p2-review-2026-11-22`，[本轮修复记录](reviews/2026-11/2026-11-22_113113-fixes.md)。
 
+### 2026-11-22 · P2 互动第三批（进场/关注/分享播报 + 冷场自救话题）
+
+**本次实现的功能**（方案依据互动 v1.1 定稿第三批，经操作者确认排期）：
+- **平台映射**（`bilibili-open.ts`）：`LIVE_OPEN_PLATFORM_USER_ENTER` → `enter`（实测存在的命令，open_id 口径）、`LIVE_OPEN_PLATFORM_LIKE` → `like`（活跃信号，不进待播队列，like_count 语义待真实样本）、`LIVE_OPEN_PLATFORM_FOLLOW`/`SHARE` → `follow`/`share`（社区口径防御性映射：字段缺失返回 null 记 unmapped，真实推送命中即播报、未命中无副作用——首次真实命中即为核实）。契约 `LiveEventType` 与校验扩展 follow/share。
+- **进场欢迎聚合**（`enter.ts`）：窗口内同观众去重累计；窗口关闭按人数产出——≤`maxNamedCount`（默认 3）逐个念名，超出改发全房欢迎且受 `allRoomIntervalMs`（默认 60s）限流，被限流的欢迎直接过期；播报条目 60s 有效期（过时欢迎自然过期）。
+- **优先级栈扩展**（v1.1）：关注/分享 30 > 进场 25 > 闲聊 10，位于彩蛋（聊天 40）之下；大额/SC/大航海 80 之上不变。
+- **冷场自救**：`coldIdleMs`（默认 3min）内无任何真实互动、且无在播/无待播/无待合并礼物时，以轮换提示词生成话题任务（优先级 10，经回复提供方生成内容，失败走保底回复，动作 `talk-serious` 循环口型）；`coldIntervalMs`（默认 5min）约束两次话题间隔；话题条目 2min 有效期。
+- **取消规则**（v1.1）：任何真实互动（弹幕/礼物/大航海/SC/进场/点赞/关注/分享）到达即取消尚未开口的冷场话题（`cold-superseded` 记录）；人工试播不算观众互动。
+- **配置**：`greetings` 设置段（enabled/enterWindowMs/maxNamedCount/allRoomIntervalMs/coldIdleMs/coldIntervalMs，schema 校验 + defaults.json）；`config/greetings-rules.json`（进场念名/全房/关注/分享模板与冷场提示词池，缺省项用内置默认）。控制台设置面板本批未加问候控件，保存时透传现有值。
+- **模拟入口**：`/api/mock/events` 支持 enter/like/follow/share。
+
+**实际运行命令**：`npm run check` → 隔离端口冒烟。
+
+**检查结果**：双端类型检查通过；Vitest **224/224**（新增 20 例：进场聚合 6、问候规则与冷场触发/间隔门/取消/活跃锚点 9、平台映射 3、mock 透传 2）；WS 冒烟 **27/27**（新增进场/关注接收检查 2 项）。
+
+**浏览器 / OBS / B 站实测范围**：未做浏览器与 OBS 实测；B 站真实事件中 ENTER/LIKE 为实测过的命令，FOLLOW/SHARE 命令名来自社区资料未经官方文档核实——映射防御性设计，真实推送命中即播报并核实，未命中记 unmapped 日志待修正。
+
+**待操作者实测**：下次开播观察进场欢迎念名（1-3 人逐个念、多人全房欢迎）、关注/分享感谢是否触发（即 FOLLOW/SHARE 事件核实）；冷场话题在静默 3 分钟后是否出现、弹幕一到是否让位；如需调整节奏改 `data/config/settings.json` 的 `greetings` 段。
+
+**下一项可继续任务**：唱歌立项（RVC 翻唱路线，方案已认可，见 P3 功能任务行）。
+
 ## 实施记录模板
 
 每次完成任务后补充以下内容。

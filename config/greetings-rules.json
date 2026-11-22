@@ -1,0 +1,7 @@
+{
+  "formatVersion": 1,
+  "enterNamedTemplate": "欢迎 {names} 登船!",
+  "enterAllTemplate": "欢迎新朋友登船!",
+  "followTemplate": "谢谢 {user} 的关注!",
+  "shareTemplate": "谢谢 {user} 的分享!"
+}
