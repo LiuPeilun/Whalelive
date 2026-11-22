@@ -37,8 +37,8 @@
   },
   "tts": {
     "provider": "edge-tts",
-    "voice": "zh-CN-XiaoxiaoNeural",
-    "pitch": "+15Hz"
+    "voice": "zh-CN-XiaoyiNeural",
+    "pitch": "+20Hz"
   },
   "llm": {
     "provider": "fixed-local"
