@@ -73,6 +73,8 @@ const COLD_PRIORITY = 10;
 const GREETING_TTL_MS = 60_000;
 /** 冷场话题有效期:超时未被播出的话题作废。 */
 const COLD_TTL_MS = 120_000;
+/** 同观众问候节流窗口(WT-P2-012):关注/分享播报后 60s 内同观众不重复播报。 */
+const GREET_USER_COOLDOWN_MS = 60_000;
 
 type CurrentTask = {
   eventId: string;
@@ -94,6 +96,8 @@ type CurrentTask = {
   };
   usage: TokenUsageView | null;
   provider: string;
+  /** 冷场话题任务(WT-P2-013):尚未开口时可被真实互动取消。 */
+  cold: boolean;
 };
 
 /** 派生 signal:父任务中止传导给提供方调用;超时只取消调用本身,不杀任务。 */
@@ -165,6 +169,8 @@ export function createInteraction(deps: {
   // 互动第三批:冷场判定锚点——服务启动即视为一次活跃(冷场只在真实静默满阈值后触发)。
   let lastActivityAt = now();
   let lastColdAt = now();
+  /** 同观众问候节流(WT-P2-012):关注/分享播报后 60s 内同观众不再重复播报。 */
+  const greetCooldowns = new Map<string, number>();
 
   function addUsage(usage: TokenUsageView | null): void {
     if (!usage) return;
@@ -211,13 +217,33 @@ export function createInteraction(deps: {
   /**
    * 真实互动到达:刷新冷场判定锚点,并取消尚未开口的冷场话题(v1.1 取消规则——
    * 真实互动一到,还没开口的闲聊直接让位)。人工试播不视为观众互动。
+   * 覆盖两处:待播队列条目直接移除;已出队、尚在生成/合成中的当前任务按任务身份取消
+   * (abort + 置空 current,既有版本校验拦截迟到结果,WT-P2-013)。
+   * 已开口(waiting-playback 起,音频已开始)的话题保持播完。
    */
   function bumpActivity(): void {
     lastActivityAt = now();
     const coldIds = new Set(queue.snapshot().filter((i) => i.type === 'idle').map((i) => i.eventId));
     if (coldIds.size > 0) {
       const removed = queue.removeMany(coldIds, 'cold-superseded');
-      if (removed.length > 0) logger.info('interaction.cold-cancelled', { count: removed.length });
+      if (removed.length > 0) logger.info('interaction.cold-cancelled', { count: removed.length, from: 'queue' });
+    }
+    if (current !== null && current.cold && (current.stage === 'generating' || current.stage === 'synthesizing')) {
+      const cancelled = current;
+      cancelled.controller.abort();
+      const endedAt = now();
+      lastMetrics = {
+        eventId: cancelled.eventId,
+        ...stageTimings(cancelled, endedAt),
+        usage: cancelled.usage,
+        provider: cancelled.provider,
+      };
+      history.push({ eventId: cancelled.eventId, performanceId: cancelled.performanceId, status: 'cancelled', at: endedAt });
+      if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
+      logger.info('interaction.cold-cancelled', { eventId: cancelled.eventId, from: 'current', stage: cancelled.stage });
+      current = null;
+      notify();
+      tick();
     }
   }
 
@@ -240,6 +266,17 @@ export function createInteraction(deps: {
     if (event.type === 'follow' || event.type === 'share') {
       bumpActivity();
       if (!deps.settings().greetings.enabled) return { accepted: true, eventId };
+      // 同观众问候节流(WT-P2-012):60s 内重复关注/分享不再播报,防止刷屏占满队列
+      const greetKey = `${event.source}:${event.user.id}`;
+      const lastGreet = greetCooldowns.get(greetKey);
+      if (lastGreet !== undefined && now() - lastGreet < GREET_USER_COOLDOWN_MS) {
+        return { accepted: true, eventId };
+      }
+      if (greetCooldowns.size >= COOLDOWN_LIMIT) {
+        const oldest = greetCooldowns.keys().next().value;
+        if (oldest !== undefined) greetCooldowns.delete(oldest);
+      }
+      greetCooldowns.set(greetKey, now());
       const item: QueueItem = {
         eventId,
         type: event.type,
@@ -250,7 +287,7 @@ export function createInteraction(deps: {
         action: event.type === 'follow' ? deps.greetings.follow.action : deps.greetings.share.action,
         text: null,
         isCommand: true,
-        userKey: `${event.source}:${event.user.id}`,
+        userKey: greetKey,
       };
       const pushed = queue.push(item);
       if (!pushed.ok) recordReject(eventId, pushed.reason);
@@ -414,6 +451,7 @@ export function createInteraction(deps: {
     const dequeuedAt = now();
     current = {
       eventId: item.eventId, performanceId: null, stage: 'generating', say: '', action, since: dequeuedAt, version, controller,
+      cold: item.type === 'idle',
       timings: {
         enqueuedAt: item.enqueuedAt, dequeuedAt, generationDoneAt: null,
         synthesisStartAt: null, synthesisDoneAt: null, playbackAt: null,
@@ -468,6 +506,12 @@ export function createInteraction(deps: {
         say = rules.fallbackReply();
         provider = 'fallback';
         logger.warn('interaction.reply-fallback', { eventId: item.eventId, why: result === null ? 'timeout-or-error' : 'empty-or-invalid' });
+      }
+      // 冷场话题来源修正(WT-P2-016):离线罐头(fixed-local)或模型降级(fallback)产生的
+      // 弹幕应答不作为话题播出,改用冷场专属成品话题池轮换;模型正常生成的话题保持原样。
+      if (current.cold && (provider === 'fixed-local' || provider === 'fallback')) {
+        say = rules.coldOfflineTopic();
+        provider = 'cold-topics';
       }
       if (!alive()) return;
       current = {
@@ -780,6 +824,7 @@ export function createInteraction(deps: {
     }
     const cleared = queue.clear('stopped');
     gifts.clear();
+    enters.clear();
     playback.stop();
     logger.warn('interaction.emergency-stop', { cleared });
     notify();

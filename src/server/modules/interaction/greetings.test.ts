@@ -45,7 +45,7 @@ function fakeCharacters(): CharactersModule {
     reload: () => {},
     petId: () => 'main',
     view: () => ({ petId: 'main', name: 'x', licenseName: 'x', actions: [] }),
-    resolveAction: (id: string) => (['idle', 'talk', 'wave', 'laugh', 'talk-serious'].includes(id) ? { actionId: id, file: `animations/${id}.webm`, loop: loopActions.includes(id), available: true } : null),
+    resolveAction: (id: string) => (['idle', 'talk', 'wave', 'laugh', 'talk-serious', 'stamp-letter', 'celebrate'].includes(id) ? { actionId: id, file: `animations/${id}.webm`, loop: loopActions.includes(id), available: true } : null),
     resolveAsset: () => null,
     missingActions: () => [],
   };
@@ -89,13 +89,17 @@ function event(type: LiveEvent['type'], user: string): LiveEvent {
   return { id: `evt-${type}-${user}`, sourceKey: `sk-${type}-${user}-${t}`, source: 'mock', roomId: 'r', type, user: { id: user, name: user }, receivedAt: Date.now() };
 }
 
+function guardEvent(user: string): LiveEvent {
+  return { id: `evt-guard-${user}`, sourceKey: `sk-guard-${user}`, source: 'mock', roomId: 'r', type: 'guard', user: { id: user, name: user }, receivedAt: Date.now() };
+}
+
 const persona = { name: '大肥鱼', fallbackReplies: ['保底回复'], commandReplies: {} };
 const giftRules = resolveGiftRules({});
 const greetings = resolveGreetings({});
 
 function build() {
   const playback = fakePlayback();
-  const generate = vi.fn(async (input: { text: string }) => ({ say: `话题:${input.text}`, action: null }));
+  const generate = vi.fn(async (input: { text: string }) => ({ say: `话题:${input.text}`, action: null, provider: 'deepseek' }));
   const reply: ReplyProvider = { generate } as unknown as ReplyProvider;
   const speech: SpeechProvider = { synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) };
   const interaction = createInteraction({
@@ -174,7 +178,7 @@ describe('进场/关注/分享播报(互动第三批)', () => {
 });
 
 describe('冷场自救(互动第三批)', () => {
-  it('空闲满阈值且服务空闲时,冷场话题入队并经回复提供方生成', async () => {
+  it('空闲满阈值且服务空闲时,冷场话题入队并经回复提供方生成(正常生成路径保持模型内容)', async () => {
     t = 0;
     const { interaction, playback, generate } = build();
     t += 5_100; // coldIdleMs=2000 静默满阈值;初始 lastColdAt=0,间隔 5000 也已过
@@ -262,5 +266,208 @@ describe('冷场自救(互动第三批)', () => {
     expect(playback.plays.some((p) => p.performance.action === 'talk-serious')).toBe(false);
     expect(interaction.state().queue.items.some((i) => i.type === 'idle')).toBe(false);
     interaction.resume();
+  });
+});
+
+describe('冷场话题内容来源(WT-P2-016)', () => {
+  function buildWithProvider(generate: ReplyProvider['generate']) {
+    const playback = fakePlayback();
+    const interaction = createInteraction({
+      settings,
+      characters: fakeCharacters(),
+      playback: playback.module,
+      replyProvider: { generate },
+      speechProvider: { synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) },
+      persona,
+      giftRules,
+      greetings,
+      logger: silentLogger,
+      now: () => t,
+    });
+    return { interaction, playback };
+  }
+
+  it('零配置(fixed-local 罐头)不充当话题:改播离线成品话题', async () => {
+    t = 0;
+    const { interaction, playback } = buildWithProvider(async () => ({ say: '我看到你的弹幕啦,等我接入大脑(P1)就正经回答~', action: null, provider: 'fixed-local' }));
+    t += 5_100;
+    interaction.tick();
+    await settle();
+    const p = playback.plays[0]?.performance;
+    expect(p?.say).toBe(greetings.cold.topics[0]);
+    expect(p?.say).not.toContain('我看到你的弹幕啦');
+  });
+
+  it('模型失败降级不用弹幕保底文案:改播离线成品话题', async () => {
+    t = 0;
+    const { interaction, playback } = buildWithProvider(async () => { throw new Error('model down'); });
+    t += 5_100;
+    interaction.tick();
+    await settle();
+    const p = playback.plays[0]?.performance;
+    expect(p?.say).toBe(greetings.cold.topics[0]);
+    expect(p?.say).not.toContain('保底回复');
+  });
+
+  it('正常生成:模型话题保持原样不被替换', async () => {
+    t = 0;
+    const { interaction, playback } = buildWithProvider(async () => ({ say: '话题:今天聊聊深海生物!', action: null, provider: 'deepseek' }));
+    t += 5_100;
+    interaction.tick();
+    await settle();
+    expect(playback.plays[0]?.performance.say).toBe('话题:今天聊聊深海生物!');
+  });
+});
+
+describe('冷场取消边界(WT-P2-013)', () => {
+  function buildGated(): { interaction: ReturnType<typeof createInteraction>; plays: PlayCapture[]; gates: Array<() => void> } {
+    const plays: PlayCapture[] = [];
+    const gates: Array<() => void> = [];
+    const module: PlaybackModule = {
+      registerRenderer: () => {},
+      unregisterRenderer: () => {},
+      requestLease: () => ({ ok: true, leaseId: 'l', ttlMs: 1, renewIntervalMs: 1 }),
+      renewLease: () => true,
+      releaseLease: () => true,
+      report: () => 'stale',
+      play: (input) => {
+        plays.push({ performance: input.performance, signal: input.signal });
+        return new Promise<{ performanceId: string; status: 'ended' | 'cancelled' }>((resolve) => {
+          gates.push(() => resolve({ performanceId: input.performance.id, status: 'ended' }));
+          input.signal.addEventListener('abort', () => resolve({ performanceId: input.performance.id, status: 'cancelled' }), { once: true });
+        });
+      },
+      stop: () => {},
+      tick: () => {},
+      view: () => ({ status: 'idle', performanceId: null, action: null }),
+      renderersView: () => ({ count: 0, primaryRendererId: null, leaseHolderRendererId: null, leaseExpiresAt: null }),
+      onChange: () => () => {},
+    };
+    const interaction = createInteraction({
+      settings,
+      characters: fakeCharacters(),
+      playback: module,
+      replyProvider: { generate: async () => ({ say: '话题:测试', action: null, provider: 'deepseek' }) },
+      speechProvider: { synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) },
+      persona,
+      giftRules,
+      greetings,
+      logger: silentLogger,
+      now: () => t,
+    });
+    return { interaction, plays, gates };
+  }
+
+  it('生成中的冷场可被观众互动取消:旧话题不播出,下一条互动立即派发', async () => {
+    t = 0;
+    const playback = fakePlayback();
+    let callCount = 0;
+    const generate = vi.fn((input: { signal: AbortSignal }) => {
+      callCount += 1;
+      if (callCount === 1) return new Promise<{ say: string; action: null }>((_, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
+      return Promise.resolve({ say: '正常回复', action: null, provider: 'deepseek' });
+    });
+    const interaction = createInteraction({
+      settings, characters: fakeCharacters(), playback: playback.module,
+      replyProvider: { generate } as unknown as ReplyProvider,
+      speechProvider: { synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) },
+      persona, giftRules, greetings, logger: silentLogger, now: () => t,
+    });
+    t += 5_100;
+    interaction.tick(); // 冷场卡在 generating(生成替身不返回)
+    await settle();
+    expect(playback.plays.length).toBe(0);
+    interaction.enqueue(event('chat', '观众'));
+    await settle();
+    expect(playback.plays.length).toBe(1);
+    expect(playback.plays[0]?.performance.say).toContain('正常回复');
+    expect(interaction.state().queue.drops.some((d) => d.reason === 'cold-superseded')).toBe(false);
+  });
+
+  it('合成中的冷场可被大航海取消,高档答谢随后正常入队派发', async () => {
+    t = 0;
+    const playback = fakePlayback();
+    let synthCount = 0;
+    const speech = {
+      synthesize: (input: { signal: AbortSignal }) => {
+        synthCount += 1;
+        if (synthCount === 1) return new Promise<{ audioUrl: string; audioId: string }>((_, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
+        return Promise.resolve({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' });
+      },
+    };
+    const interaction = createInteraction({
+      settings, characters: fakeCharacters(), playback: playback.module,
+      replyProvider: { generate: async () => ({ say: '生成内容', action: null }) },
+      speechProvider: speech as unknown as SpeechProvider,
+      persona, giftRules, greetings, logger: silentLogger, now: () => t,
+    });
+    t += 5_100;
+    interaction.tick(); // 冷场卡在 synthesizing
+    await settle();
+    expect(playback.plays.length).toBe(0);
+    interaction.enqueue(guardEvent('舰长甲'));
+    interaction.tick(); // 守卫分支依赖心跳,测试中手动驱动
+    await settle();
+    expect(playback.plays.length).toBe(1);
+    expect(playback.plays[0]?.performance.action).toBe('stamp-letter');
+    expect(playback.plays[0]?.performance.priority).toBe(80);
+  });
+
+  it('等待播放(已开口)的冷场不取消:播完后下一条互动正常派发', async () => {
+    t = 0;
+    const { interaction, plays, gates } = buildGated();
+    t += 5_100;
+    interaction.tick(); // 冷场进入 waiting-playback(播放被门控挂起)
+    await settle();
+    expect(plays.length).toBe(1);
+    interaction.enqueue(event('chat', '观众')); // 已开口:不取消,排队等待
+    expect(interaction.state().current).not.toBeNull();
+    gates[0]?.(); // 冷场播完
+    await settle();
+    expect(plays.length).toBe(2); // 观众互动随后正常派发
+    expect(plays[1]?.performance.sourceEventId).toContain('chat');
+    expect(plays[0]?.performance.sourceEventId).not.toBe(plays[1]?.performance.sourceEventId);
+    gates[1]?.();
+    await settle();
+  });
+});
+
+describe('同观众问候节流(WT-P2-012)', () => {
+  it('60s 内同观众重复关注只播报一次,不同观众各自播报', async () => {
+    t = 0;
+    const { interaction } = build();
+    interaction.pause();
+    interaction.enqueue(event('follow', '甲'));
+    interaction.enqueue(event('follow', '甲'));
+    interaction.enqueue(event('follow', '甲'));
+    interaction.enqueue(event('follow', '乙'));
+    const followItems = interaction.state().queue.items.filter((i) => i.type === 'follow');
+    expect(followItems.length).toBe(2);
+    expect(followItems.map((i) => i.say)).toEqual(['谢谢 甲 的关注!', '谢谢 乙 的关注!']);
+    interaction.resume();
+  });
+});
+
+describe('紧急停止清理进场聚合(WT-P2-015)', () => {
+  it('停止前未结算的进场在恢复后不重播;新观众仍能正常欢迎', async () => {
+    t = 0;
+    const { interaction, playback } = build();
+    interaction.pause();
+    interaction.enqueue(event('enter', '甲'));
+    t += 1_000;
+    interaction.stop(); // 紧急停止:清理未结算进场
+    t += 10_000;
+    interaction.resume();
+    interaction.tick();
+    await settle();
+    expect(playback.plays.some((p) => p.performance.say.includes('甲'))).toBe(false);
+    // 新观众仍能正常欢迎
+    interaction.pause();
+    interaction.enqueue(event('enter', '乙'));
+    t += 10_000;
+    interaction.tick();
+    interaction.resume();
+    await settle();
+    expect(playback.plays.some((p) => p.performance.say.includes('乙'))).toBe(true);
   });
 });

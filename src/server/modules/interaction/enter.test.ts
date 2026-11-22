@@ -34,6 +34,20 @@ describe('进场欢迎聚合(互动第三批)', () => {
     expect(agg.sweep()).toEqual([{ kind: 'all', names: [] }]);
   });
 
+  it('错峰到达共享同一窗口:4 人各隔 100ms 进入,首个窗口单次结算为一条全房欢迎(WT-P2-014)', () => {
+    let t = 0;
+    const agg = createEnterAggregator({ windowMs: () => 10_000, maxNamedCount: () => 3, allRoomIntervalMs: () => 60_000, now: () => t });
+    for (const u of ['访客0', '访客1', '访客2', '访客3']) {
+      agg.add({ userKey: u, userName: u });
+      t += 100;
+    }
+    t += 10_000;
+    const emissions = agg.sweep();
+    expect(emissions.length).toBe(1); // 单次结算,不再逐批念名
+    expect(emissions[0]).toEqual({ kind: 'all', names: [] });
+    expect(agg.sweep()).toEqual([]); // 窗口已结算,无残留
+  });
+
   it('全房欢迎受最小间隔限流:间隔内的新批次直接过期不产出', () => {
     let t = 0;
     const agg = createEnterAggregator({ windowMs: () => 10_000, maxNamedCount: () => 3, allRoomIntervalMs: () => 60_000, now: () => t });

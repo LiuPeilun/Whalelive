@@ -125,3 +125,25 @@ describe('interaction 有界队列', () => {
     expect(queue.dropLog().at(-1)?.reason).toBe('capacity-shrink');
   });
 });
+
+describe('低优先级问候腾位(WT-P2-012)', () => {
+  function makeGreeting(id: string): QueueItem {
+    return { eventId: id, type: 'follow', priority: 30, enqueuedAt: 1, expiresAt: 9_999_999, say: '', action: 'wave', text: null, isCommand: true, userKey: null };
+  }
+
+  it('低优先级问候占满队列时,弹幕/高档/人工可挤出问候入队,被挤出者记录 capacity-evict-greeting', () => {
+    let t = 0;
+    const queue = createQueue({ capacity: 5, now: () => t });
+    for (let i = 0; i < 5; i++) queue.push(makeGreeting(`g-${i}`));
+    expect(queue.length()).toBe(5);
+    queue.push({ eventId: 'chat-x', type: 'chat', priority: 40, enqueuedAt: 2, expiresAt: 9_999_999, say: '', action: 'talk', text: 'hi', isCommand: false, userKey: null });
+    queue.push({ eventId: 'guard-x', type: 'guard', priority: 80, enqueuedAt: 3, expiresAt: 9_999_999, say: '', action: 'celebrate', text: null, isCommand: true, userKey: null });
+    queue.push({ eventId: 'manual-x', type: 'manual', priority: 100, enqueuedAt: 4, expiresAt: 9_999_999, say: '', action: 'wave', text: null, isCommand: true, userKey: null });
+    expect(queue.length()).toBe(5);
+    const types = queue.snapshot().map((i) => i.type);
+    expect(types).toContain('chat');
+    expect(types).toContain('guard');
+    expect(types).toContain('manual');
+    expect(queue.dropLog().filter((d) => d.reason === 'capacity-evict-greeting').length).toBe(3);
+  });
+});

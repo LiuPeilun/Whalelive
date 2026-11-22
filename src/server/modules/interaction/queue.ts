@@ -32,6 +32,13 @@ export type PushResult = { ok: true } | { ok: false; reason: string };
 
 const DROP_LOG_LIMIT = 50;
 
+/**
+ * 低优先级问候/冷场条目的腾位阈值(WT-P2-012):优先级 ≤ 此值的条目
+ * (关注/分享 30、进场 25、闲聊 10)与普通聊天一样可被更高优先级入队挤出——
+ * 防止低价值问候占满队列挡住弹幕/高档答谢/人工试播。
+ */
+const EVICTABLE_LOW_PRIORITY = 30;
+
 export function createQueue(opts: { capacity: number; now(): number }) {
   let capacity = opts.capacity;
   let items: QueueItem[] = [];
@@ -52,12 +59,12 @@ export function createQueue(opts: { capacity: number; now(): number }) {
     items = alive;
   }
 
-  /** 选出最可被挤出的条目索引:仅普通聊天,优先级最低、同优先级最旧;无则 -1。 */
+  /** 选出最可被挤出的条目索引:普通聊天与低优先级问候,优先级最低、同优先级最旧;无则 -1。 */
   function evictableIndex(): number {
     let victimIndex = -1;
     for (let i = 0; i < items.length; i++) {
       const candidate = items[i]!;
-      if (candidate.type !== 'chat') continue;
+      if (candidate.type !== 'chat' && candidate.priority > EVICTABLE_LOW_PRIORITY) continue;
       if (victimIndex === -1) {
         victimIndex = i;
         continue;
@@ -80,10 +87,11 @@ export function createQueue(opts: { capacity: number; now(): number }) {
     if (items.length >= capacity) {
       const victimIndex = evictableIndex();
       const victim = victimIndex >= 0 ? items[victimIndex] : null;
-      // 新事件优先级不低于被挤出者才允许腾位;礼物/大航海/人工因此可进满载的聊天队列。
+      // 新事件优先级不低于被挤出者才允许腾位;礼物/大航海/人工可进满载的聊天队列,
+      // 弹幕/高档答谢/人工也可挤出低优先级问候(WT-P2-012)。
       if (victim && item.priority >= victim.priority) {
         items.splice(victimIndex, 1);
-        recordDrop(victim.eventId, 'capacity-evict-chat');
+        recordDrop(victim.eventId, victim.type === 'chat' ? 'capacity-evict-chat' : 'capacity-evict-greeting');
       } else {
         // queue-full 不在此处记录(WT-P2-006 复审):腾位/合并调用方可能重试成功,
         // 最终拒收由调用方经 recordReject 记入丢弃视图,避免"已入队却显示已丢弃"的误报。

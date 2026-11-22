@@ -55,13 +55,15 @@ export type GreetingRuleConfig = {
   shareTemplate?: string;
   /** 冷场提示词池(轮换发给回复提供方生成话题);缺省用内置池。 */
   coldPrompts?: string[];
+  /** 冷场离线成品话题池(零配置/模型降级时直接轮换播出,WT-P2-016);缺省用内置池。 */
+  coldTopics?: string[];
 };
 
 export type ResolvedGreetings = {
   enter: { action: string; namedTemplate: string; allTemplate: string };
   follow: { action: string; template: string };
   share: { action: string; template: string };
-  cold: { action: string; prompts: string[] };
+  cold: { action: string; prompts: string[]; topics: string[] };
 };
 
 const DEFAULT_COLD_PROMPTS = [
@@ -70,6 +72,15 @@ const DEFAULT_COLD_PROMPTS = [
   '主动向大家提问,带动直播间气氛',
   '聊聊今天的状态,或者预告接下来打算做的事',
   '和观众玩一个轻互动:邀请大家在评论区扣 1 打个卡,说说自己从哪里来',
+];
+
+/** 冷场离线成品话题(WT-P2-016):零配置或模型降级时直接轮换播出,不用弹幕应答文案充当话题。 */
+const DEFAULT_COLD_TOPICS = [
+  '给大家说个海洋冷知识:章鱼有三颗心脏,还会变色交流哦!',
+  '今天海面风平浪静,最适合聊聊天了——大家今天过得怎么样?',
+  '悄悄告诉大家,我最喜欢的工作环节是给信件盖上潮汐邮戳!',
+  '来玩个游戏:在弹幕里打出你最喜欢的海洋动物,我看看谁的同款!',
+  '不管有没有人在线,大肥鱼都会认真地在这里游来游去,陪你度过每一分钟!',
 ];
 
 /** 问候默认动作:进场挥手迎接,关注/分享开心回应,冷场用认真口型抛话题。 */
@@ -90,7 +101,11 @@ export function resolveGreetings(raw: GreetingRuleConfig): ResolvedGreetings {
     },
     follow: { action: DEFAULT_GREETING_ACTIONS.follow, template: raw.followTemplate ?? '谢谢 {user} 的关注!' },
     share: { action: DEFAULT_GREETING_ACTIONS.share, template: raw.shareTemplate ?? '谢谢 {user} 的分享!' },
-    cold: { action: DEFAULT_GREETING_ACTIONS.cold, prompts: raw.coldPrompts?.length ? raw.coldPrompts : DEFAULT_COLD_PROMPTS },
+    cold: {
+      action: DEFAULT_GREETING_ACTIONS.cold,
+      prompts: raw.coldPrompts?.length ? raw.coldPrompts : DEFAULT_COLD_PROMPTS,
+      topics: raw.coldTopics?.length ? raw.coldTopics : DEFAULT_COLD_TOPICS,
+    },
   };
 }
 
@@ -157,6 +172,7 @@ const COMMAND_PATTERNS: { action: string; pattern: RegExp }[] = [
 export function createRules(persona: PersonaConfig, giftRules: ResolvedGiftRules, greetings: ResolvedGreetings) {
   let fallbackCursor = 0;
   let coldCursor = 0;
+  let coldTopicCursor = 0;
 
   /** 确定性指令检测:先查整句口令(全等),含彩蛋词但非整句的普通提问跳过包含类指令走问答,再查其余包含类指令。 */
   function detectCommand(text: string): { action: string; say: string } | null {
@@ -226,5 +242,13 @@ export function createRules(persona: PersonaConfig, giftRules: ResolvedGiftRules
     return prompt;
   }
 
-  return { detectCommand, fallbackReply, thanksText, mergedThanks, greetingText, coldPrompt };
+  /** 冷场离线成品话题轮换(WT-P2-016):零配置/模型降级时直接播出,不占用弹幕应答文案。 */
+  function coldOfflineTopic(): string {
+    const topics = greetings.cold.topics;
+    const topic = topics[coldTopicCursor % topics.length] ?? DEFAULT_COLD_TOPICS[0]!;
+    coldTopicCursor += 1;
+    return topic;
+  }
+
+  return { detectCommand, fallbackReply, thanksText, mergedThanks, greetingText, coldPrompt, coldOfflineTopic };
 }
