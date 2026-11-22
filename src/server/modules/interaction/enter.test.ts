@@ -79,3 +79,38 @@ describe('进场欢迎聚合(互动第三批)', () => {
     expect(agg.sweep()).toEqual([]);
   });
 });
+
+describe('窗口到期归属(WT-P2-014 复审)', () => {
+  it('窗口到期后、下一次结算前到达的观众计入新窗:首窗念三人,第四人进下一窗', () => {
+    let t = 0;
+    const agg = createEnterAggregator({ windowMs: () => 10_000, maxNamedCount: () => 3, allRoomIntervalMs: () => 60_000, now: () => t });
+    agg.add({ userKey: 'u1', userName: '访客0' }); // t=0 开窗
+    t += 5_000;
+    agg.add({ userKey: 'u2', userName: '访客1' });
+    t += 4_980;
+    agg.add({ userKey: 'u3', userName: '访客2' }); // t=9980,仍在首窗
+    t += 21;
+    agg.add({ userKey: 'u4', userName: '访客3' }); // t=10001,首窗已到期:惰性结算旧窗后开新窗
+    t += 249;
+    const first = agg.sweep(); // t=10250 首次结算
+    expect(first).toEqual([{ kind: 'named', names: ['访客0', '访客1', '访客2'] }]);
+    t += 10_000;
+    const second = agg.sweep(); // 第四人自己的窗口结算
+    expect(second).toEqual([{ kind: 'named', names: ['访客3'] }]);
+  });
+
+  it('到期后到达的重复观众不与旧窗合并,新窗内正常去重', () => {
+    let t = 0;
+    const agg = createEnterAggregator({ windowMs: () => 10_000, maxNamedCount: () => 3, allRoomIntervalMs: () => 60_000, now: () => t });
+    agg.add({ userKey: 'u1', userName: '甲' });
+    t += 10_100;
+    agg.add({ userKey: 'u1', userName: '甲' }); // 旧窗已到期:惰性结算旧窗后进入新窗
+    agg.add({ userKey: 'u2', userName: '乙' });
+    t += 10_000;
+    // 同一轮结算产出两条:旧窗(到期惰性结算)的甲、新窗(去重后)的甲乙
+    expect(agg.sweep()).toEqual([
+      { kind: 'named', names: ['甲'] },
+      { kind: 'named', names: ['甲', '乙'] },
+    ]);
+  });
+});

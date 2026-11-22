@@ -80,6 +80,7 @@ function fakePlayback(): { module: PlaybackModule; plays: PlayCapture[] } {
     tick: () => {},
     view: () => ({ status: 'idle', performanceId: null, action: null }),
     renderersView: () => ({ count: 0, primaryRendererId: null, leaseHolderRendererId: null, leaseExpiresAt: null }),
+    trackStarted: () => false,
     onChange: () => () => {},
   };
   return { module, plays };
@@ -319,10 +320,11 @@ describe('冷场话题内容来源(WT-P2-016)', () => {
   });
 });
 
-describe('冷场取消边界(WT-P2-013)', () => {
-  function buildGated(): { interaction: ReturnType<typeof createInteraction>; plays: PlayCapture[]; gates: Array<() => void> } {
+describe('冷场取消边界(WT-P2-013 复审:按同一表演的回执区分预加载与已开口)', () => {
+  /** 回执可编程的播放替身:receipts 记录"已 started"的轨道,abort 使 play 以 cancelled 兑现。 */
+  function buildWithReceipts(speech: { synthesize: (input: { signal: AbortSignal }) => Promise<{ audioUrl: string; audioId: string } | null> }) {
     const plays: PlayCapture[] = [];
-    const gates: Array<() => void> = [];
+    const receipts = new Map<string, Set<'audio' | 'animation'>>();
     const module: PlaybackModule = {
       registerRenderer: () => {},
       unregisterRenderer: () => {},
@@ -333,14 +335,18 @@ describe('冷场取消边界(WT-P2-013)', () => {
       play: (input) => {
         plays.push({ performance: input.performance, signal: input.signal });
         return new Promise<{ performanceId: string; status: 'ended' | 'cancelled' }>((resolve) => {
-          gates.push(() => resolve({ performanceId: input.performance.id, status: 'ended' }));
-          input.signal.addEventListener('abort', () => resolve({ performanceId: input.performance.id, status: 'cancelled' }), { once: true });
+          const timer = setTimeout(() => resolve({ performanceId: input.performance.id, status: 'ended' }), 5);
+          input.signal.addEventListener('abort', () => {
+            clearTimeout(timer);
+            resolve({ performanceId: input.performance.id, status: 'cancelled' });
+          }, { once: true });
         });
       },
       stop: () => {},
       tick: () => {},
       view: () => ({ status: 'idle', performanceId: null, action: null }),
       renderersView: () => ({ count: 0, primaryRendererId: null, leaseHolderRendererId: null, leaseExpiresAt: null }),
+      trackStarted: (performanceId, track) => receipts.get(performanceId)?.has(track) ?? false,
       onChange: () => () => {},
     };
     const interaction = createInteraction({
@@ -348,87 +354,68 @@ describe('冷场取消边界(WT-P2-013)', () => {
       characters: fakeCharacters(),
       playback: module,
       replyProvider: { generate: async () => ({ say: '话题:测试', action: null, provider: 'deepseek' }) },
-      speechProvider: { synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) },
+      speechProvider: speech,
       persona,
       giftRules,
       greetings,
       logger: silentLogger,
       now: () => t,
     });
-    return { interaction, plays, gates };
+    return { interaction, plays, receipts };
   }
 
-  it('生成中的冷场可被观众互动取消:旧话题不播出,下一条互动立即派发', async () => {
+  it('等待播放端/预加载(无任何 started 回执):真实互动让位冷场', async () => {
     t = 0;
-    const playback = fakePlayback();
-    let callCount = 0;
-    const generate = vi.fn((input: { signal: AbortSignal }) => {
-      callCount += 1;
-      if (callCount === 1) return new Promise<{ say: string; action: null }>((_, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
-      return Promise.resolve({ say: '正常回复', action: null, provider: 'deepseek' });
-    });
-    const interaction = createInteraction({
-      settings, characters: fakeCharacters(), playback: playback.module,
-      replyProvider: { generate } as unknown as ReplyProvider,
-      speechProvider: { synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) },
-      persona, giftRules, greetings, logger: silentLogger, now: () => t,
-    });
+    const { interaction, plays } = buildWithReceipts({ synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) });
     t += 5_100;
-    interaction.tick(); // 冷场卡在 generating(生成替身不返回)
+    interaction.tick();
     await settle();
-    expect(playback.plays.length).toBe(0);
+    const coldPid = plays[0]?.performance.id ?? '';
     interaction.enqueue(event('chat', '观众'));
     await settle();
-    expect(playback.plays.length).toBe(1);
-    expect(playback.plays[0]?.performance.say).toContain('正常回复');
+    expect(plays[1]?.performance.sourceEventId).toContain('chat');
     expect(interaction.state().queue.drops.some((d) => d.reason === 'cold-superseded')).toBe(false);
   });
 
-  it('合成中的冷场可被大航海取消,高档答谢随后正常入队派发', async () => {
+  it('有音频:动画 started 但音频未 started(动画先行/预加载)仍可让位', async () => {
     t = 0;
-    const playback = fakePlayback();
-    let synthCount = 0;
-    const speech = {
-      synthesize: (input: { signal: AbortSignal }) => {
-        synthCount += 1;
-        if (synthCount === 1) return new Promise<{ audioUrl: string; audioId: string }>((_, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
-        return Promise.resolve({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' });
-      },
-    };
-    const interaction = createInteraction({
-      settings, characters: fakeCharacters(), playback: playback.module,
-      replyProvider: { generate: async () => ({ say: '生成内容', action: null }) },
-      speechProvider: speech as unknown as SpeechProvider,
-      persona, giftRules, greetings, logger: silentLogger, now: () => t,
-    });
+    const { interaction, plays, receipts } = buildWithReceipts({ synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) });
     t += 5_100;
-    interaction.tick(); // 冷场卡在 synthesizing
+    interaction.tick();
     await settle();
-    expect(playback.plays.length).toBe(0);
-    interaction.enqueue(guardEvent('舰长甲'));
-    interaction.tick(); // 守卫分支依赖心跳,测试中手动驱动
+    const coldPid = plays[0]?.performance.id ?? '';
+    receipts.set(coldPid, new Set(['animation']));
+    interaction.enqueue(event('chat', '观众'));
     await settle();
-    expect(playback.plays.length).toBe(1);
-    expect(playback.plays[0]?.performance.action).toBe('stamp-letter');
-    expect(playback.plays[0]?.performance.priority).toBe(80);
+    expect(plays[1]?.performance.sourceEventId).toContain('chat');
   });
 
-  it('等待播放(已开口)的冷场不取消:播完后下一条互动正常派发', async () => {
+  it('有音频:音频 started(已确认开口)不让位,冷场播完后续互动派发', async () => {
     t = 0;
-    const { interaction, plays, gates } = buildGated();
+    const { interaction, plays, receipts } = buildWithReceipts({ synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) });
     t += 5_100;
-    interaction.tick(); // 冷场进入 waiting-playback(播放被门控挂起)
+    interaction.tick();
     await settle();
-    expect(plays.length).toBe(1);
-    interaction.enqueue(event('chat', '观众')); // 已开口:不取消,排队等待
-    expect(interaction.state().current).not.toBeNull();
-    gates[0]?.(); // 冷场播完
+    const coldPid = plays[0]?.performance.id ?? '';
+    receipts.set(coldPid, new Set(['audio']));
+    interaction.enqueue(event('chat', '观众'));
     await settle();
-    expect(plays.length).toBe(2); // 观众互动随后正常派发
+    expect(plays[0]?.performance.say).toContain('话题:');
     expect(plays[1]?.performance.sourceEventId).toContain('chat');
-    expect(plays[0]?.performance.sourceEventId).not.toBe(plays[1]?.performance.sourceEventId);
-    gates[1]?.();
+  });
+
+  it('无声冷场:动画 started(视觉开始)即已开口,不让位', async () => {
+    t = 0;
+    const { interaction, plays, receipts } = buildWithReceipts({ synthesize: async () => null });
+    t += 5_100;
+    interaction.tick(); // 无声冷场(TTS 降无声)
     await settle();
+    const coldPid = plays[0]?.performance.id ?? '';
+    receipts.set(coldPid, new Set(['animation']));
+    interaction.enqueue(event('chat', '观众'));
+    await settle();
+    expect(plays[0]?.performance.say).toContain('话题:');
+    expect(plays[1]?.performance.sourceEventId).toContain('chat');
   });
 });
 

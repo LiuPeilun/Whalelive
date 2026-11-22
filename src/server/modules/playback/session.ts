@@ -216,5 +216,13 @@ export function createSessionManager(deps: SessionDeps) {
     return current?.performance.id ?? null;
   }
 
-  return { start, report, stop, rendererLost, leaseLost, status, currentPerformanceId };
+  /** 查询当前表演的轨道是否已收到 started 回执(WT-P2-013:冷场"已开口"边界依据);
+   *  非当前表演或未收到回执一律 false。 */
+  function trackStarted(performanceId: string, track: 'audio' | 'animation'): boolean {
+    if (!current || current.performance.id !== performanceId) return false;
+    const state = track === 'audio' ? current.audio : current.animation;
+    return state === 'started';
+  }
+
+  return { start, report, stop, rendererLost, leaseLost, status, currentPerformanceId, trackStarted };
 }

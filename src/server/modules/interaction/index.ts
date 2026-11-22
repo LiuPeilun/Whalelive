@@ -98,6 +98,8 @@ type CurrentTask = {
   provider: string;
   /** 冷场话题任务(WT-P2-013):尚未开口时可被真实互动取消。 */
   cold: boolean;
+  /** 表演是否带音频(WT-P2-013 复审:已开口边界按音频/动画回执区分)。 */
+  hasAudio: boolean;
 };
 
 /** 派生 signal:父任务中止传导给提供方调用;超时只取消调用本身,不杀任务。 */
@@ -215,11 +217,45 @@ export function createInteraction(deps: {
   }
 
   /**
+   * 当前冷场任务是否可让位(WT-P2-013 复审):生成/合成中一律可取消;
+   * waiting-playback 覆盖派发/预加载/动画先行,是否"已开口"依**同一表演的回执**判断——
+   * 带音频的表演以音频轨道 started 为已开口,无声表演以动画 started(视觉开始)为已开口。
+   */
+  function coldCurrentCancellable(): boolean {
+    if (current === null || !current.cold) return false;
+    if (current.stage === 'generating' || current.stage === 'synthesizing') return true;
+    if (current.stage === 'waiting-playback' && current.performanceId !== null) {
+      const opened = current.hasAudio
+        ? playback.trackStarted(current.performanceId, 'audio')
+        : playback.trackStarted(current.performanceId, 'animation');
+      return !opened;
+    }
+    return false;
+  }
+
+  /** 取消当前冷场任务:abort + 置空 current,既有版本校验拦截迟到结果;阶段统计与 cancelled 状态照常入账。 */
+  function cancelColdCurrent(): void {
+    if (current === null) return;
+    const cancelled = current;
+    cancelled.controller.abort();
+    const endedAt = now();
+    lastMetrics = {
+      eventId: cancelled.eventId,
+      ...stageTimings(cancelled, endedAt),
+      usage: cancelled.usage,
+      provider: cancelled.provider,
+    };
+    history.push({ eventId: cancelled.eventId, performanceId: cancelled.performanceId, status: 'cancelled', at: endedAt });
+    if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
+    logger.info('interaction.cold-cancelled', { eventId: cancelled.eventId, from: 'current', stage: cancelled.stage });
+    current = null;
+    notify();
+    tick();
+  }
+
+  /**
    * 真实互动到达:刷新冷场判定锚点,并取消尚未开口的冷场话题(v1.1 取消规则——
    * 真实互动一到,还没开口的闲聊直接让位)。人工试播不视为观众互动。
-   * 覆盖两处:待播队列条目直接移除;已出队、尚在生成/合成中的当前任务按任务身份取消
-   * (abort + 置空 current,既有版本校验拦截迟到结果,WT-P2-013)。
-   * 已开口(waiting-playback 起,音频已开始)的话题保持播完。
    */
   function bumpActivity(): void {
     lastActivityAt = now();
@@ -228,23 +264,7 @@ export function createInteraction(deps: {
       const removed = queue.removeMany(coldIds, 'cold-superseded');
       if (removed.length > 0) logger.info('interaction.cold-cancelled', { count: removed.length, from: 'queue' });
     }
-    if (current !== null && current.cold && (current.stage === 'generating' || current.stage === 'synthesizing')) {
-      const cancelled = current;
-      cancelled.controller.abort();
-      const endedAt = now();
-      lastMetrics = {
-        eventId: cancelled.eventId,
-        ...stageTimings(cancelled, endedAt),
-        usage: cancelled.usage,
-        provider: cancelled.provider,
-      };
-      history.push({ eventId: cancelled.eventId, performanceId: cancelled.performanceId, status: 'cancelled', at: endedAt });
-      if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
-      logger.info('interaction.cold-cancelled', { eventId: cancelled.eventId, from: 'current', stage: cancelled.stage });
-      current = null;
-      notify();
-      tick();
-    }
+    if (coldCurrentCancellable()) cancelColdCurrent();
   }
 
   function enqueue(event: LiveEvent): EnqueueResult {
@@ -452,6 +472,7 @@ export function createInteraction(deps: {
     current = {
       eventId: item.eventId, performanceId: null, stage: 'generating', say: '', action, since: dequeuedAt, version, controller,
       cold: item.type === 'idle',
+      hasAudio: false,
       timings: {
         enqueuedAt: item.enqueuedAt, dequeuedAt, generationDoneAt: null,
         synthesisStartAt: null, synthesisDoneAt: null, playbackAt: null,
@@ -555,6 +576,7 @@ export function createInteraction(deps: {
     current = {
       ...current,
       performanceId: performance.id, stage: 'waiting-playback', say, action: performance.action,
+      hasAudio: audioUrl !== undefined,
       timings: { ...current.timings, synthesisDoneAt, playbackAt: synthesisDoneAt },
     };
     logger.info('interaction.dispatch', {
