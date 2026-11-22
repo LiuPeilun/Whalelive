@@ -80,7 +80,7 @@ function fakePlayback(): { module: PlaybackModule; plays: PlayCapture[]; results
     tick: () => {},
     view: () => ({ status: 'idle', performanceId: null, action: null }),
     renderersView: () => ({ count: 0, primaryRendererId: null, leaseHolderRendererId: null, leaseExpiresAt: null }),
-    trackStarted: () => false,
+    opened: () => false,
     onChange: () => () => {},
   };
   return { module, plays, results };

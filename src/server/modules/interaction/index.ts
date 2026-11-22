@@ -98,8 +98,6 @@ type CurrentTask = {
   provider: string;
   /** 冷场话题任务(WT-P2-013):尚未开口时可被真实互动取消。 */
   cold: boolean;
-  /** 表演是否带音频(WT-P2-013 复审:已开口边界按音频/动画回执区分)。 */
-  hasAudio: boolean;
 };
 
 /** 派生 signal:父任务中止传导给提供方调用;超时只取消调用本身,不杀任务。 */
@@ -218,17 +216,14 @@ export function createInteraction(deps: {
 
   /**
    * 当前冷场任务是否可让位(WT-P2-013 复审):生成/合成中一律可取消;
-   * waiting-playback 覆盖派发/预加载/动画先行,是否"已开口"依**同一表演的回执**判断——
-   * 带音频的表演以音频轨道 started 为已开口,无声表演以动画 started(视觉开始)为已开口。
+   * waiting-playback 起,"已开口"由播放模块按**实际派发轨道**与回执判定
+   * (opened:音频 started/ended 保留开过口的事实,无声降级按动画边界)。
    */
   function coldCurrentCancellable(): boolean {
     if (current === null || !current.cold) return false;
     if (current.stage === 'generating' || current.stage === 'synthesizing') return true;
     if (current.stage === 'waiting-playback' && current.performanceId !== null) {
-      const opened = current.hasAudio
-        ? playback.trackStarted(current.performanceId, 'audio')
-        : playback.trackStarted(current.performanceId, 'animation');
-      return !opened;
+      return !playback.opened(current.performanceId);
     }
     return false;
   }
@@ -472,7 +467,6 @@ export function createInteraction(deps: {
     current = {
       eventId: item.eventId, performanceId: null, stage: 'generating', say: '', action, since: dequeuedAt, version, controller,
       cold: item.type === 'idle',
-      hasAudio: false,
       timings: {
         enqueuedAt: item.enqueuedAt, dequeuedAt, generationDoneAt: null,
         synthesisStartAt: null, synthesisDoneAt: null, playbackAt: null,
@@ -576,7 +570,6 @@ export function createInteraction(deps: {
     current = {
       ...current,
       performanceId: performance.id, stage: 'waiting-playback', say, action: performance.action,
-      hasAudio: audioUrl !== undefined,
       timings: { ...current.timings, synthesisDoneAt, playbackAt: synthesisDoneAt },
     };
     logger.info('interaction.dispatch', {

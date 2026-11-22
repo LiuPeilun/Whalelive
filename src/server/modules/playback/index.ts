@@ -26,8 +26,8 @@ export type PlaybackModule = {
   tick(): void;
   view(): PlaybackView;
   renderersView(): RenderersView;
-  /** 查询当前表演的轨道是否已收到 started 回执(WT-P2-013:冷场"已开口"边界依据)。 */
-  trackStarted(performanceId: string, track: 'audio' | 'animation'): boolean;
+  /** 该表演是否已开口(WT-P2-013 复审):按实际派发轨道与回执判断,音频终态保留开过口的事实。 */
+  opened(performanceId: string): boolean;
   onChange(cb: () => void): () => void;
 };
 
@@ -212,8 +212,8 @@ export function createPlayback(deps: {
         action: null, // 由状态组装层结合 interaction 填充
       };
     },
-    trackStarted(performanceId, track) {
-      return sessions.trackStarted(performanceId, track);
+    opened(performanceId) {
+      return sessions.opened(performanceId);
     },
     renderersView() {
       const lease = registry.leaseView();

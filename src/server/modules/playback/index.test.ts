@@ -421,3 +421,48 @@ describe('playback 租约失效联动(WT-P0-007)', () => {
     expect(broadcasts).toBeGreaterThan(broadcastsAfterDisconnect);
   });
 });
+
+describe('opened 已开口查询(WT-P2-013 复审)', () => {
+  function makeAudioPerformance(id: string): Performance {
+    return { id, sourceEventId: 'evt-x', priority: 40, say: '', action: 'talk', expiresAt: Number.MAX_SAFE_INTEGER, audioUrl: '/media/audio/x.wav' };
+  }
+
+  it('音频 started→ended 保留开过口的事实:动画仍在播时查询仍为 true(反例 1)', async () => {
+    let t = 0;
+    const sent: WsServerMessage[] = [];
+    const playback = createPlayback({ runId: 'run-open', settings, logger: silentLogger, now: () => t, urlForAsset: () => '/media/audio/x.wav' });
+    playback.registerRenderer('r1', (m) => { sent.push(m); return true; });
+    expect(playback.requestLease('r1').ok).toBe(true);
+    void playback.play({ performance: makeAudioPerformance('pf-a'), asset: { assetId: 'a', loop: false, available: true }, signal: new AbortController().signal });
+    await new Promise((r) => setTimeout(r, 20));
+    const dispatch = dispatchedActions(sent).at(-1)!;
+    expect(dispatch.performanceId).toBe('pf-a');
+    expect(playback.report({ runId: 'run-open', at: t, performanceId: 'pf-a', rendererId: 'r1', leaseId: dispatch.leaseId, track: 'animation', status: 'started' }, 'r1')).toBe('accepted');
+    expect(playback.report({ runId: 'run-open', at: t, performanceId: 'pf-a', rendererId: 'r1', leaseId: dispatch.leaseId, track: 'audio', status: 'started' }, 'r1')).toBe('accepted');
+    expect(playback.opened('pf-a')).toBe(true);
+    // 音频自然结束、动画仍在播:开过口的事实保留
+    expect(playback.report({ runId: 'run-open', at: t, performanceId: 'pf-a', rendererId: 'r1', leaseId: dispatch.leaseId, track: 'audio', status: 'ended' }, 'r1')).toBe('accepted');
+    expect(playback.opened('pf-a')).toBe(true);
+    // 表演结算后查询回 false
+    expect(playback.report({ runId: 'run-open', at: t, performanceId: 'pf-a', rendererId: 'r1', leaseId: dispatch.leaseId, track: 'animation', status: 'ended' }, 'r1')).toBe('accepted');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(playback.opened('pf-a')).toBe(false);
+  });
+
+  it('无租约降级为无声后按动画回执判断;动画未 started 时可让位(反例 2)', async () => {
+    let t = 0;
+    const sent: WsServerMessage[] = [];
+    const playback = createPlayback({ runId: 'run-open2', settings, logger: silentLogger, now: () => t, urlForAsset: () => '/media/audio/x.wav' });
+    // 登记播放端但不领取租约:音频降级为无声
+    playback.registerRenderer('r1', (m) => { sent.push(m); return true; });
+    void playback.play({ performance: makeAudioPerformance('pf-b'), asset: { assetId: 'a', loop: false, available: true }, signal: new AbortController().signal });
+    t += 3_100; // 越过无租约宽限期
+    await new Promise((r) => setTimeout(r, 700)); // 等待降级派发轮询
+    const views = dispatchedActions(sent).filter((v) => v.performanceId === 'pf-b');
+    expect(views.length).toBe(1);
+    expect(views[0]!.audioUrl).toBeUndefined(); // 实际派发为无声
+    expect(playback.opened('pf-b')).toBe(false); // 动画未 started:可让位
+    expect(playback.report({ runId: 'run-open2', at: t, performanceId: 'pf-b', rendererId: 'r1', leaseId: views[0]!.leaseId, track: 'animation', status: 'started' }, 'r1')).toBe('accepted');
+    expect(playback.opened('pf-b')).toBe(true); // 动画已开始:已开口
+  });
+});

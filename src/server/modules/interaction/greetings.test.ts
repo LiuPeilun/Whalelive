@@ -80,7 +80,7 @@ function fakePlayback(): { module: PlaybackModule; plays: PlayCapture[] } {
     tick: () => {},
     view: () => ({ status: 'idle', performanceId: null, action: null }),
     renderersView: () => ({ count: 0, primaryRendererId: null, leaseHolderRendererId: null, leaseExpiresAt: null }),
-    trackStarted: () => false,
+    opened: () => false,
     onChange: () => () => {},
   };
   return { module, plays };
@@ -320,11 +320,14 @@ describe('冷场话题内容来源(WT-P2-016)', () => {
   });
 });
 
-describe('冷场取消边界(WT-P2-013 复审:按同一表演的回执区分预加载与已开口)', () => {
-  /** 回执可编程的播放替身:receipts 记录"已 started"的轨道,abort 使 play 以 cancelled 兑现。 */
-  function buildWithReceipts(speech: { synthesize: (input: { signal: AbortSignal }) => Promise<{ audioUrl: string; audioId: string } | null> }) {
+describe('冷场取消边界(WT-P2-013 复审:已开口由播放模块按实际派发轨道判定)', () => {
+  /** 播放替身:play 挂起直到 abort(以 cancelled 兑现)或测试调用 finisher(以 ended 兑现);
+   *  opened 由测试注入;outcomes 记录兑现方式,用于区分真正的取消与自然完成。 */
+  function buildWithOpened() {
     const plays: PlayCapture[] = [];
-    const receipts = new Map<string, Set<'audio' | 'animation'>>();
+    const outcomes: Array<'ended' | 'cancelled'> = [];
+    const finishers: Array<() => void> = [];
+    let openedImpl: (performanceId: string) => boolean = () => false;
     const module: PlaybackModule = {
       registerRenderer: () => {},
       unregisterRenderer: () => {},
@@ -335,9 +338,12 @@ describe('冷场取消边界(WT-P2-013 复审:按同一表演的回执区分预�
       play: (input) => {
         plays.push({ performance: input.performance, signal: input.signal });
         return new Promise<{ performanceId: string; status: 'ended' | 'cancelled' }>((resolve) => {
-          const timer = setTimeout(() => resolve({ performanceId: input.performance.id, status: 'ended' }), 5);
+          finishers.push(() => {
+            outcomes.push('ended');
+            resolve({ performanceId: input.performance.id, status: 'ended' });
+          });
           input.signal.addEventListener('abort', () => {
-            clearTimeout(timer);
+            outcomes.push('cancelled');
             resolve({ performanceId: input.performance.id, status: 'cancelled' });
           }, { once: true });
         });
@@ -346,7 +352,7 @@ describe('冷场取消边界(WT-P2-013 复审:按同一表演的回执区分预�
       tick: () => {},
       view: () => ({ status: 'idle', performanceId: null, action: null }),
       renderersView: () => ({ count: 0, primaryRendererId: null, leaseHolderRendererId: null, leaseExpiresAt: null }),
-      trackStarted: (performanceId, track) => receipts.get(performanceId)?.has(track) ?? false,
+      opened: (performanceId) => openedImpl(performanceId),
       onChange: () => () => {},
     };
     const interaction = createInteraction({
@@ -354,67 +360,47 @@ describe('冷场取消边界(WT-P2-013 复审:按同一表演的回执区分预�
       characters: fakeCharacters(),
       playback: module,
       replyProvider: { generate: async () => ({ say: '话题:测试', action: null, provider: 'deepseek' }) },
-      speechProvider: speech,
+      speechProvider: { synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) },
       persona,
       giftRules,
       greetings,
       logger: silentLogger,
       now: () => t,
     });
-    return { interaction, plays, receipts };
+    return { interaction, plays, outcomes, finishers, setOpened(fn: (performanceId: string) => boolean) { openedImpl = fn; } };
   }
 
-  it('等待播放端/预加载(无任何 started 回执):真实互动让位冷场', async () => {
+  it('预加载/等待播放(未开口):真实互动取消冷场,下一条互动立即派发', async () => {
     t = 0;
-    const { interaction, plays } = buildWithReceipts({ synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) });
+    const { interaction, plays, outcomes, setOpened } = buildWithOpened();
     t += 5_100;
     interaction.tick();
     await settle();
     const coldPid = plays[0]?.performance.id ?? '';
+    setOpened(() => false); // 未开口
+    // 在途确认:新互动到达前,冷场仍是当前任务
+    expect(interaction.state().current?.performanceId).toBe(coldPid);
     interaction.enqueue(event('chat', '观众'));
     await settle();
+    expect(outcomes[0]).toBe('cancelled'); // 真正取消,而非自然完成
     expect(plays[1]?.performance.sourceEventId).toContain('chat');
-    expect(interaction.state().queue.drops.some((d) => d.reason === 'cold-superseded')).toBe(false);
   });
 
-  it('有音频:动画 started 但音频未 started(动画先行/预加载)仍可让位', async () => {
+  it('已开口(音频 started 后自然 ended):不被打断,冷场自然完成后再派发互动', async () => {
     t = 0;
-    const { interaction, plays, receipts } = buildWithReceipts({ synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) });
+    const { interaction, plays, outcomes, finishers, setOpened } = buildWithOpened();
     t += 5_100;
     interaction.tick();
     await settle();
     const coldPid = plays[0]?.performance.id ?? '';
-    receipts.set(coldPid, new Set(['animation']));
+    setOpened(() => true); // 音频已开口(started→ended 保留开过口的事实)
     interaction.enqueue(event('chat', '观众'));
     await settle();
-    expect(plays[1]?.performance.sourceEventId).toContain('chat');
-  });
-
-  it('有音频:音频 started(已确认开口)不让位,冷场播完后续互动派发', async () => {
-    t = 0;
-    const { interaction, plays, receipts } = buildWithReceipts({ synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) });
-    t += 5_100;
-    interaction.tick();
+    expect(interaction.state().current?.performanceId).toBe(coldPid); // 冷场未被取消
+    expect(outcomes[0]).toBeUndefined(); // 仍在途,未被取消
+    finishers[0]?.(); // 冷场自然完成
     await settle();
-    const coldPid = plays[0]?.performance.id ?? '';
-    receipts.set(coldPid, new Set(['audio']));
-    interaction.enqueue(event('chat', '观众'));
-    await settle();
-    expect(plays[0]?.performance.say).toContain('话题:');
-    expect(plays[1]?.performance.sourceEventId).toContain('chat');
-  });
-
-  it('无声冷场:动画 started(视觉开始)即已开口,不让位', async () => {
-    t = 0;
-    const { interaction, plays, receipts } = buildWithReceipts({ synthesize: async () => null });
-    t += 5_100;
-    interaction.tick(); // 无声冷场(TTS 降无声)
-    await settle();
-    const coldPid = plays[0]?.performance.id ?? '';
-    receipts.set(coldPid, new Set(['animation']));
-    interaction.enqueue(event('chat', '观众'));
-    await settle();
-    expect(plays[0]?.performance.say).toContain('话题:');
+    expect(outcomes[0]).toBe('ended');
     expect(plays[1]?.performance.sourceEventId).toContain('chat');
   });
 });

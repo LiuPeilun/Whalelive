@@ -216,13 +216,15 @@ export function createSessionManager(deps: SessionDeps) {
     return current?.performance.id ?? null;
   }
 
-  /** 查询当前表演的轨道是否已收到 started 回执(WT-P2-013:冷场"已开口"边界依据);
-   *  非当前表演或未收到回执一律 false。 */
-  function trackStarted(performanceId: string, track: 'audio' | 'animation'): boolean {
+  /** 该表演是否已开口(WT-P2-013 复审):依据**实际派发的轨道**——
+   *  音频轨道存在时按音频回执,无声降级(无音频轨道)时按动画回执;
+   *  started 与 ended 都算"开过口"(保留开始事实直到表演结算),未开始/failed 不算。
+   *  非当前表演一律 false。 */
+  function opened(performanceId: string): boolean {
     if (!current || current.performance.id !== performanceId) return false;
-    const state = track === 'audio' ? current.audio : current.animation;
-    return state === 'started';
+    const trackState = current.audio !== null ? current.audio : current.animation;
+    return trackState === 'started' || trackState === 'ended';
   }
 
-  return { start, report, stop, rendererLost, leaseLost, status, currentPerformanceId, trackStarted };
+  return { start, report, stop, rendererLost, leaseLost, status, currentPerformanceId, opened };
 }
