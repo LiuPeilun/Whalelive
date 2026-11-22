@@ -73,6 +73,7 @@ function fakePlayback(): { module: PlaybackModule; plays: Array<{ performance: P
     tick: () => {},
     view: () => ({ status: 'idle', performanceId: null, action: null }),
     renderersView: () => ({ count: 0, primaryRendererId: null, leaseHolderRendererId: null, leaseExpiresAt: null }),
+    opened: () => false,
     onChange: () => () => {},
   };
   return { module, plays };

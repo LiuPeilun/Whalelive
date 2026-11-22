@@ -26,6 +26,8 @@ export type PlaybackModule = {
   tick(): void;
   view(): PlaybackView;
   renderersView(): RenderersView;
+  /** 该表演是否已开口(WT-P2-013 复审):按实际派发轨道与回执判断,音频终态保留开过口的事实。 */
+  opened(performanceId: string): boolean;
   onChange(cb: () => void): () => void;
 };
 
@@ -209,6 +211,9 @@ export function createPlayback(deps: {
         performanceId: sessions.currentPerformanceId(),
         action: null, // 由状态组装层结合 interaction 填充
       };
+    },
+    opened(performanceId) {
+      return sessions.opened(performanceId);
     },
     renderersView() {
       const lease = registry.leaseView();

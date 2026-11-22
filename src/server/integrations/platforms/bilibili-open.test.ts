@@ -232,7 +232,16 @@ describe('推送消息映射(WT:事件契约)', () => {
     expect(scOld?.text).toBe('你好呀');
   });
 
-  it('进场 → enter:USER_ENTER 实测口径,open_id 标识与 msg_id 去重键(互动第三批)', () => {
+  it('进场 → enter:官方命令 LIVE_ROOM_ENTER(顶层字段,无 msg_id,时间戳去重键)(WT-P2-011)', () => {
+    const e = mapPushMessage('LIVE_OPEN_PLATFORM_LIVE_ROOM_ENTER', {
+      uid: 0, open_id: 'enter-official', uname: '官方进场观众', room_id: 1796120001, timestamp: 1700000000,
+    }, 3_000);
+    expect(e?.type).toBe('enter');
+    expect(e?.user).toMatchObject({ id: 'enter-official', name: '官方进场观众' });
+    expect(e?.sourceKey).toBe('enter-enter-official-1700000000');
+  });
+
+  it('进场 → enter:USER_ENTER 旧命令保留(实测口径,open_id 标识与 msg_id 去重键)', () => {
     const e = mapPushMessage('LIVE_OPEN_PLATFORM_USER_ENTER', {
       uid: 0, open_id: 'enter-u', uname: '新观众', room_id: 1796120001, msg_id: 'en-1',
     }, 3_000);
@@ -248,22 +257,10 @@ describe('推送消息映射(WT:事件契约)', () => {
     expect(mapPushMessage('LIVE_OPEN_PLATFORM_LIKE', { uid: 0, like_count: 5 }, 3_000)).toBeNull();
   });
 
-  it('关注/分享 → follow/share:社区口径命令的防御性映射(互动第三批,待真实样本核实)', () => {
-    const follow = mapPushMessage('LIVE_OPEN_PLATFORM_FOLLOW', {
-      room_id: 1796120001,
-      user_info: { uid: 0, open_id: 'follow-u', uname: '新粉' },
-      msg_id: 'fl-1',
-    }, 3_000);
-    expect(follow?.type).toBe('follow');
-    expect(follow?.user).toMatchObject({ id: 'follow-u', name: '新粉' });
-    expect(follow?.sourceKey).toBe('follow-follow-u-fl-1');
-    const share = mapPushMessage('LIVE_OPEN_PLATFORM_SHARE', {
-      uid: 0, open_id: 'share-u', uname: '分享者', msg_id: 'sh-1',
-    }, 3_000);
-    expect(share?.type).toBe('share');
-    expect(share?.user.id).toBe('share-u');
-    // 字段缺失(用户标识不全)返回 null,不产生副作用
-    expect(mapPushMessage('LIVE_OPEN_PLATFORM_FOLLOW', { uid: 0, uname: 'x' }, 3_000)).toBeNull();
+  it('关注/分享:猜测命令未获官方文档与真实样本证实,映射下线返回 null 走诊断(WT-P2-011)', () => {
+    // 核实命令名与字段形状后恢复映射(见 bilibili-open.ts 注释);封包诊断日志记录真实推送
+    expect(mapPushMessage('LIVE_OPEN_PLATFORM_FOLLOW', { user_info: { uid: 0, open_id: 'f', uname: 'x' } }, 3_000)).toBeNull();
+    expect(mapPushMessage('LIVE_OPEN_PLATFORM_SHARE', { uid: 0, open_id: 's', uname: 'x' }, 3_000)).toBeNull();
   });
 
   it('enter/like 缺用户名/未知 cmd 返回 null(不投递,记日志)', () => {

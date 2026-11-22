@@ -233,7 +233,10 @@ export function mapPushMessage(cmd: string, data: Record<string, unknown>, nowMs
         receivedAt: nowMs,
       };
     }
-    // 进场:USER_ENTER 为实测存在的命令(open_id 口径);舰长进场与 GUARD 付费答谢分开。
+    // 进场:官方命令为 LIVE_OPEN_PLATFORM_LIVE_ROOM_ENTER(顶层 uname/open_id/timestamp,
+    // 无 msg_id,WT-P2-011);LIVE_OPEN_PLATFORM_USER_ENTER 为本项目实测存在的旧命令,保留兼容。
+    // 舰长进场与 GUARD 付费答谢分开。
+    case 'LIVE_OPEN_PLATFORM_LIVE_ROOM_ENTER':
     case 'LIVE_OPEN_PLATFORM_USER_ENTER': {
       const user = userOf(data);
       if (!user.ok) return null;
@@ -263,24 +266,10 @@ export function mapPushMessage(cmd: string, data: Record<string, unknown>, nowMs
         receivedAt: nowMs,
       };
     }
-    // 关注/分享:命令名来自社区资料,官方文档未核实——映射保持防御性(字段缺失返回 null
-    // 并记 unmapped 日志);真实推送命中即产生播报,未命中不产生副作用(WT-互动第三批,待真实样本核实)。
-    case 'LIVE_OPEN_PLATFORM_FOLLOW':
-    case 'LIVE_OPEN_PLATFORM_SHARE': {
-      const user = userOf(data);
-      if (!user.ok) return null;
-      const msgId = str(data.msg_id);
-      const type = cmd === 'LIVE_OPEN_PLATFORM_FOLLOW' ? 'follow' : 'share';
-      return {
-        id: `evt-${msgId !== '' ? msgId : randomUUID().slice(0, 8)}`,
-        sourceKey: `${type}-${user.id}-${msgId !== '' ? msgId : `${num(data.timestamp) || nowMs}`}`,
-        source: 'bilibili-open',
-        roomId: roomId || 'open-live',
-        type,
-        user: { id: user.id, name: user.name },
-        receivedAt: nowMs,
-      };
-    }
+    // 关注/分享(WT-P2-011):公开文档未列出对应命令,先前猜测的命令名未获真实样本证实,
+    // 且默认开关已放行播报——按第三批"先核实、后启用"的既定顺序,映射暂时下线改为诊断:
+    // 真实推送落到 default 分支记 unmapped 日志(封包诊断日志同时记录完整 body),
+    // 核实命令名与字段形状后恢复映射(参考 git 历史与本注释)。离线模拟(mock)不受影响。
     default:
       return null;
   }
