@@ -19,8 +19,8 @@
     "enterWindowMs": 10000,
     "maxNamedCount": 3,
     "allRoomIntervalMs": 60000,
-    "coldIdleMs": 60000,
-    "coldIntervalMs": 120000
+    "coldIdleMs": 30000,
+    "coldIntervalMs": 30000
   },
   "playback": {
     "preloadTimeoutMs": 8000,
