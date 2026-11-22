@@ -127,23 +127,109 @@ describe('推送消息映射(WT:事件契约)', () => {
     expect(mapPushMessage('LIVE_OPEN_PLATFORM_DM', { uid: 0, uname: 'x', msg: 'hi', msg_id: 'm-2' }, 1_000)).toBeNull();
   });
 
-  it('礼物 → gift:quantity 取本次新增(gift_num),连击与瓜子单价随行', () => {
+  it('礼物 → gift:官方口径 gift_id 数字、paid/r_price 计价、msg_id 去重键、combo_info 嵌套(WT-P2-004 官方样本回放)', () => {
     const e = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', {
-      uid: 0, open_id: 'gift-user-1', uname: '投喂人', gift_id: '31036', gift_name: '小心心', gift_num: 3,
-      combo_id: 'c-9', combo_num: 9, coin_type: 'gold', price: 100,
+      uid: 0, open_id: 'gift-user-1', uname: '投喂人', room_id: 1796120001,
+      gift_id: 31036, gift_name: '小心心', gift_num: 3,
+      paid: true, price: 12000, r_price: 5000, msg_id: 'msg-g-1',
+      combo_info: { combo_id: 'c-9', combo_num: 9 },
     }, 2_000);
     expect(e?.type).toBe('gift');
-    expect(e?.gift).toMatchObject({ id: '31036', name: '小心心', quantity: 3, comboId: 'c-9', unitPrice: 1, priceUnit: '金瓜子' });
+    // r_price=5000 → 实际价值 5 元(毫元 5000);标价 price=12000 不作实付
+    expect(e?.gift).toMatchObject({ id: '31036', name: '小心心', quantity: 3, comboId: 'c-9', paidMilliYuan: 5000 });
     expect(e?.user.id).toBe('gift-user-1');
+    expect(e?.sourceKey).toBe('gift-gift-user-1-31036-msg-g-1');
   });
 
-  it('大航海与 SC 映射(open_id 口径)', () => {
-    const g = mapPushMessage('LIVE_OPEN_PLATFORM_GUARD_BUY', { uid: 0, open_id: 'guard-u', uname: '舰长甲', room_id: 1796120001 }, 3_000);
-    expect(g?.type).toBe('guard');
-    expect(g?.user.id).toBe('guard-u');
-    const sc = mapPushMessage('LIVE_OPEN_PLATFORM_SUPER_CHAT_MESSAGE', { uid: 0, open_id: 'sc-u', uname: 'SC 甲', message: '你好', sc_id: 55 }, 3_000);
+  it('礼物:官方回放样本(gift_id 数字)不再被 str() 丢弃为 null', () => {
+    const e = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', {
+      uid: 0, open_id: 'u', uname: 'x', gift_id: 31036, gift_name: 'y', gift_num: 1,
+      paid: true, price: 12000, r_price: 5000,
+    }, 1_000);
+    expect(e).not.toBeNull();
+  });
+
+  it('礼物:免费(paid=false)与仅有标价(无 r_price)不计实付,保留普通感谢(WT-P2-004)', () => {
+    const free = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', {
+      uid: 0, open_id: 'u', uname: 'x', gift_id: 31036, gift_name: 'y', gift_num: 1,
+      paid: false, price: 12000, r_price: 5000,
+    }, 1_000);
+    expect(free?.gift?.paidMilliYuan).toBeUndefined();
+    const unknown = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', {
+      uid: 0, open_id: 'u', uname: 'x', gift_id: 1, gift_name: 'y', gift_num: 1,
+      paid: true, price: 12000,
+    }, 1_000);
+    expect(unknown?.gift?.paidMilliYuan).toBeUndefined();
+  });
+
+  it('礼物:同秒不同 msg_id 的推送去重键不同,同 msg_id 重推键相同(幂等)(WT-P2-004)', () => {
+    const base = { uid: 0, open_id: 'u', uname: 'x', gift_id: 31036, gift_name: 'y', gift_num: 1, paid: true, price: 12000, r_price: 5000 };
+    const a = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', { ...base, msg_id: 'm-1' }, 1_000);
+    const b = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', { ...base, msg_id: 'm-2' }, 1_000);
+    expect(a?.sourceKey).not.toBe(b?.sourceKey);
+    const a2 = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', { ...base, msg_id: 'm-1' }, 1_000);
+    expect(a2?.sourceKey).toBe(a?.sourceKey);
+  });
+
+  it('礼物:无 msg_id 时回退连击数+时间戳组合键(兼容旧口径)', () => {
+    const e = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', {
+      uid: 0, open_id: 'u', uname: 'x', gift_id: 1, gift_name: 'y', gift_num: 1,
+      combo_num: 5, timestamp: 123,
+    }, 1_000);
+    expect(e?.sourceKey).toBe('gift-u-1-5-123');
+  });
+
+  it('礼物:盲盒(blind_gift.status=true)的爆出价值不计实付,保留普通感谢(WT-P2-004 复审)', () => {
+    const blind = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', {
+      uid: 0, open_id: 'u', uname: 'x', gift_id: 31169, gift_name: '花香园', gift_num: 1,
+      paid: true, price: 15000, r_price: 15000, blind_gift: { status: true, blind_gift_id: 10086 },
+    }, 1_000);
+    expect(blind?.gift?.paidMilliYuan).toBeUndefined();
+    expect(blind?.gift?.name).toBe('花香园'); // 名称与数量保留,走小额普通感谢
+    // 对照:同价值的普通付费礼物(无 blind_gift)仍正常计价升档
+    const normal = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', {
+      uid: 0, open_id: 'u', uname: 'x', gift_id: 31169, gift_name: '花香园', gift_num: 1,
+      paid: true, price: 15000, r_price: 15000,
+    }, 1_000);
+    expect(normal?.gift?.paidMilliYuan).toBe(15000);
+  });
+
+  it('礼物:无 msg_id 回退键采用嵌套 combo_count,同秒不同连击不撞键(WT-P2-004 复审)', () => {
+    const base = { uid: 0, open_id: 'u', uname: 'x', gift_id: 1, gift_name: 'y', gift_num: 1, timestamp: 123, combo_info: {} as Record<string, unknown> };
+    const first = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', { ...base, combo_info: { combo_id: 'c', combo_count: 1 } }, 1_000);
+    const second = mapPushMessage('LIVE_OPEN_PLATFORM_SEND_GIFT', { ...base, combo_info: { combo_id: 'c', combo_count: 2 } }, 1_000);
+    expect(first?.sourceKey).toBe('gift-u-1-1-123');
+    expect(second?.sourceKey).toBe('gift-u-1-2-123');
+    expect(first?.sourceKey).not.toBe(second?.sourceKey);
+  });
+
+  it('大航海与 SC:官方命令与 user_info 嵌套用户(WT-P2-005),旧命令与顶层字段保留', () => {
+    const guard = mapPushMessage('LIVE_OPEN_PLATFORM_GUARD', {
+      room_id: 1796120001,
+      user_info: { uid: 0, open_id: 'guard-u', uname: '舰长甲' },
+      guard_level: 3, start_time: 111, msg_id: 'gm-1',
+    }, 3_000);
+    expect(guard?.type).toBe('guard');
+    expect(guard?.user).toMatchObject({ id: 'guard-u', name: '舰长甲' });
+    expect(guard?.sourceKey).toBe('guard-guard-u-gm-1');
+
+    const sc = mapPushMessage('LIVE_OPEN_PLATFORM_SUPER_CHAT', {
+      room_id: 1796120001,
+      user_info: { uid: 0, open_id: 'sc-u', uname: 'SC 甲' },
+      message: '你好', message_id: 'sm-1', msg_id: 'sm-1', price: 30, start_time: 222,
+    }, 3_000);
     expect(sc?.type).toBe('superchat');
     expect(sc?.text).toBe('你好');
+    expect(sc?.user.id).toBe('sc-u');
+    expect(sc?.sourceKey).toBe('sc-sc-u-sm-1');
+
+    // 经实际推送存在的旧格式继续可用
+    const guardOld = mapPushMessage('LIVE_OPEN_PLATFORM_GUARD_BUY', { uid: 0, open_id: 'guard-u2', uname: '舰长乙', room_id: 1796120001 }, 3_000);
+    expect(guardOld?.type).toBe('guard');
+    expect(guardOld?.user.id).toBe('guard-u2');
+    const scOld = mapPushMessage('LIVE_OPEN_PLATFORM_SUPER_CHAT_MESSAGE', { uid: 0, open_id: 'sc-u2', uname: 'SC 乙', message: '你好呀', sc_id: 55 }, 3_000);
+    expect(scOld?.type).toBe('superchat');
+    expect(scOld?.text).toBe('你好呀');
   });
 
   it('enter/like/未知 cmd 返回 null(不投递,记日志)', () => {

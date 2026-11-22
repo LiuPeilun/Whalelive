@@ -1,6 +1,7 @@
 // 礼物合并感谢:同一用户同一礼物的连击在固定时间窗内累计,窗口关闭时生成一条合并感谢。
-// P2 互动第二批:同步累计"已确认实付金额"——仅金瓜子(gold)计价;银瓜子/免费/未知价格
-// 金额保持 0 且 paidKnown=false,分层时一律按小额普通感谢处理(v1.1 修正 2)。
+// P2 互动第二批:同步累计"已确认实付金额"——只有事件带 paidMilliYuan(适配器归一后的
+// 实付单价)才计价;免费/实付未确认/未知价格为 undefined,金额保持 0 且 paidKnown=false。
+// WT-P2-004:金额用整数毫元(1000=1 元)累计,避免浮点累加误差(0.1×10 须精确等于 1 元)。
 
 export type GiftEmission = {
   userKey: string;
@@ -8,7 +9,9 @@ export type GiftEmission = {
   giftId: string;
   giftName: string;
   totalQuantity: number;
-  /** 累计已确认实付金额(元);免费/银瓜子/未知价格恒为 0。 */
+  /** 累计已确认实付金额(毫元,1000=1 元,整数);免费/未确认实付/未知价格恒为 0。 */
+  totalPaidMilliYuan: number;
+  /** 累计已确认实付金额(元,由整数毫元换算)。 */
   totalPaidYuan: number;
   /** 是否出现过已确认计价的事件(区分"确实免费"与"价格未知")。 */
   paidKnown: boolean;
@@ -20,19 +23,33 @@ type GiftInput = {
   giftId: string;
   giftName: string;
   quantity: number;
-  /** 计价币种:仅 'gold' 参与实付金额累计。 */
-  coinType?: string | undefined;
-  /** 单价(元)。 */
-  unitPriceYuan?: number | undefined;
+  /** 已确认实付单价(毫元,1000=1 元,整数);免费/实付未确认/未知价格为 undefined。 */
+  paidMilliYuan?: number | undefined;
 };
 
 type Pending = GiftEmission & { firstAt: number; windowEnd: number };
 
-/** 单条增量的实付金额:非金瓜子或无有效单价返回 0。 */
-function paidYuanOf(input: GiftInput): number {
-  if (input.coinType !== 'gold') return 0;
-  const unit = input.unitPriceYuan ?? 0;
-  return unit > 0 ? unit * input.quantity : 0;
+/** 单条增量的实付金额(毫元,整数);无有效单价返回 0。 */
+function paidMilliOf(input: GiftInput): number {
+  const unit = input.paidMilliYuan;
+  if (unit === undefined || unit <= 0) return 0;
+  return unit * input.quantity;
+}
+
+function toEmission(p: {
+  userKey: string; userName: string; giftId: string; giftName: string;
+  totalQuantity: number; totalPaidMilliYuan: number; paidKnown: boolean;
+}): GiftEmission {
+  return {
+    userKey: p.userKey,
+    userName: p.userName,
+    giftId: p.giftId,
+    giftName: p.giftName,
+    totalQuantity: p.totalQuantity,
+    totalPaidMilliYuan: p.totalPaidMilliYuan,
+    totalPaidYuan: p.totalPaidMilliYuan / 1000,
+    paidKnown: p.paidKnown,
+  };
 }
 
 export function createGiftAggregator(opts: { mergeWindowMs(): number; now(): number }) {
@@ -43,8 +60,8 @@ export function createGiftAggregator(opts: { mergeWindowMs(): number; now(): num
   function add(input: GiftInput): void {
     const now = opts.now();
     const key = `${input.userKey}|${input.giftId}`;
-    const paid = paidYuanOf(input);
-    const paidKnown = paid > 0;
+    const paidMilli = paidMilliOf(input);
+    const paidKnown = paidMilli > 0;
     const existing = pending.get(key);
     if (!existing) {
       pending.set(key, {
@@ -53,7 +70,8 @@ export function createGiftAggregator(opts: { mergeWindowMs(): number; now(): num
         giftId: input.giftId,
         giftName: input.giftName,
         totalQuantity: input.quantity,
-        totalPaidYuan: paid,
+        totalPaidMilliYuan: paidMilli,
+        totalPaidYuan: paidMilli / 1000,
         paidKnown,
         firstAt: now,
         windowEnd: now + opts.mergeWindowMs(),
@@ -62,14 +80,15 @@ export function createGiftAggregator(opts: { mergeWindowMs(): number; now(): num
     }
     if (now >= existing.windowEnd) {
       // 旧窗口已关闭:旧累计转入待产出,新礼物开启新窗口(不静默丢弃)。
-      ready.push({ ...existing });
+      ready.push(toEmission(existing));
       pending.set(key, {
         userKey: input.userKey,
         userName: input.userName,
         giftId: input.giftId,
         giftName: input.giftName,
         totalQuantity: input.quantity,
-        totalPaidYuan: paid,
+        totalPaidMilliYuan: paidMilli,
+        totalPaidYuan: paidMilli / 1000,
         paidKnown,
         firstAt: now,
         windowEnd: now + opts.mergeWindowMs(),
@@ -77,7 +96,8 @@ export function createGiftAggregator(opts: { mergeWindowMs(): number; now(): num
       return;
     }
     existing.totalQuantity += input.quantity;
-    existing.totalPaidYuan += paid;
+    existing.totalPaidMilliYuan += paidMilli;
+    existing.totalPaidYuan = existing.totalPaidMilliYuan / 1000;
     existing.paidKnown = existing.paidKnown || paidKnown;
   }
 
@@ -89,15 +109,7 @@ export function createGiftAggregator(opts: { mergeWindowMs(): number; now(): num
     const next = new Map<string, Pending>();
     for (const [key, p] of pending) {
       if (now >= p.windowEnd) {
-        emitted.push({
-          userKey: p.userKey,
-          userName: p.userName,
-          giftId: p.giftId,
-          giftName: p.giftName,
-          totalQuantity: p.totalQuantity,
-          totalPaidYuan: p.totalPaidYuan,
-          paidKnown: p.paidKnown,
-        });
+        emitted.push(toEmission(p));
       } else {
         next.set(key, p);
       }

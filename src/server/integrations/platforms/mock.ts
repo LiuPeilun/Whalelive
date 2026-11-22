@@ -9,7 +9,7 @@ export type MockEventInput = {
   text?: string;
   userName?: string;
   userId?: string;
-  gift?: { id?: string; name?: string; quantity?: number; comboSnapshotTotal?: number };
+  gift?: { id?: string; name?: string; quantity?: number; comboSnapshotTotal?: number; paidYuan?: number };
 };
 
 export function mockEvent(input: MockEventInput, now: () => number, seq: () => number): LiveEvent {
@@ -25,6 +25,11 @@ export function mockEvent(input: MockEventInput, now: () => number, seq: () => n
   };
   if (input.type === 'gift') {
     const quantity = Math.max(1, Math.trunc(input.gift?.quantity ?? 1));
+    // WT-P2-007:模拟入口支持付费案例——paidYuan(元,可小数)归一为整数毫元(1000=1 元)后送入。
+    const paidYuan = input.gift?.paidYuan;
+    const paidMilliYuan = typeof paidYuan === 'number' && Number.isFinite(paidYuan) && paidYuan > 0
+      ? Math.round(paidYuan * 1000)
+      : undefined;
     return {
       ...base,
       type: 'gift',
@@ -32,6 +37,7 @@ export function mockEvent(input: MockEventInput, now: () => number, seq: () => n
         id: input.gift?.id?.trim() || 'mock-gift',
         name: input.gift?.name?.trim() || '小心心',
         quantity,
+        ...(paidMilliYuan !== undefined ? { paidMilliYuan } : {}),
       },
     };
   }

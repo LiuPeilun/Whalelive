@@ -9,8 +9,9 @@ import type { ReplyProvider, SpeechProvider } from './providers.js';
 import { createInteraction } from './index.js';
 import { resolveGiftRules } from './rules.js';
 
-// P2 互动第二批:礼物三档分层答谢、SC/大航海归大额档、调度层高峰降级合并。
-// 金额语义:仅金瓜子(gold)计价;免费/银瓜子/未知价格一律小额(v1.1 修正 2)。
+// P2 互动第二批修复(WT-P2-004~008):礼物三档分层、SC/大航海归大额档、
+// 调度层高峰降级(满载腾位+已合并退出候选)、缺档动作回退旧礼物动作。
+// 金额语义:事件带 paidMilliYuan(整数毫元,1000=1 元)才计价;免费/未确认实付/未知价格一律小额。
 
 const silentLogger: Logger = {
   debug: () => {},
@@ -38,13 +39,16 @@ function settings(): EffectiveSettings {
   };
 }
 
-function fakeCharacters(): CharactersModule {
+function fakeCharacters(withTierActions: boolean = true): CharactersModule {
+  const available = withTierActions
+    ? ['idle', 'talk', 'talk-nod', 'laugh', 'stamp-letter', 'gift', 'celebrate']
+    : ['idle', 'talk', 'gift', 'celebrate']; // WT-P2-008:旧角色包/默认包(8 段,无档位动作)
   const loopActions = ['talk', 'talk-nod'];
   return {
     reload: () => {},
     petId: () => 'main',
     view: () => ({ petId: 'main', name: 'x', licenseName: 'x', actions: [] }),
-    resolveAction: (id: string) => (['idle', 'talk', 'talk-nod', 'laugh', 'stamp-letter'].includes(id) ? { actionId: id, file: `animations/${id}.webm`, loop: loopActions.includes(id), available: true } : null),
+    resolveAction: (id: string) => (available.includes(id) ? { actionId: id, file: `animations/${id}.webm`, loop: loopActions.includes(id), available: true } : null),
     resolveAsset: () => null,
     missingActions: () => [],
   };
@@ -84,7 +88,7 @@ function fakePlayback(): { module: PlaybackModule; plays: PlayCapture[] } {
   return { module, plays };
 }
 
-function giftEvent(opts: { user: string; giftId?: string; giftName?: string; quantity?: number; coinType?: string; unitPrice?: number }): LiveEvent {
+function giftEvent(opts: { user: string; giftId?: string; giftName?: string; quantity?: number; paidMilliYuan?: number }): LiveEvent {
   return {
     id: `evt-${opts.user}-${opts.giftId ?? 'g'}`,
     sourceKey: `sk-${opts.user}-${opts.giftId ?? 'g'}-${t}`,
@@ -96,8 +100,7 @@ function giftEvent(opts: { user: string; giftId?: string; giftName?: string; qua
       id: opts.giftId ?? 'g',
       name: opts.giftName ?? '礼物',
       quantity: opts.quantity ?? 1,
-      ...(opts.coinType !== undefined ? { coinType: opts.coinType } : {}),
-      ...(opts.unitPrice !== undefined ? { unitPrice: opts.unitPrice } : {}),
+      ...(opts.paidMilliYuan !== undefined ? { paidMilliYuan: opts.paidMilliYuan } : {}),
     },
     receivedAt: Date.now(),
   };
@@ -114,13 +117,13 @@ function superchatEvent(user: string): LiveEvent {
 const persona = { name: '大肥鱼', fallbackReplies: ['保底回复'], commandReplies: {} };
 const giftRules = resolveGiftRules({});
 
-function build() {
+function build(withTierActions = true) {
   const playback = fakePlayback();
   const reply: ReplyProvider = { generate: async () => ({ say: '生成的话', action: null }) };
   const speech: SpeechProvider = { synthesize: async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' }) };
   const interaction = createInteraction({
     settings,
-    characters: fakeCharacters(),
+    characters: fakeCharacters(withTierActions),
     playback: playback.module,
     replyProvider: reply,
     speechProvider: speech,
@@ -135,10 +138,10 @@ function build() {
 const settle = () => new Promise((r) => setTimeout(r, 25));
 
 describe('礼物分层答谢入队(P2 第二批)', () => {
-  it('金瓜子 15 元礼物走大额档:stamp-letter、优先级 80、文案含礼物与仪式感(金额占位符见 rules-tier.test)', async () => {
+  it('paidMilliYuan 15000(15 元)礼物走大额档:stamp-letter、优先级 80', async () => {
     t = 0;
     const { interaction, playback } = build();
-    interaction.enqueue(giftEvent({ user: '土豪', giftId: 'rocket', giftName: '火箭', quantity: 1, coinType: 'gold', unitPrice: 15 }));
+    interaction.enqueue(giftEvent({ user: '土豪', giftId: 'rocket', giftName: '火箭', quantity: 1, paidMilliYuan: 15000 }));
     t += 2000;
     interaction.tick();
     await settle();
@@ -147,13 +150,12 @@ describe('礼物分层答谢入队(P2 第二批)', () => {
     expect(p?.priority).toBe(80);
     expect(p?.say).toContain('土豪');
     expect(p?.say).toContain('火箭');
-    expect(p?.say).not.toContain('{');
   });
 
-  it('5 元礼物走中额档:laugh、优先级 66', async () => {
+  it('paidMilliYuan 5000(5 元)礼物走中额档:laugh、优先级 66', async () => {
     t = 0;
     const { interaction, playback } = build();
-    interaction.enqueue(giftEvent({ user: '常客', giftId: 'lida', giftName: '礼花', quantity: 1, coinType: 'gold', unitPrice: 5 }));
+    interaction.enqueue(giftEvent({ user: '常客', giftId: 'lida', giftName: '礼花', quantity: 1, paidMilliYuan: 5000 }));
     t += 2000;
     interaction.tick();
     await settle();
@@ -163,11 +165,11 @@ describe('礼物分层答谢入队(P2 第二批)', () => {
     expect(p?.say).toContain('礼花');
   });
 
-  it('无价格与银瓜子礼物走小额档:talk-nod、优先级 60', async () => {
+  it('免费礼物(paidMilliYuan 缺省)走小额档:talk-nod、优先级 60', async () => {
     t = 0;
     const { interaction, playback } = build();
     interaction.enqueue(giftEvent({ user: '路人甲', giftId: 'free1', giftName: '小心心' }));
-    interaction.enqueue(giftEvent({ user: '路人乙', giftId: 'free2', giftName: '辣条', coinType: 'silver', unitPrice: 0.1 }));
+    interaction.enqueue(giftEvent({ user: '路人乙', giftId: 'free2', giftName: '辣条' }));
     t += 2000;
     interaction.tick();
     await settle();
@@ -178,6 +180,23 @@ describe('礼物分层答谢入队(P2 第二批)', () => {
       expect(play.performance.action).toBe('talk-nod');
       expect(play.performance.priority).toBe(60);
     }
+  });
+
+  it('恰好 1 元(paidMilliYuan 1000)走中额,恰好 10 元(10000)走大额(WT-P2-004 边界)', async () => {
+    t = 0;
+    const { interaction, playback } = build();
+    interaction.enqueue(giftEvent({ user: '甲', giftId: 'a', giftName: '礼物A', quantity: 1, paidMilliYuan: 1000 }));
+    interaction.enqueue(giftEvent({ user: '乙', giftId: 'b', giftName: '礼物B', quantity: 1, paidMilliYuan: 10000 }));
+    t += 2000;
+    interaction.tick();
+    await settle();
+    interaction.tick();
+    await settle();
+    const actions = playback.plays.map((p) => p.performance.action);
+    expect(actions).toContain('laugh');
+    expect(actions).toContain('stamp-letter');
+    const priorities = playback.plays.map((p) => p.performance.priority).sort((a, b) => a - b);
+    expect(priorities).toEqual([66, 80]);
   });
 
   it('SC 与大航海归大额档:stamp-letter,文案复用大额模板', async () => {
@@ -220,7 +239,7 @@ describe('高峰降级合并(P2 第二批)', () => {
     for (const u of ['甲', '乙', '丙', '丁', '戊', '己']) {
       interaction.enqueue(giftEvent({ user: u, giftId: `xinxin-${u}`, giftName: '小心心' }));
     }
-    interaction.enqueue(giftEvent({ user: '土豪', giftId: 'rocket', giftName: '火箭', quantity: 1, coinType: 'gold', unitPrice: 15 }));
+    interaction.enqueue(giftEvent({ user: '土豪', giftId: 'rocket', giftName: '火箭', quantity: 1, paidMilliYuan: 15000 }));
     t += 2000;
     interaction.tick();
     await settle();
@@ -236,7 +255,7 @@ describe('高峰降级合并(P2 第二批)', () => {
     t = 0;
     const { interaction, playback } = build();
     for (const u of ['甲', '乙', '丙', '丁', '戊', '己']) {
-      interaction.enqueue(giftEvent({ user: u, giftId: `lida-${u}`, giftName: '礼花', quantity: 1, coinType: 'gold', unitPrice: 5 }));
+      interaction.enqueue(giftEvent({ user: u, giftId: `lida-${u}`, giftName: '礼花', quantity: 1, paidMilliYuan: 5000 }));
     }
     t += 2000;
     interaction.tick();
@@ -248,5 +267,153 @@ describe('高峰降级合并(P2 第二批)', () => {
       expect(play.performance.say).toContain('礼花');
     }
     expect(interaction.state().queue.drops.some((d) => d.reason === 'peak-merged')).toBe(false);
+  });
+
+  it('满载小额队列不拒收大额:结算后的大额答谢由腾位合并保住(WT-P2-006)', async () => {
+    t = 0;
+    const { interaction } = build();
+    interaction.pause();
+    // 审核回放:暂停派发,同一礼物窗口先加 20 位观众小额,再加 15 元大额
+    for (let i = 0; i < 20; i++) {
+      interaction.enqueue(giftEvent({ user: `观众${i}`, giftId: `g-${i}`, giftName: '小心心' }));
+    }
+    interaction.enqueue(giftEvent({ user: '土豪', giftId: 'rocket', giftName: '火箭', quantity: 1, paidMilliYuan: 15000 }));
+    t += 2000;
+    interaction.tick();
+    const snapshot = interaction.state().queue;
+    // 大额答谢在队列中;小额合并腾位后队列只剩合并句与大额,且无 queue-full 丢弃
+    const largeItem = snapshot.items.find((i) => i.priority === 80);
+    expect(largeItem).toBeDefined();
+    expect(largeItem?.action).toBe('stamp-letter');
+    expect(snapshot.drops.some((d) => d.reason === 'queue-full')).toBe(false);
+    // 已接受事件的 ID 不得出现在丢弃记录(WT-P2-006 复审)
+    const highIds = snapshot.items.filter((i) => i.priority === 80).map((i) => i.eventId);
+    expect(highIds.length).toBeGreaterThan(0);
+    expect(snapshot.drops.some((d) => highIds.includes(d.eventId))).toBe(false);
+    expect(snapshot.items.filter((i) => i.type === 'gift').length).toBe(2);
+    interaction.resume();
+  });
+
+  it('满载结算中的小额洪峰不挤掉先到的大航海/醒目留言(WT-P2-006)', async () => {
+    t = 0;
+    const { interaction } = build();
+    interaction.pause();
+    // 大航海与 SC 先到达并入队;随后同窗口的 20 条小额结算洪峰涌入
+    interaction.enqueue(guardEvent('舰长丙'));
+    interaction.enqueue(superchatEvent('SC丁'));
+    for (let i = 0; i < 20; i++) {
+      interaction.enqueue(giftEvent({ user: `观众${i}`, giftId: `g-${i}`, giftName: '小心心' }));
+    }
+    t += 2000;
+    interaction.tick();
+    const snapshot = interaction.state().queue;
+    expect(snapshot.items.some((i) => i.type === 'guard')).toBe(true);
+    expect(snapshot.items.some((i) => i.type === 'superchat')).toBe(true);
+    expect(snapshot.drops.some((d) => d.reason === 'queue-full')).toBe(false);
+    interaction.resume();
+  });
+
+  it('二次合并保留已合并人名:已合并条目退出候选,不用「朋友」抹掉原点名(WT-P2-006)', async () => {
+    t = 0;
+    const { interaction } = build();
+    interaction.pause();
+    for (const u of ['甲', '乙', '丙', '丁', '戊', '己']) {
+      interaction.enqueue(giftEvent({ user: u, giftId: `x1-${u}`, giftName: '小心心' }));
+    }
+    t += 2000;
+    interaction.tick();
+    // 第一批合并结果在队列,原点名完整
+    const first = interaction.state().queue.items.find((i) => i.type === 'gift');
+    expect(first?.say).toContain('甲、乙、丙、丁、戊 等朋友');
+    // 乙组 5 人:候选不足阈值,不发生合并
+    for (const u of ['乙1', '乙2', '乙3', '乙4', '乙5']) {
+      interaction.enqueue(giftEvent({ user: u, giftId: `x2-${u}`, giftName: '小心心' }));
+    }
+    t += 2000;
+    interaction.tick();
+    expect(interaction.state().queue.items.filter((i) => i.type === 'gift').length).toBe(6);
+    // 第 6 人到达:第二批小额合并,第一批合并条目原点名保持不变
+    interaction.enqueue(giftEvent({ user: '庚', giftId: 'x2-庚', giftName: '小心心' }));
+    t += 2000;
+    interaction.tick();
+    const gifts = interaction.state().queue.items.filter((i) => i.type === 'gift');
+    expect(gifts.length).toBe(2);
+    const says = gifts.map((i) => i.say).join('|');
+    expect(says).toContain('甲、乙、丙、丁、戊 等朋友');
+    expect(says).toContain('乙1、乙2、乙3、乙4、乙5 等朋友');
+    expect(says).not.toContain('朋友、乙1');
+    interaction.resume();
+  });
+
+  it('持续高峰:满队列含已合并条目时,大额/大航海/醒目留言仍能分别进入队列(WT-P2-006 复审)', async () => {
+    t = 0;
+    const { interaction } = build();
+    interaction.pause();
+    // 审核回放:16 批 × 6 位观众,每批结算合并为 1 条;第 16 批仅 5 人入队到满载,
+    // 队列为 15 条合并条目 + 5 条普通小额 = 20 满
+    for (let batch = 0; batch < 16; batch++) {
+      for (let i = 0; i < 6; i++) {
+        interaction.enqueue(giftEvent({ user: `b${batch}u${i}`, giftId: `g-${batch}-${i}`, giftName: '小心心' }));
+      }
+      t += 2000;
+      interaction.tick();
+    }
+    const afterBatches = interaction.state().queue;
+    expect(afterBatches.length).toBe(20);
+    expect(afterBatches.items.filter((i) => i.type === 'gift' && i.say.includes('等朋友')).length).toBe(15);
+    // 三种高档答谢相继到达:合并候选不足阈值,各自取代一条普通小额让位,均入队且被取代者有记录
+    interaction.enqueue(guardEvent('舰长戊'));
+    interaction.enqueue(superchatEvent('SC己'));
+    interaction.enqueue(giftEvent({ user: '土豪', giftId: 'rocket', giftName: '火箭', quantity: 1, paidMilliYuan: 15000 }));
+    t += 2000;
+    interaction.tick();
+    const snapshot = interaction.state().queue;
+    expect(snapshot.items.some((i) => i.type === 'guard')).toBe(true);
+    expect(snapshot.items.some((i) => i.type === 'superchat')).toBe(true);
+    expect(snapshot.items.filter((i) => i.priority === 80).length).toBe(3);
+    expect(snapshot.drops.filter((d) => d.reason === 'displaced-for-high-tier').length).toBe(3);
+    // 已接受的高档事件 ID 不得出现在丢弃记录——只允许三条被取代小额的 displaced 记录(WT-P2-006 复审)
+    const highIds = snapshot.items.filter((i) => i.priority === 80).map((i) => i.eventId);
+    expect(snapshot.drops.some((d) => highIds.includes(d.eventId))).toBe(false);
+    // 两批点名的既有行为保持:最早的合并条目原点名仍在
+    const firstMerged = snapshot.items.find((i) => i.type === 'gift' && i.say.includes('等朋友'));
+    expect(firstMerged?.say).toContain('b0u0、b0u1、b0u2、b0u3、b0u4');
+    interaction.resume();
+  });
+});
+
+describe('缺档动作回退(WT-P2-008)', () => {
+  it('旧角色包(无档位动作):小额回退 gift 动作,大额/SC 回退 celebrate,不出现没动画的答谢', async () => {
+    t = 0;
+    const { interaction, playback } = build(false);
+    interaction.enqueue(giftEvent({ user: '路人', giftId: 'f1', giftName: '小心心' }));
+    interaction.enqueue(giftEvent({ user: '土豪', giftId: 'rocket', giftName: '火箭', quantity: 1, paidMilliYuan: 15000 }));
+    interaction.enqueue(guardEvent('舰长丁'));
+    t += 2000;
+    interaction.tick();
+    await settle();
+    interaction.tick();
+    await settle();
+    interaction.tick();
+    await settle();
+    expect(playback.plays.length).toBe(3);
+    const actions = playback.plays.map((p) => p.performance.action);
+    expect(actions.filter((a) => a === 'gift').length).toBe(1); // 小额 → 旧 gift 动作
+    expect(actions.filter((a) => a === 'celebrate').length).toBe(2); // 大额礼物+大航海 → 旧 celebrate 动作
+  });
+
+  it('正式角色包档位动作仍优先:小额 talk-nod、大额 stamp-letter', async () => {
+    t = 0;
+    const { interaction, playback } = build(true);
+    interaction.enqueue(giftEvent({ user: '路人', giftId: 'f1', giftName: '小心心' }));
+    interaction.enqueue(giftEvent({ user: '土豪', giftId: 'rocket', giftName: '火箭', quantity: 1, paidMilliYuan: 15000 }));
+    t += 2000;
+    interaction.tick();
+    await settle();
+    interaction.tick();
+    await settle();
+    const actions = playback.plays.map((p) => p.performance.action);
+    expect(actions).toContain('talk-nod');
+    expect(actions).toContain('stamp-letter');
   });
 });

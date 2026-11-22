@@ -22,6 +22,8 @@ export type QueueItem = {
   giftTier?: 'small' | 'mid' | 'large';
   /** 礼物观众显示名(内部字段,供高峰合并取人名)。 */
   userName?: string;
+  /** 高峰合并产物(内部字段):退出后续合并候选,原点名不参与再次合并(WT-P2-006)。 */
+  merged?: boolean;
 };
 
 export type DropRecord = { eventId: string; reason: string; at: number };
@@ -83,7 +85,8 @@ export function createQueue(opts: { capacity: number; now(): number }) {
         items.splice(victimIndex, 1);
         recordDrop(victim.eventId, 'capacity-evict-chat');
       } else {
-        recordDrop(item.eventId, 'queue-full');
+        // queue-full 不在此处记录(WT-P2-006 复审):腾位/合并调用方可能重试成功,
+        // 最终拒收由调用方经 recordReject 记入丢弃视图,避免"已入队却显示已丢弃"的误报。
         return { ok: false, reason: 'queue-full' };
       }
     }

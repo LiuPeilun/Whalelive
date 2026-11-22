@@ -195,6 +195,71 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
   check('礼物事件被接收进入合并窗口', first.status === 200 && first.body.ingest === 'accepted', JSON.stringify(first.body));
 }
 
+// 7b. 付费礼物经同一 HTTP 入口进入大额档(WT-P2-010 终版口径):
+//     检查在自建的完全离线实例上执行——PLATFORM=mock + 清空外部凭据(不触发真实平台启动,
+//     即使 .env.local 配置了开放平台)+ 独立临时数据目录(不吃日常配置/阈值/角色包,凭据自有);
+//     未就绪(端口碰撞等)即终止本次检查并清理子进程,绝不向占用端口的既有服务发送任何请求。
+//     目标服务(含日常 3210)全程不被触碰,操作者的暂停/紧急停止不受影响。
+{
+  const os = await import('node:os');
+  const fixture = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'whaletalk-tier-'));
+  const dataDir = path.join(fixture, 'data');
+  const tierPort = 32700 + Math.floor(Math.random() * 300);
+  const { startTestServer, stopTestServer } = await import('./lib/test-server.mjs');
+  let started = null;
+  let healthy = false;
+  try {
+    started = await startTestServer({
+      port: tierPort,
+      extraEnv: {
+        WHALETALK_DATA_DIR: dataDir,
+        PLATFORM: 'mock',
+        DEEPSEEK_API_KEY: '',
+        DEEPSEEK_BASE_URL: '',
+        BILIBILI_OPEN_APP_ID: '',
+        BILIBILI_OPEN_CODE: '',
+      },
+    });
+    healthy = await started.waitHealthy();
+    check('档位检查离线实例就绪', healthy === true, healthy ? `port=${tierPort}` : `port=${tierPort} 未就绪(端口碰撞等),本次检查终止且未向该端口发送任何请求`);
+    if (healthy) {
+      // 自有凭据:离线实例在临时数据目录生成 access.json
+      const tierAccess = JSON.parse(fs.readFileSync(path.join(dataDir, 'access.json'), 'utf8'));
+      const tierAuth = { authorization: `Bearer ${tierAccess.control}` };
+      const tierBase = `http://127.0.0.1:${tierPort}`;
+      await fetch(`${tierBase}/api/control/pause`, { method: 'POST', headers: tierAuth });
+      const paid = await fetch(`${tierBase}/api/mock/events`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...tierAuth },
+        body: JSON.stringify({ type: 'gift', userId: 'smoke-paid-15', userName: '冒烟付费观众十五元', gift: { id: 'rocket', name: '火箭', quantity: 1, paidYuan: 15 } }),
+      });
+      const paidBody = await paid.json().catch(() => null);
+      check('付费礼物事件被接收', paid.status === 200 && paidBody?.ingest === 'accepted', JSON.stringify(paidBody));
+      const deadline = Date.now() + 5000;
+      let tiered = false;
+      let detail = '超时未见优先级 80 条目';
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        const state = await (await fetch(`${tierBase}/api/state`, { headers: tierAuth })).json();
+        // 状态视图提供 sayPreview(前 30 字符);唯一昵称位于答谢文案开头,足以精确定位
+        const hit = (state?.queue?.items ?? []).find((i) => i.priority === 80 && typeof i.sayPreview === 'string' && i.sayPreview.includes('冒烟付费观众十五元'));
+        if (hit) {
+          tiered = true;
+          detail = JSON.stringify({ priority: hit.priority, sayPreview: hit.sayPreview });
+          break;
+        }
+      }
+      check('付费礼物进入大额答谢档(优先级 80,以唯一文案定位)', tiered, detail);
+    }
+  } finally {
+    // 只清理自建实例与临时目录;目标服务的暂停/队列状态不受本检查影响
+    if (started !== null) {
+      try { stopTestServer(tierPort); } catch (err) { console.log(`WARN 离线实例清理失败 port=${tierPort}: ${String(err.message ?? err)}`); }
+    }
+    try { fs.rmSync(fixture, { recursive: true, force: true, maxRetries: 5 }); } catch { /* 临时目录 */ }
+  }
+}
+
 // 8. 媒体:HEAD 与 Range(素材缺失时返回 ASSET_MISSING/404,有素材时在启动后复测)
 {
   const head = await fetch(`${base}/media/pets/main/animations/idle.webm`, { method: 'HEAD' });
