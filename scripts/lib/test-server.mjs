@@ -226,10 +226,13 @@ export async function startTestServer(opts) {
     logFd = fs.openSync(logFile, 'w');
     const redactor = createRedactingWriter(logFd, opts.extraSecrets ?? []);
     // --- spawn 单进程服务 ---
+    // opts.extraEnv:调用方可覆盖子进程环境(WT-P2-010 复审:冒烟档位检查用
+    // PLATFORM=mock、独立 WHALETALK_DATA_DIR、清空外部凭据,确保实例完全离线
+    // 且不继承日常直播配置);未提供时与既有行为一致(继承调用环境)。
     child = spawn(process.execPath, ['--import', 'tsx', entryPath()], {
       cwd: root,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, PORT: String(opts.port) },
+      env: { ...process.env, ...(opts.extraEnv ?? {}), PORT: String(opts.port) },
     });
     child.stdout.on('data', (d) => redactor.push(d));
     child.stderr.on('data', (d) => redactor.push(d));
