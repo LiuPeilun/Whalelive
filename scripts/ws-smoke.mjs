@@ -195,29 +195,38 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
   check('礼物事件被接收进入合并窗口', first.status === 200 && first.body.ingest === 'accepted', JSON.stringify(first.body));
 }
 
-// 7b. 付费礼物经同一 HTTP 入口进入大额档(WT-P2-010 口径):
-//     仅当服务原本未暂停时才短暂暂停派发,检查结束必恢复(不再调用紧急停止清队,
-//     既有待播任务保留);以唯一昵称的答谢文案 + 优先级 80 定位队列条目,
-//     不依赖角色包档位动作与出队时序。
+// 7b. 付费礼物经同一 HTTP 入口进入大额档(WT-P2-010 终版口径):
+//     档位检查在本脚本自建的隔离服务实例上执行(暂停/清队只作用于该实例),
+//     目标服务(含日常 3210)全程不被触碰——操作者在检查期间发出的暂停或紧急停止不受影响。
+//     检查以唯一昵称的答谢文案 + 优先级 80 定位队列条目,不依赖角色包档位动作与出队时序。
 {
-  const before = await http('/api/state', { headers: controlAuth });
-  const priorPaused = before.body?.paused === true;
-  if (!priorPaused) await http('/api/control/pause', { method: 'POST', headers: controlAuth });
+  const tierPort = 32700 + Math.floor(Math.random() * 300);
+  const extraSecrets = Object.values(JSON.parse(fs.readFileSync(path.join(root, 'data', 'access.json'), 'utf8')))
+    .filter((v) => typeof v === 'string' && v.length > 0);
+  const { startTestServer, stopTestServer } = await import('./lib/test-server.mjs');
+  let started = null;
   try {
-    const paid = await http('/api/mock/events', {
+    started = await startTestServer({ port: tierPort, extraSecrets });
+    const healthy = await started.waitHealthy();
+    check('档位检查隔离实例就绪', healthy === true, `port=${tierPort}`);
+    const tierBase = `http://127.0.0.1:${tierPort}`;
+    const tierAuth = { authorization: `Bearer ${access.control}` }; // 隔离实例与目标服务共享数据目录凭据
+    await fetch(`${tierBase}/api/control/pause`, { method: 'POST', headers: tierAuth });
+    const paid = await fetch(`${tierBase}/api/mock/events`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...controlAuth },
+      headers: { 'content-type': 'application/json', ...tierAuth },
       body: JSON.stringify({ type: 'gift', userId: 'smoke-paid-15', userName: '冒烟付费观众十五元', gift: { id: 'rocket', name: '火箭', quantity: 1, paidYuan: 15 } }),
     });
-    check('付费礼物事件被接收', paid.status === 200 && paid.body.ingest === 'accepted', JSON.stringify(paid.body));
+    const paidBody = await paid.json().catch(() => null);
+    check('付费礼物事件被接收', paid.status === 200 && paidBody?.ingest === 'accepted', JSON.stringify(paidBody));
     const deadline = Date.now() + 5000;
     let tiered = false;
     let detail = '超时未见优先级 80 条目';
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 200));
-      const state = await http('/api/state', { headers: controlAuth });
+      const state = await (await fetch(`${tierBase}/api/state`, { headers: tierAuth })).json();
       // 状态视图提供 sayPreview(前 30 字符);唯一昵称位于答谢文案开头,足以精确定位
-      const hit = (state.body?.queue?.items ?? []).find((i) => i.priority === 80 && typeof i.sayPreview === 'string' && i.sayPreview.includes('冒烟付费观众十五元'));
+      const hit = (state?.queue?.items ?? []).find((i) => i.priority === 80 && typeof i.sayPreview === 'string' && i.sayPreview.includes('冒烟付费观众十五元'));
       if (hit) {
         tiered = true;
         detail = JSON.stringify({ priority: hit.priority, sayPreview: hit.sayPreview });
@@ -226,11 +235,11 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
     }
     check('付费礼物进入大额答谢档(优先级 80,以唯一文案定位)', tiered, detail);
   } finally {
-    // 恢复原有运行状态:不再紧急停止,不清队,不取消既有任务
-    if (!priorPaused) await http('/api/control/resume', { method: 'POST', headers: controlAuth });
+    // 只清理自建实例;目标服务的暂停/队列状态不受本检查影响
+    if (started !== null) {
+      try { stopTestServer(tierPort); } catch (err) { console.log(`WARN 隔离实例清理失败 port=${tierPort}: ${String(err.message ?? err)}`); }
+    }
   }
-  const after = await http('/api/state', { headers: controlAuth });
-  check('互动恢复为执行前状态(未滞留暂停)', after.body?.paused === priorPaused, `paused=${after.body?.paused}`);
 }
 
 // 8. 媒体:HEAD 与 Range(素材缺失时返回 ASSET_MISSING/404,有素材时在启动后复测)
