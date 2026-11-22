@@ -195,34 +195,42 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
   check('礼物事件被接收进入合并窗口', first.status === 200 && first.body.ingest === 'accepted', JSON.stringify(first.body));
 }
 
-// 7b. 付费礼物经同一 HTTP 入口进入大额档(WT-P2-009 确定性口径):
-//     先暂停派发,提交唯一昵称的 15 元礼物,以"该昵称的答谢文案 + 优先级 80"定位队列条目——
-//     不依赖角色包档位动作(回退 celebrate 也通过)与出队时序;检查后紧急停止清队。
+// 7b. 付费礼物经同一 HTTP 入口进入大额档(WT-P2-010 口径):
+//     仅当服务原本未暂停时才短暂暂停派发,检查结束必恢复(不再调用紧急停止清队,
+//     既有待播任务保留);以唯一昵称的答谢文案 + 优先级 80 定位队列条目,
+//     不依赖角色包档位动作与出队时序。
 {
-  await http('/api/control/pause', { method: 'POST', headers: controlAuth });
-  const paid = await http('/api/mock/events', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...controlAuth },
-    body: JSON.stringify({ type: 'gift', userId: 'smoke-paid-15', userName: '冒烟付费观众十五元', gift: { id: 'rocket', name: '火箭', quantity: 1, paidYuan: 15 } }),
-  });
-  check('付费礼物事件被接收', paid.status === 200 && paid.body.ingest === 'accepted', JSON.stringify(paid.body));
-  const deadline = Date.now() + 5000;
-  let tiered = false;
-  let detail = '超时未见优先级 80 条目';
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    const state = await http('/api/state', { headers: controlAuth });
-    // 状态视图提供 sayPreview(前 30 字符);唯一昵称位于答谢文案开头,足以精确定位
-    const hit = (state.body?.queue?.items ?? []).find((i) => i.priority === 80 && typeof i.sayPreview === 'string' && i.sayPreview.includes('冒烟付费观众十五元'));
-    if (hit) {
-      tiered = true;
-      detail = JSON.stringify({ priority: hit.priority, sayPreview: hit.sayPreview });
-      break;
+  const before = await http('/api/state', { headers: controlAuth });
+  const priorPaused = before.body?.paused === true;
+  if (!priorPaused) await http('/api/control/pause', { method: 'POST', headers: controlAuth });
+  try {
+    const paid = await http('/api/mock/events', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...controlAuth },
+      body: JSON.stringify({ type: 'gift', userId: 'smoke-paid-15', userName: '冒烟付费观众十五元', gift: { id: 'rocket', name: '火箭', quantity: 1, paidYuan: 15 } }),
+    });
+    check('付费礼物事件被接收', paid.status === 200 && paid.body.ingest === 'accepted', JSON.stringify(paid.body));
+    const deadline = Date.now() + 5000;
+    let tiered = false;
+    let detail = '超时未见优先级 80 条目';
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const state = await http('/api/state', { headers: controlAuth });
+      // 状态视图提供 sayPreview(前 30 字符);唯一昵称位于答谢文案开头,足以精确定位
+      const hit = (state.body?.queue?.items ?? []).find((i) => i.priority === 80 && typeof i.sayPreview === 'string' && i.sayPreview.includes('冒烟付费观众十五元'));
+      if (hit) {
+        tiered = true;
+        detail = JSON.stringify({ priority: hit.priority, sayPreview: hit.sayPreview });
+        break;
+      }
     }
+    check('付费礼物进入大额答谢档(优先级 80,以唯一文案定位)', tiered, detail);
+  } finally {
+    // 恢复原有运行状态:不再紧急停止,不清队,不取消既有任务
+    if (!priorPaused) await http('/api/control/resume', { method: 'POST', headers: controlAuth });
   }
-  check('付费礼物进入大额答谢档(优先级 80,以唯一文案定位)', tiered, detail);
-  // 清理:紧急停止清空队列并暂停;后续检查(媒体/升级/Origin)不依赖互动状态
-  await http('/api/control/stop', { method: 'POST', headers: controlAuth });
+  const after = await http('/api/state', { headers: controlAuth });
+  check('互动恢复为执行前状态(未滞留暂停)', after.body?.paused === priorPaused, `paused=${after.body?.paused}`);
 }
 
 // 8. 媒体:HEAD 与 Range(素材缺失时返回 ASSET_MISSING/404,有素材时在启动后复测)

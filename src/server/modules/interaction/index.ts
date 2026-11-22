@@ -570,8 +570,11 @@ export function createInteraction(deps: {
     const pushed = queue.push(merged);
     if (!pushed.ok) {
       recordReject(merged.eventId, pushed.reason);
-      // 合并结果入队失败(极端容量竞争):原答谢放回,不静默丢感谢。
-      for (const item of removed) queue.push(item);
+      // 合并结果入队失败(极端容量竞争):原答谢放回,不静默丢感谢;放回失败同样记录。
+      for (const item of removed) {
+        const restore = queue.push(item);
+        if (!restore.ok) recordReject(item.eventId, restore.reason);
+      }
       return false;
     }
     logger.info('interaction.gift-peak-merged', { mergedCount: removed.length, names: namesText });

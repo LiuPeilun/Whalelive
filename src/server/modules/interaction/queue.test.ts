@@ -32,7 +32,7 @@ describe('interaction 有界队列', () => {
     expect(drops.every((d) => d.reason === 'capacity-evict-chat')).toBe(true);
   });
 
-  it('全是高优先级时拒绝新条目并记录 queue-full', () => {
+  it('满载拒收不写入丢弃记录;queue-full 由调用方在最终拒收时记录(WT-P2-006 复审)', () => {
     let t = 0;
     const queue = createQueue({ capacity: 2, now: () => t });
     queue.push(makeItem('g-1', 80, 'gift'));
@@ -42,7 +42,9 @@ describe('interaction 有界队列', () => {
     if (!rejected.ok) {
       expect(rejected.reason).toBe('queue-full');
     }
-    expect(queue.dropLog().at(-1)?.reason).toBe('queue-full');
+    // 拒收不再写入队列丢弃记录——腾位重试成功的条目不会残留误报,
+    // 最终拒收由 interaction 层 recordReject 统一记入丢弃视图
+    expect(queue.dropLog().some((d) => d.reason === 'queue-full')).toBe(false);
     expect(queue.length()).toBe(2);
   });
 
