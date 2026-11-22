@@ -15,6 +15,8 @@ type SessionEntry = {
   dispatchedRendererId: string | null;
   animation: TrackState;
   audio: TrackState | null;
+  /** 音频是否曾经到达 started(WT-P2-013 复审:开过口的事实保留到表演结算,后续 failed/ended 不丢)。 */
+  audioEverStarted: boolean;
   failedReason: string | null;
   settled: boolean;
   resolve: (result: PlaybackResult) => void;
@@ -100,6 +102,7 @@ export function createSessionManager(deps: SessionDeps) {
         dispatchedRendererId: null,
         animation: 'pending',
         audio: input.performance.audioUrl ? 'pending' : null,
+        audioEverStarted: false,
         failedReason: null,
         settled: false,
         resolve,
@@ -164,8 +167,13 @@ export function createSessionManager(deps: SessionDeps) {
       const rankOf = (s: TrackState): number => (s === 'pending' ? 0 : s === 'ready' ? 1 : 2);
       const incomingRank = report.status === 'ready' ? 1 : 2;
       if (incomingRank <= rankOf(stateRef)) return 'stale-track';
-      if (track === 'audio') entry.audio = report.status;
-      else entry.animation = report.status;
+      if (track === 'audio') {
+        entry.audio = report.status;
+        // 开过口的事实保留到表演结算:后续 failed/ended 不丢(WT-P2-013 复审)
+        if (report.status === 'started') entry.audioEverStarted = true;
+      } else {
+        entry.animation = report.status;
+      }
       return 'accepted';
     }
     if (report.status === 'ended' || report.status === 'cancelled' || report.status === 'failed') {
@@ -216,14 +224,16 @@ export function createSessionManager(deps: SessionDeps) {
     return current?.performance.id ?? null;
   }
 
-  /** 该表演是否已开口(WT-P2-013 复审):依据**实际派发的轨道**——
-   *  音频轨道存在时按音频回执,无声降级(无音频轨道)时按动画回执;
-   *  started 与 ended 都算"开过口"(保留开始事实直到表演结算),未开始/failed 不算。
-   *  非当前表演一律 false。 */
+  /** 该表演是否已开口(WT-P2-013 复审):依据**实际派发的轨道**与回执历史——
+   *  音频曾经 started(含 started 后又 failed/ended)即已开口,事实保留到表演结算;
+   *  音频未开始:起播前失败/无声降级转为按动画边界(动画 started/ended 即已开口),
+   *  音频仍可起播(pending/ready)时不视为已开口,保留让位行为。非当前表演一律 false。 */
   function opened(performanceId: string): boolean {
     if (!current || current.performance.id !== performanceId) return false;
-    const trackState = current.audio !== null ? current.audio : current.animation;
-    return trackState === 'started' || trackState === 'ended';
+    if (current.audioEverStarted) return true;
+    const animationOpened = current.animation === 'started' || current.animation === 'ended';
+    if (current.audio === null || current.audio === 'failed') return animationOpened;
+    return false; // 音频 pending/ready:仍可起播,保留让位行为
   }
 
   return { start, report, stop, rendererLost, leaseLost, status, currentPerformanceId, opened };

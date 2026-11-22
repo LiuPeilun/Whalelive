@@ -382,6 +382,13 @@ P1 第一批的审核问题（WT-P1-001～014，共十四项，跨 `2026-11-18_1
 - **取消回归用例修正**：删除"播放 Promise 挂起=已开口"的错误假设,改为挂起式播放替身(play 只经 abort/finisher 兑现)——断言前确认冷场仍在途(`current.performanceId` 匹配),用 `outcomes` 区分真正取消(cancelled)与自然完成(ended)。
 - 验证：`npm run check` **238/238**；隔离冒烟 **27/27**。修复沿用分支 `fix/p2-batch3-review-2026-11-22`，[本轮修复记录](reviews/2026-11/2026-11-22_140111-fixes.md)。
 
+**第三轮修复复审（2026-11-22）**。音频自然结束和服务端无租约降级均通过复验。WT-P2-013 仍待修复，播放端音频加载失败、起播被拒或起播后报错时，已开始的冷场仍可能被打断。`npm run check` 通过双端类型检查与 238/238 项测试，`node scripts/e2e-llm.mjs` 通过 21/21，隔离运行 `node scripts/ws-smoke.mjs <port>` 通过 27/27。浏览器音画、OBS 与 B 站真实推送仍待实测。[复审报告](reviews/2026-11/2026-11-22_142456-review.md)
+
+**第四轮修复（2026-11-22，复审 `2026-11-22_142456`）**：013 剩余的音频故障路径修复——
+- **开过口的事实按轨道历史保留**：session 表演条目新增 `audioEverStarted`（音频到达 started 即置位，后续 failed/ended 不丢）；`opened()` 判定改为——`audioEverStarted` → true；音频起播前 failed 转无声 → 按动画边界（动画 started/ended 即已开口）；无声降级（无音频轨道）→ 按动画边界；音频 pending/ready（仍可起播）→ false 保留让位行为。
+- **故障路径回归**（真模块 3 例）：起播前 failed 转无声 + 动画 started → 已开口；音频 started 后 failed → 事实保留恒为已开口；音频 pending + 动画 started → 保留让位。上轮两条反例(音频 ended 保留事实/无声降级按动画)回归保持。
+- 验证：`npm run check` **241/241**；隔离冒烟 **27/27**。修复沿用分支 `fix/p2-batch3-review-2026-11-22`，[本轮修复记录](reviews/2026-11/2026-11-22_142456-fixes.md)。
+
 ## 实施记录模板
 
 每次完成任务后补充以下内容。
