@@ -29,6 +29,7 @@ function settings(): EffectiveSettings {
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
     lease: { ttlMs: 15_000, renewIntervalMs: 5_000, takeoverSafetyMs: 0 },
     tts: { provider: 'fixed-local', voice: 'zh-CN-XiaoxiaoNeural' },
+    singing: { enabled: true, clipStartRatio: 0.4, clipSeconds: 40, targetHz: 310, keyMin: -6, keyMax: 24, indexRate: 0.3, protect: 0.33, rmsMixRate: 0.25, actionId: 'talk' },
     llm: { provider: 'fixed-local' },
     server: { host: '127.0.0.1', port: 3210 },
     platform: 'mock',

@@ -407,6 +407,29 @@ P1 第一批的审核问题（WT-P1-001～014，共十四项，跨 `2026-11-18_1
 
 **下一项可继续任务**：唱歌管线接入批次——在线搜歌源选型与接入、分离/换声/合成流水线服务化、弹幕点歌触发与队列编排、成片用音频轨播放。
 
+**2026-11-24 唱歌原型及音调审查**。据操作者实测说明，独立搜歌、分离、切片、RVC 换声和清唱试听已打通，直播成片已选清唱路线。当前 Git 版本的弹幕点歌及 OBS 链路仍待接入。复验用本机 RVC 的 Python 3.12 导入 PyWORLD 0.3.5，五句晓伊干声的重合成 F0 中位数为 203–208 Hz。真实歌声 `key=0` 和操作者盲听仍待验证。`npm run check` 通过双端类型检查及 241/241 项测试。新审查项 WT-P2-017 记录了旧版自选音色升级后继承 `+20Hz` 的回归。[审查与交叉验证记录](reviews/2026-11/2026-11-24_220419-review.md)
+
+### 2026-11-25 · P3 唱歌管线服务化（点歌弹幕 → 预处理管线 → 清唱播出）
+
+**本次实现的功能**（清唱定稿路线的服务化接入）：
+- **singing 模块**（`src/server/modules/singing/`）：点歌任务生命周期（内存态，重启失效；成片缓存落盘持久）、f0 自适应 key 计算（`keys.ts`，`key = round(12×log2(targetHz/输入f0中位))`，钳制 keyMin/keyMax，单一权威实现）、成片确定性缓存（`cache.ts`，标题规范化 sha1 → `song-<hash12>.mp3` 复用 audioCacheDir 与 `/media/audio` 路由，二次点歌秒出）、子进程管线编排（`pipeline.ts`，四步 spawn：B站取歌 → Demucs 分离 → 测 f0 → RVC 换声；每步独立超时；Windows `taskkill /T` 杀整树）。
+- **Python 步骤脚本**（`scripts/song/steps/`）：`fetch.py`（B站 SSR 搜索+择源+免登录 playurl 下载+ffmpeg 切片）、`separate.py`（whaletalk-song 环境 Demucs，同进程跑保证 kill 生效）、`f0key.py`（pyin 测中位）、`convert.py`（RVC VC 链，cwd=RVC 包目录，key 由 Node 传入）。环境路径仓库相对约定（`.tools/` 下，GETTING_STARTED 摆放约定）。
+- **互动接入**：弹幕 `点歌 <歌名>` 前缀拦截（优先于彩蛋口令），入队即时确认回复（TTS 语音）；成片就绪回调 `enqueueSongReady` 入队 `song` 条目（priority 35，高于问候/进场、低于聊天彩蛋；say 恒空免 TTS；5 分钟有效期；可被更高优先级按既有腾位规则挤出）。紧急停止联动 `singing.cancelAll`。
+- **配置**：`singing` 设置段（enabled/clipStartRatio/clipSeconds/targetHz/keyMin/keyMax/indexRate/protect/rmsMixRate/actionId，schema 校验 + defaults；旧配置缺段取新默认）。
+
+**实测与修复过程**（冒烟三轮驱动出的三个真问题，全部已修）：
+1. fetch.py 的 BV-标题正则多一层转义（`[^"\\\\]` 匹配双反斜杠）→ 0 命中；修正为 `[^"\\]`。
+2. 换声输入 40 秒触发已知的 RVC 长输入崩溃（>24s 崩、8/24s 正常）——`clipSeconds` 默认 40→**24**（与操作者验收的清唱片段同规格；≤20s 分片规则在管线中的落实形态）。
+3. 冒烟数据目录放 `%TEMP%` 时 RVC runtime 写入被杀软拦截（PermissionError，Node 写同目录正常）——冒烟数据目录改项目内 `data/`（已忽略）。
+
+**实际运行命令**：`node scripts/singing-smoke.mjs 3721`（隔离实例+mock 点歌弹幕，真实子进程端到端）。
+
+**检查结果**：`npm run check` 双端类型检查 + **250/250**（新增 9 条：key 公式 2、成片缓存 1、任务生命周期 6——缓存命中/同标题在途复用/成功发布/失败/紧急取消/禁用与空标题拒绝）。端到端冒烟 **8/8**：点歌接受、管线完成、成片落盘（24 秒成片，f0 自适应 key=+7 落带内）、体积合理、二次点歌、缓存命中、双 song 条目入队。
+
+**浏览器 / OBS / B 站实测范围**：mock 链路已实测；**真实播放端（OBS overlay 播 audioUrl+唱歌动作）与 B 站真实弹幕触发待操作者实测**——下次开播发"点歌 篇章 张韶涵 MV"即可复验（首次约 2 分钟，二次秒出）。
+
+**下一项可继续任务**：控制台点歌状态视图（singing jobs 面板）、模型常驻预加载（消除首次冷启动 40-60s）、Demucs GPU 化（torch-directml）、男声歌区语料扩展（WORLD 保共振峰路线，归档中）。
+
 ## 实施记录模板
 
 每次完成任务后补充以下内容。

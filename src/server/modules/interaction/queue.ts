@@ -3,7 +3,7 @@
 // 选“优先级最低、同优先级最旧”的聊天腾位;队内无聊天或优先级不足时拒绝新条目。
 // 缩容时按同一规则淘汰至新上限,淘汰原因 capacity-shrink。
 
-export type QueueItemType = 'chat' | 'gift' | 'guard' | 'superchat' | 'enter' | 'follow' | 'share' | 'manual' | 'idle';
+export type QueueItemType = 'chat' | 'gift' | 'guard' | 'superchat' | 'enter' | 'follow' | 'share' | 'manual' | 'idle' | 'song';
 
 export type QueueItem = {
   eventId: string;
@@ -24,6 +24,8 @@ export type QueueItem = {
   userName?: string;
   /** 高峰合并产物(内部字段):退出后续合并候选,原点名不参与再次合并(WT-P2-006)。 */
   merged?: boolean;
+  /** 唱歌成片地址(仅 type=song):say 恒空,say 外的音频从这里来。 */
+  songAudioUrl?: string;
 };
 
 export type DropRecord = { eventId: string; reason: string; at: number };

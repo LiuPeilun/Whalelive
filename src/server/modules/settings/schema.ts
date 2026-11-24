@@ -94,6 +94,40 @@ export function validateLlm(v: unknown): SettingsValidation {
   return { ok: true };
 }
 
+/** 唱歌管线(P3):点歌预处理参数。 */
+export function validateSinging(v: unknown): SettingsValidation {
+  if (!isRecord(v)) return { ok: false, field: 'singing', reason: '必须是对象' };
+  if (typeof v.enabled !== 'boolean') {
+    return { ok: false, field: 'singing.enabled', reason: '需为布尔' };
+  }
+  const num = (key: string, min: number, max: number): SettingsValidation | null => {
+    const n = v[key];
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < min || n > max) {
+      return { ok: false, field: `singing.${key}`, reason: `需为 ${min}-${max} 的数值` };
+    }
+    return null;
+  };
+  for (const c of [
+    num('clipStartRatio', 0, 0.9),
+    num('clipSeconds', 5, 90),
+    num('targetHz', 100, 600),
+    num('keyMin', -12, 12),
+    num('keyMax', 6, 30),
+    num('indexRate', 0, 1),
+    num('protect', 0, 0.9),
+    num('rmsMixRate', 0, 1),
+  ]) {
+    if (c) return c;
+  }
+  if (typeof v.keyMin !== 'number' || typeof v.keyMax !== 'number' || v.keyMin > v.keyMax) {
+    return { ok: false, field: 'singing.keyMin', reason: 'keyMin 不得大于 keyMax' };
+  }
+  if (typeof v.actionId !== 'string' || v.actionId === '') {
+    return { ok: false, field: 'singing.actionId', reason: '需为非空动作 id' };
+  }
+  return { ok: true };
+}
+
 export function validateUserSettings(v: unknown): SettingsValidation {
   if (!isRecord(v)) return { ok: false, field: 'settings', reason: '必须是对象' };
   if (typeof v.petId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v.petId)) {
@@ -107,6 +141,7 @@ export function validateUserSettings(v: unknown): SettingsValidation {
     validateLease(v.lease),
     validateTts(v.tts),
     validateLlm(v.llm),
+    validateSinging(v.singing),
   ];
   for (const c of checks) if (!c.ok) return c;
   return { ok: true };

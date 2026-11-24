@@ -20,6 +20,7 @@ type DefaultsFile = {
   playback: UserSettings['playback'];
   lease: UserSettings['lease'];
   tts: UserSettings['tts'];
+  singing: UserSettings['singing'];
   llm: UserSettings['llm'];
   auth: { timeoutMs: number };
   generation?: { llmTimeoutMs: number; ttsTimeoutMs: number };
@@ -87,6 +88,8 @@ export function createSettings(deps: { paths: AppPaths; env: Record<string, stri
       playback: { ...defaults.playback, ...user?.playback },
       lease: { ...defaults.lease, ...user?.lease },
       tts: { ...defaults.tts, ...user?.tts },
+      // singing 为 P3 新增段:旧配置缺失时取新默认(无听感连续性问题);显式保存原样生效。
+      singing: user?.singing ? { ...defaults.singing, ...user.singing } : { ...defaults.singing },
       llm: { ...defaults.llm, ...user?.llm },
     };
   }
@@ -109,6 +112,7 @@ export function createSettings(deps: { paths: AppPaths; env: Record<string, stri
       playback: user.playback,
       lease: user.lease,
       tts: user.tts,
+      singing: user.singing,
       llm: user.llm,
       server: { host: envHost || '127.0.0.1', port: envPort ?? 3210 },
       platform: envPlatform || 'mock',

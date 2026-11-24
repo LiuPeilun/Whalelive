@@ -51,6 +51,20 @@ export type LeaseSettings = {
   takeoverSafetyMs: number;
 };
 
+/** 唱歌管线(P3):点歌预处理与换声参数。 */
+export type SingingSettings = {
+  enabled: boolean;
+  clipStartRatio: number;
+  clipSeconds: number;
+  targetHz: number;
+  keyMin: number;
+  keyMax: number;
+  indexRate: number;
+  protect: number;
+  rmsMixRate: number;
+  actionId: string;
+};
+
 /** 语音合成(P1 第二批):提供方选择与 edge-tts 音色(ShortName,如 zh-CN-XiaoxiaoNeural)。 */
 export type TtsSettings = {
   provider: 'fixed-local' | 'edge-tts';
@@ -76,6 +90,7 @@ export type UserSettings = {
   lease: LeaseSettings;
   tts: TtsSettings;
   llm: LlmSettings;
+  singing: SingingSettings;
 };
 
 /** 回复提供方(P1 第三批):fixed-local 为离线罐头回复,deepseek 为真实模型。 */

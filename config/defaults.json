@@ -43,6 +43,18 @@
   "llm": {
     "provider": "fixed-local"
   },
+  "singing": {
+    "enabled": true,
+    "clipStartRatio": 0.4,
+    "clipSeconds": 24,
+    "targetHz": 310,
+    "keyMin": -6,
+    "keyMax": 24,
+    "indexRate": 0.3,
+    "protect": 0.33,
+    "rmsMixRate": 0.25,
+    "actionId": "talk"
+  },
   "generation": {
     "llmTimeoutMs": 8000,
     "ttsTimeoutMs": 10000

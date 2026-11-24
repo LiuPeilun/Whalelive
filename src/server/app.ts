@@ -14,6 +14,7 @@ import { createSettings, type SettingsModule } from './modules/settings/index.js
 import { createCharacters, type CharactersModule } from './modules/characters/index.js';
 import { createEvents } from './modules/events/index.js';
 import { createInteraction, RESERVED_GIFT_ACTIONS, type InteractionModule } from './modules/interaction/index.js';
+import { createSinging } from './modules/singing/index.js';
 import { createPlayback, type PlaybackModule } from './modules/playback/index.js';
 import { mockEvent, type MockEventInput } from './integrations/platforms/mock.js';
 import { createBilibiliOpenClient, type BilibiliOpenHandle } from './integrations/platforms/bilibili-open.js';
@@ -111,7 +112,29 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   const edgeTts = createEdgeTtsSpeech({ cache: audioCache, logger, now, voice: () => effective().tts.voice, pitch: () => effective().tts.pitch ?? '' });
   const speechProvider = createSpeechRouter({ fixed: fixedSpeech, edge: edgeTts, settings: () => effective().tts });
 
-  const interaction = createInteraction({ settings: effective, characters, playback, replyProvider, speechProvider, persona, giftRules: giftRulesCfg, greetings: greetingsCfg, logger, now });
+  const interaction = createInteraction({ settings: effective, characters, playback, replyProvider, speechProvider, persona, giftRules: giftRulesCfg, greetings: greetingsCfg, singing: () => singingModule, logger, now });
+
+  // 唱歌模块(P3):本机工具链路径(仓库相对,GETTING_STARTED 摆放约定);interaction 先建,singing 惰性回接
+  let singingModule: ReturnType<typeof createSinging> | null = null;
+  {
+    const rvcBundle = path.join(paths.projectRoot, '.tools', 'rvc', 'RVC20260718DML');
+    singingModule = createSinging({
+      paths,
+      pipeline: {
+        scriptsDir: path.join(paths.projectRoot, 'scripts', 'song'),
+        runtimePython: path.join(rvcBundle, 'runtime', 'python.exe'),
+        demucsPython: path.join(paths.projectRoot, '.tools', 'conda', 'whaletalk-song', 'python.exe'),
+        ffmpegPath: path.join(rvcBundle, 'ffmpeg.exe'),
+        torchHome: path.join(paths.projectRoot, '.tools', 'torch-home'),
+        rvcBundleDir: rvcBundle,
+        logger,
+      },
+      settings: () => effective().singing,
+      logger,
+      now,
+      onSongReady: (payload) => interaction.enqueueSongReady(payload),
+    });
+  }
 
   // 控制台试听:直接经 edge 适配器(验证真实通道),音色可覆盖;超时对齐 generation.ttsTimeoutMs
   const ttsPreview = async (input: { text: string; voice?: string }): Promise<{ audioUrl: string } | null> => {
@@ -329,6 +352,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   async function close(): Promise<void> {
     clearInterval(ticker);
     interaction.stop();
+    singingModule?.stop();
     edgeTts.close();
     ws.closeAll();
     wss.close();

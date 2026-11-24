@@ -6,6 +6,7 @@ import type { EffectiveSettings } from '../../../shared/settings.js';
 import type { Logger } from '../../infrastructure/logger.js';
 import type { CharactersModule } from '../characters/index.js';
 import type { PlaybackModule } from '../playback/index.js';
+import type { SingingModule, SongReadyPayload } from '../singing/index.js';
 import type { ReplyProvider, SpeechProvider } from './providers.js';
 import { createGiftAggregator } from './gifts.js';
 import { createEnterAggregator } from './enter.js';
@@ -49,6 +50,8 @@ export type InteractionState = {
 export type InteractionModule = {
   enqueue(event: LiveEvent): EnqueueResult;
   manualAction(actionId: string, say?: string): EnqueueResult;
+  /** 唱歌成片就绪(singing 模块回调,app.ts 接线):入队 song 条目。 */
+  enqueueSongReady(payload: SongReadyPayload): void;
   pause(): void;
   resume(): void;
   stop(): void;
@@ -141,6 +144,8 @@ export function createInteraction(deps: {
   persona: PersonaConfig;
   giftRules: ResolvedGiftRules;
   greetings: ResolvedGreetings;
+  /** 唱歌模块(P3):惰性注入(app.ts 组装顺序 interaction 先于 singing)。 */
+  singing?: () => SingingModule | null;
   logger: Logger;
   now(): number;
 }): InteractionModule {
@@ -355,6 +360,11 @@ export function createInteraction(deps: {
       return { accepted: false, eventId, reason: 'user-cooldown' };
     }
     // 指令在入队时即确定(确定性规则);语义弹幕延迟到出队后由回复提供方生成。
+    // 唱歌点歌入口(P3):"点歌 "前缀优先于彩蛋口令与聊天,命中即不进聊天链路。
+    const chatText = event.text ?? '';
+    if (chatText.startsWith('点歌')) {
+      return handleSongRequest(chatText, eventId, userKey);
+    }
     const command = rules.detectCommand(event.text ?? '');
     const item: QueueItem = {
       eventId,
@@ -378,6 +388,73 @@ export function createInteraction(deps: {
     notify();
     tick();
     return { accepted: true, eventId };
+  }
+
+  /** 唱歌点歌(P3):入队确认回复即返回;成片就绪由 singing 回调 enqueueSongReady 再入 song 条目。 */
+  function ackItem(eventId: string, userKey: string, say: string): EnqueueResult {
+    const item: QueueItem = {
+      eventId,
+      type: 'chat',
+      priority: 40,
+      enqueuedAt: now(),
+      expiresAt: now() + deps.settings().queue.chatTtlMs,
+      say,
+      action: 'talk',
+      text: null,
+      isCommand: true,
+      userKey,
+    };
+    const pushed = queue.push(item);
+    if (!pushed.ok) return { accepted: false, eventId, reason: pushed.reason };
+    notify();
+    tick();
+    return { accepted: true, eventId };
+  }
+
+  function handleSongRequest(text: string, eventId: string, userKey: string): EnqueueResult {
+    const singing = deps.singing?.() ?? null;
+    const title = text.replace(/^点歌[\s,:：,]*/, '').trim();
+    const ack = (say: string): EnqueueResult => ackItem(`${eventId}-ack`, userKey, say);
+    if (singing === null) return ack('唱歌功能还没准备好哦~');
+    if (title === '') return ack('想听哪首呀?发「点歌 歌名」试试~');
+    const req = singing.requestSong(title, { eventId });
+    if (!req.ok) {
+      if (req.code === 'disabled') return ack('唱歌功能暂时没开哦~');
+      return ack('想听哪首呀?发「点歌 歌名」试试~');
+    }
+    // 点歌算一次有效互动:冷却锚点与活跃锚点都对齐
+    touchCooldown(userKey);
+    bumpActivity();
+    return ack(req.cached ? `《${title}》这就来~` : `收到~正在准备《${title}》,唱好就送上来~`);
+  }
+
+  /** 成片就绪入队(P3):priority 35 高于问候/进场、低于聊天彩蛋;5 分钟内有效,过时不播。 */
+  function enqueueSongReady(payload: SongReadyPayload): void {
+    const item: QueueItem = {
+      eventId: `${payload.eventId}-song`,
+      type: 'song',
+      priority: 35,
+      enqueuedAt: now(),
+      expiresAt: now() + 5 * 60_000,
+      say: '',
+      action: deps.settings().singing.actionId,
+      text: null,
+      isCommand: true,
+      userKey: null,
+      songAudioUrl: payload.audioUrl,
+    };
+    const pushed = pushWithPeakRelief(item);
+    logger.info('interaction.song-enqueued', {
+      jobId: payload.jobId,
+      title: payload.title,
+      key: payload.key,
+      pushed: pushed.ok,
+      reason: pushed.ok ? '' : pushed.reason,
+    });
+    if (pushed.ok) {
+      notify();
+      tick();
+    }
   }
 
   function manualAction(actionId: string, say = ''): EnqueueResult {
@@ -541,7 +618,8 @@ export function createInteraction(deps: {
     if (current !== null && current.timings.synthesisStartAt === null) {
       current = { ...current, timings: { ...current.timings, synthesisStartAt: now() } };
     }
-    let audioUrl: string | undefined;
+    // 唱歌条目(P3):say 恒空,TTS 分支自动跳过,音频来自预处理成片
+    let audioUrl: string | undefined = item.songAudioUrl;
     if (say !== '' && !controller.signal.aborted) {
       const call = derivedSignal(controller.signal);
       let synth: Awaited<ReturnType<SpeechProvider['synthesize']>> = null;
@@ -840,6 +918,8 @@ export function createInteraction(deps: {
     const cleared = queue.clear('stopped');
     gifts.clear();
     enters.clear();
+    // 唱歌在途任务一并终止(P3):被停止的任务产物不再入队
+    deps.singing?.()?.cancelAll('emergency-stop');
     playback.stop();
     logger.warn('interaction.emergency-stop', { cleared });
     notify();
@@ -885,5 +965,5 @@ export function createInteraction(deps: {
     };
   }
 
-  return { enqueue, manualAction, pause, resume, stop, tick, state, onChange(cb) { listeners.add(cb); return () => listeners.delete(cb); } };
+  return { enqueue, manualAction, enqueueSongReady, pause, resume, stop, tick, state, onChange(cb) { listeners.add(cb); return () => listeners.delete(cb); } };
 }
