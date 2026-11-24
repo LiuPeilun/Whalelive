@@ -9,18 +9,20 @@ import type { AppPaths } from '../../infrastructure/paths.js';
 import type { Logger } from '../../infrastructure/logger.js';
 import type { SingingSettings, SongJobStage, SongJobView, SongRequestResult } from '../../../shared/singing.js';
 import { encodeMp3, PipelineStepError, runPipeline, type PipelineDeps } from './pipeline.js';
-import { createSongCache, type SongCache } from './cache.js';
-import { keyForMedianF0 } from './keys.js';
+import { createSongCache, settingsFingerprint, type SongCache } from './cache.js';
 
 export type SongReadyPayload = {
   jobId: string;
   eventId: string;
   title: string;
-  key: number;
+  /** 管线内实际换声 key;缓存命中时未知为 null(WT-P3-008)。 */
+  key: number | null;
   audioUrl: string;
 };
 
 export type SingingModule = {
+  /** 只读探测缓存命中(不产生副作用)。 */
+  peekCached(title: string): boolean;
   requestSong(title: string, source: { eventId: string }): SongRequestResult;
   job(jobId: string): SongJobView | null;
   jobs(): SongJobView[];
@@ -46,6 +48,7 @@ type JobState = {
 
 const JOB_TTL_MS = 30 * 60_000; // 结束任务保留 30 分钟供状态查询,超时清理
 const MAX_JOBS = 40;
+const MAX_ACTIVE = 2; // 同时跑管线的上限(WT-P3-002):超出直接拒绝,不排队
 
 export function createSinging(deps: {
   paths: AppPaths;
@@ -84,16 +87,24 @@ export function createSinging(deps: {
     };
   }
 
+  // WT-P3-002:只清理已结束任务(活跃任务永不删,否则紧急取消与状态追踪会漏);
+  // 容量上限只对已结束任务生效,最旧优先淘汰。
   function prune(): void {
     const cutoff = now() - JOB_TTL_MS;
+    const ended: JobState[] = [];
     for (const [id, job] of jobs) {
-      const ended = job.stage === 'ready' || job.stage === 'failed';
-      if (ended && job.updatedAt < cutoff) jobs.delete(id);
+      if (job.stage !== 'ready' && job.stage !== 'failed') continue;
+      if (job.updatedAt < cutoff) {
+        jobs.delete(id);
+        continue;
+      }
+      ended.push(job);
     }
-    while (jobs.size > MAX_JOBS) {
-      const oldest = jobs.keys().next().value;
+    ended.sort((a, b) => a.updatedAt - b.updatedAt);
+    while (ended.length > MAX_JOBS) {
+      const oldest = ended.shift();
       if (oldest === undefined) break;
-      jobs.delete(oldest);
+      jobs.delete(oldest.jobId);
     }
   }
 
@@ -119,23 +130,26 @@ export function createSinging(deps: {
       if (controller.signal.aborted || stopped) return;
       touch(job, { chosenTitle: result.chosenTitle });
 
-      // f0 → 自适应 key(单一权威实现:keys.ts)
-      const key = keyForMedianF0(result.medianHz, s.targetHz, s.keyMin, s.keyMax);
+      // key 为管线内基于输入 f0 的实际换声参数(WT-P3-008:不再用输出 f0 二次重算)
+      const key = result.key;
       touch(job, { key, stage: 'converting' });
 
-      // wav → mp3 → 确定性缓存文件(二次点歌秒出)
+      // wav → mp3 → 确定性缓存文件(二次点歌秒出);编码同样可中止(WT-P3-002)
       const audioId = `song-${job.jobId}.mp3`.replace(/[^A-Za-z0-9_.-]/g, '_');
       const outMp3 = path.join(paths.audioCacheDir, audioId);
-      await encodeMp3(pipelineDeps.ffmpegPath, result.wavPath, outMp3);
+      await encodeMp3(pipelineDeps.ffmpegPath, result.wavPath, outMp3, {
+        timeoutMs: 120_000,
+        signal: controller.signal,
+      });
       if (controller.signal.aborted || stopped) return;
 
-      const published = cache.store(fs.readFileSync(outMp3), job.title);
+      const published = cache.store(fs.readFileSync(outMp3), job.title, settingsFingerprint(s));
       fs.rmSync(outMp3, { force: true });
       const url = `/media/audio/${published}`;
       touch(job, { stage: 'ready', audioUrl: url, controller: null });
       logger.info('singing.job-ready', {
         jobId: job.jobId, title: job.title, chosenTitle: result.chosenTitle,
-        medianHz: result.medianHz, key, audioUrl: url,
+        inputMedianHz: result.inputMedianHz, key, audioUrl: url,
       });
       // workDir 清理(中间产物只保留日志结论)
       fs.rmSync(workDir, { recursive: true, force: true });
@@ -150,6 +164,10 @@ export function createSinging(deps: {
   }
 
   return {
+    /** 只读探测:标题是否已有成片缓存(供互动确认语区分"这就来/正在准备")。 */
+    peekCached(title: string): boolean {
+      return cache.lookup(title.trim(), settingsFingerprint(settings())) !== null;
+    },
     requestSong(title, source): SongRequestResult {
       if (!settings().enabled) return { ok: false, code: 'disabled', detail: 'singing disabled' };
       const clean = title.trim();
@@ -162,7 +180,12 @@ export function createSinging(deps: {
           return { ok: true, jobId: job.jobId, cached: false };
         }
       }
-      const cachedId = cache.lookup(clean);
+      // WT-P3-002:并发上限(不同歌名同时点不无限启动管线,争抢 CPU/磁盘)
+      const activeCount = [...jobs.values()].filter((j) => j.stage !== 'ready' && j.stage !== 'failed').length;
+      if (activeCount >= MAX_ACTIVE) {
+        return { ok: false, code: 'busy-limit', detail: 'too many active jobs' };
+      }
+      const cachedId = cache.lookup(clean, settingsFingerprint(settings()));
       const job: JobState = {
         jobId: `song-${randomUUID().slice(0, 8)}`,
         eventId: source.eventId,
@@ -182,8 +205,8 @@ export function createSinging(deps: {
         logger.info('singing.cache-hit', { jobId: job.jobId, title: clean, audioUrl: job.audioUrl });
         deps.onSongReady({
           jobId: job.jobId, eventId: source.eventId, title: clean,
-          // 缓存命中沿用成片生成时的 key 语义:此处无重测,取 0 占位由播放侧透传(成片已是最终音频)
-          key: 0, audioUrl: job.audioUrl!,
+          // WT-P3-008:缓存成片的移调参数未知,标记 null 而非编造数值
+          key: null, audioUrl: job.audioUrl!,
         });
       } else {
         void execute(job);

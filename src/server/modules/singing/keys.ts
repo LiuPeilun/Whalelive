@@ -9,6 +9,9 @@ export function keyForMedianF0(
 ): number {
   if (!Number.isFinite(medianHz) || medianHz <= 0) return 0;
   if (!Number.isFinite(targetHz) || targetHz <= 0) return 0;
+  // WT-P3-006:边界防御取整(schema 已限整数,此处兜底防小数边界的非整数钳位结果)
+  const lo = Math.round(keyMin);
+  const hi = Math.round(keyMax);
   const raw = Math.round(12 * Math.log2(targetHz / medianHz));
-  return Math.min(keyMax, Math.max(keyMin, raw));
+  return Math.min(hi, Math.max(lo, raw));
 }

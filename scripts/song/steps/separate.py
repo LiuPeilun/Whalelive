@@ -6,6 +6,11 @@ TORCH_HOME 由 Node 传入(项目内 .tools/torch-home,写 C 盘用户缓存会�
 """
 import json, os, sys
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')  # Windows 重定向下默认 GBK(WT-P3-009)
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 def log(msg):
     print(msg, file=sys.stderr)
 

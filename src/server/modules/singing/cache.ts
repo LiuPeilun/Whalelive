@@ -10,16 +10,57 @@ export function normalizeTitle(title: string): string {
   return title.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-export function songCacheId(title: string): string {
-  const hash = crypto.createHash('sha1').update(normalizeTitle(title), 'utf8').digest('hex').slice(0, 12);
+/** 影响成片内容的配置指纹(WT-P3-005):任一项变更后旧缓存不再命中,强制重新生成。 */
+export function settingsFingerprint(s: {
+  clipStartRatio: number; clipSeconds: number; targetHz: number;
+  keyMin: number; keyMax: number; indexRate: number; protect: number; rmsMixRate: number;
+}): string {
+  return [
+    s.clipStartRatio, s.clipSeconds, s.targetHz,
+    s.keyMin, s.keyMax, s.indexRate, s.protect, s.rmsMixRate,
+  ].join('|');
+}
+
+const SONG_MAX_FILES = 30;
+
+/** 歌曲成片容量约束(WT-P3-005):超出按最旧淘汰(TTS 音频的淘汰入口不含本类文件)。 */
+function pruneSongs(audioDir: string, keep: string): void {
+  let entries: { name: string; mtime: number }[];
+  try {
+    entries = fs
+      .readdirSync(audioDir)
+      .filter((name) => /^song-[0-9a-f]{12}\.mp3$/.test(name))
+      .map((name) => ({ name, mtime: fs.statSync(path.join(audioDir, name)).mtimeMs }));
+  } catch {
+    return;
+  }
+  const excess = entries.length - SONG_MAX_FILES + 1;
+  if (excess <= 0) return;
+  entries.sort((a, b) => a.mtime - b.mtime);
+  for (const entry of entries.slice(0, excess)) {
+    if (entry.name === keep) continue;
+    try {
+      fs.rmSync(path.join(audioDir, entry.name));
+    } catch {
+      /* 清理失败不影响写入 */
+    }
+  }
+}
+
+export function songCacheId(title: string, fingerprint: string): string {
+  const hash = crypto
+    .createHash('sha1')
+    .update(normalizeTitle(title) + '\n' + fingerprint, 'utf8')
+    .digest('hex')
+    .slice(0, 12);
   return `song-${hash}.mp3`;
 }
 
 export type SongCache = {
   /** 命中返回 audioId(可直接拼 /media/audio/<id>),未命中返回 null。 */
-  lookup(title: string): string | null;
-  /** 成片落盘(原子写),返回 audioId。 */
-  store(mp3: Buffer, title: string): string;
+  lookup(title: string, fingerprint: string): string | null;
+  /** 成片落盘(原子写+容量约束),返回 audioId。 */
+  store(mp3: Buffer, title: string, fingerprint: string): string;
 };
 
 export function createSongCache(deps: { audioDir: string }): SongCache {
@@ -30,8 +71,8 @@ export function createSongCache(deps: { audioDir: string }): SongCache {
     return path.join(audioDir, audioId);
   }
 
-  function lookup(title: string): string | null {
-    const id = songCacheId(title);
+  function lookup(title: string, fingerprint: string): string | null {
+    const id = songCacheId(title, fingerprint);
     try {
       fs.accessSync(filePath(id));
       return id;
@@ -40,8 +81,9 @@ export function createSongCache(deps: { audioDir: string }): SongCache {
     }
   }
 
-  function store(mp3: Buffer, title: string): string {
-    const id = songCacheId(title);
+  function store(mp3: Buffer, title: string, fingerprint: string): string {
+    const id = songCacheId(title, fingerprint);
+    pruneSongs(audioDir, id);
     const target = filePath(id);
     const tmp = `${target}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, mp3);

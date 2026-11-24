@@ -31,4 +31,4 @@ export type SongJobView = {
 
 export type SongRequestResult =
   | { ok: true; jobId: string; cached: boolean }
-  | { ok: false; code: 'disabled' | 'empty-title' | 'busy-title'; detail: string };
+  | { ok: false; code: 'disabled' | 'empty-title' | 'busy-title' | 'busy-limit'; detail: string };

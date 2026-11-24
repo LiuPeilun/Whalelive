@@ -38,7 +38,10 @@ vi.mock('./pipeline.js', () => ({
     const wav = path.join(opts.workDir, 'song-converted.wav');
     fs.mkdirSync(opts.workDir, { recursive: true });
     fs.writeFileSync(wav, Buffer.from('RIFF'));
-    return Promise.resolve({ chosenTitle: `${opts.title} (官方MV)`, medianHz: 310, wavPath: wav });
+    return Promise.resolve({
+      chosenTitle: `${opts.title} (官方MV)`,
+      inputMedianHz: 205, key: 7, outputMedianHz: 303, wavPath: wav,
+    });
   },
   encodeMp3: (_ff: string, wavPath: string, outPath: string) => {
     fs.writeFileSync(outPath, fs.readFileSync(wavPath));
@@ -76,7 +79,7 @@ function makePaths(): AppPaths {
 
 function singingSettings(patch?: Partial<SingingSettings>): SingingSettings {
   return {
-    enabled: true, clipStartRatio: 0.4, clipSeconds: 40, targetHz: 310,
+    enabled: true, clipStartRatio: 0.4, clipSeconds: 24, targetHz: 310,
     keyMin: -6, keyMax: 24, indexRate: 0.3, protect: 0.33, rmsMixRate: 0.25,
     actionId: 'talk', ...patch,
   };
@@ -126,14 +129,22 @@ describe('keyForMedianF0(f0 自适应移调公式)', () => {
 });
 
 describe('songCache(成片缓存)', () => {
-  it('标题规范化后确定性命中;大小写与空白差异同键', () => {
+  it('标题规范化后确定性命中;配置指纹变更后不命中;容量超限淘汰最旧', () => {
     expect(normalizeTitle('  篇章   张韶涵 ')).toBe('篇章 张韶涵');
-    expect(songCacheId('篇章 张韶涵')).toBe(songCacheId('篇章 张韶涵 '));
+    const fp = '0.4|24|310|-6|24|0.3|0.33|0.25';
+    expect(songCacheId('篇章 张韶涵', fp)).toBe(songCacheId('篇章 张韶涵 ', fp));
     const cache = createSongCache({ audioDir: path.join(tmpDir, 'cache-case') });
-    expect(cache.lookup('篇章')).toBeNull();
-    const id = cache.store(Buffer.from('mp3data'), '篇章');
+    expect(cache.lookup('篇章', fp)).toBeNull();
+    const id = cache.store(Buffer.from('mp3data'), '篇章', fp);
     expect(id).toMatch(/^song-[0-9a-f]{12}\.mp3$/);
-    expect(cache.lookup('篇章')).toBe(id);
+    expect(cache.lookup('篇章', fp)).toBe(id);
+    // WT-P3-005:配置(指纹)变更 → 旧成片不再命中
+    expect(cache.lookup('篇章', fp + 'x')).toBeNull();
+    // WT-P3-005:容量上限——写入第 31 首后最旧被淘汰
+    for (let i = 0; i < 31; i++) cache.store(Buffer.from('m' + i), '容量歌' + i, fp);
+    const after = cache.lookup('容量歌0', fp);
+    expect(after).toBeNull();
+    expect(cache.lookup('容量歌30', fp)).not.toBeNull();
   });
 });
 
@@ -142,7 +153,7 @@ describe('singing 任务生命周期', () => {
     const { paths, module, readyPayloads } = makeModule();
     // 预置成片文件
     const cache = createSongCache({ audioDir: paths.audioCacheDir });
-    cache.store(Buffer.from('cached'), '旧歌');
+    cache.store(Buffer.from('cached'), '旧歌', '0.4|24|310|-6|24|0.3|0.33|0.25');
     const req = module.requestSong('旧歌', { eventId: 'evt-1' });
     expect(req).toEqual({ ok: true, jobId: expect.any(String), cached: true });
     const job = module.job((req as { jobId: string }).jobId);
@@ -164,7 +175,7 @@ describe('singing 任务生命周期', () => {
       job = module.job((req as { jobId: string }).jobId);
     }
     expect(job?.stage).toBe('ready');
-    expect(job?.key).toBe(0); // mock medianHz=310 → key=0
+    expect(job?.key).toBe(7); // mock: 输入 205Hz → 管线返回实际 key=7(WT-P3-008)
     expect(job?.chosenTitle).toContain('官方MV');
     expect(job?.audioUrl).toMatch(/^\/media\/audio\//);
     expect(readyPayloads).toHaveLength(1);
@@ -215,5 +226,37 @@ describe('singing 任务生命周期', () => {
     expect(module.requestSong('   ', { eventId: 'e' })).toEqual({
       ok: false, code: 'empty-title', detail: 'empty title',
     });
+  });
+});
+
+describe('WT-P3-002/006 修复回归', () => {
+  it('并发上限:两个在途任务时第三个不同标题被拒 busy-limit', async () => {
+    runCalls.push({ title: 'a', workDir: 'a', resolveWith: 'hang' });
+    const { module } = makeModule();
+    const r1 = module.requestSong('歌一', { eventId: 'e1' });
+    const r2 = module.requestSong('歌二', { eventId: 'e2' });
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+    const r3 = module.requestSong('歌三', { eventId: 'e3' });
+    expect(r3).toEqual({ ok: false, code: 'busy-limit', detail: 'too many active jobs' });
+    // 同标题在途不受影响(仍复用)
+    const again = module.requestSong('歌一', { eventId: 'e4' });
+    expect(again).toEqual({ ok: true, jobId: (r1 as { jobId: string }).jobId, cached: false });
+    // 紧急取消后腾出配额
+    module.cancelAll('test');
+    const r4 = module.requestSong('歌三', { eventId: 'e5' });
+    expect(r4.ok).toBe(true);
+  });
+
+  it('schema:移调边界必须整数,clipSeconds 上限 24', async () => {
+    const { validateSinging } = await import('../settings/schema.js');
+    const base = singingSettings();
+    const badKey = validateSinging({ ...base, keyMin: 6.5 });
+    expect(badKey.ok).toBe(false);
+    if (!badKey.ok) expect(badKey.field).toBe('singing.keyMin');
+    const badClip = validateSinging({ ...base, clipSeconds: 25 });
+    expect(badClip.ok).toBe(false);
+    if (!badClip.ok) expect(badClip.field).toBe('singing.clipSeconds');
+    expect(validateSinging({ ...base, keyMin: -6, keyMax: 24, clipSeconds: 24 }).ok).toBe(true);
   });
 });

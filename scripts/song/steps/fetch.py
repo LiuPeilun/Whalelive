@@ -6,6 +6,11 @@ stdout 最后一行输出 JSON: {chosenTitle, clipPath, durationSec}
 """
 import json, os, re, subprocess, sys, urllib.parse, urllib.request
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')  # Windows 重定向下默认 GBK(WT-P3-009)
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 BUVID = "buvid3=0C3CB04F-B3BA-B3ED-8F20-1EBAF7BB864Cinfoc"  # 任意 buvid3 即可
 
@@ -38,18 +43,17 @@ BAD = ["现场", "饭拍", "翻唱", "reaction", "Reaction", "反应", "教唱",
 GOOD = ["MV", "官方", "原曲", "OST", "主题曲", "音源", "高清", "4K", "完整版"]
 
 def rank(items, keyword):
-    first = keyword.split()[0].lower() if keyword.split() else ""
+    # WT-P3-004:查询词(歌名+歌手)命中优先于任何 GOOD 加分——缺查询词的无关项
+    # 不得凭"官方MV"字样压过精确匹配;BAD 降权防同名错版(现场/翻唱)。
+    words = [w.lower() for w in keyword.split() if w]
     for it in items:
-        score = 0.0
         t = it["title"]
-        if any(b in t for b in BAD):
-            score -= 3
-        if any(g in t for g in GOOD):
-            score += 2
-        if first and first in t.lower():
-            score -= abs(t.lower().find(first)) / 1000.0
-        else:
-            score -= 0.5
+        tl = t.lower()
+        hit = sum(1 for w in words if w in tl)
+        miss = len(words) - hit
+        score = hit * 2.0 - miss * 3.0
+        score -= sum(1 for b in BAD if b in tl) * 3.0
+        score += sum(1 for g in GOOD if g in tl) * 0.5
         it["score"] = score
     return sorted(items, key=lambda x: -x["score"])
 
@@ -77,7 +81,11 @@ def main():
     items = search(title)
     if not items:
         raise RuntimeError("search: no results")
-    best = rank(items, title)[0]
+    ranked = rank(items, title)
+    best = ranked[0]
+    if best["score"] < 1.0:
+        # 需至少命中一个查询词(词命中 +2)且未被 BAD 显著降权;否则宁可不唱不唱错版
+        raise RuntimeError("search: no reliable match for %r (best=%r score=%.1f)" % (title, best["title"][:40], best["score"]))
     log("chosen: %s %s" % (best["bvid"], best["title"][:60]))
 
     raw_path = os.path.join(work_dir, "song.m4s")

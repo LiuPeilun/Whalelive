@@ -7,6 +7,7 @@ import type { CharactersModule } from '../characters/index.js';
 import type { PlaybackModule } from '../playback/index.js';
 import type { ReplyProvider, SpeechProvider } from './providers.js';
 import { createInteraction } from './index.js';
+import type { SingingModule, SongReadyPayload } from '../singing/index.js';
 import { resolveGiftRules, resolveGreetings } from './rules.js';
 
 // P1 第一批:生成移到出队后 —— 指令短路、语义弹幕经回复提供方、
@@ -103,8 +104,9 @@ function chatEvent(text: string, user = 'u1'): LiveEvent {
 const persona = { name: '大肥鱼', fallbackReplies: ['保底回复A', '保底回复B'], commandReplies: { dance: '看好啦!' } };
 const giftRules = resolveGiftRules({ thanksTemplate: '谢谢 {user} 的 {gift} ×{count}!', celebrateText: '{kind}!' });
 
-function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechProvider>; now?: () => number } = {}) {
+function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechProvider>; now?: () => number; singing?: SingingModule | null } = {}) {
   const playback = fakePlayback();
+  const singingRef: SingingModule | null = opts.singing ?? null;
   const reply: ReplyProvider = { generate: opts.reply?.generate ?? (async () => ({ say: '生成的话', action: null })) };
   const speech: SpeechProvider = { synthesize: opts.speech?.synthesize ?? (async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' })) };
   const interaction = createInteraction({
@@ -116,6 +118,7 @@ function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechPr
     persona,
     giftRules,
     greetings: resolveGreetings({}),
+    singing: () => singingRef,
     logger: silentLogger,
     now: opts.now ?? (() => Date.now()),
   });
@@ -306,5 +309,64 @@ describe('interaction 阶段耗时与用量统计(P1 第三批)', () => {
     // 排队 = 出队 - 入队,二者都在入队后很近;生成 500ms 不应计入排队
     expect(last!.queueWaitMs).toBeLessThan(100);
     expect(last!.generationMs).toBe(500);
+  });
+});
+
+// WT-P3-007:点歌确认条目必须先于成片条目(缓存命中时任务同步触发派发)
+describe('唱歌点歌接入(P3)', () => {
+  function fakeSinging(over: Partial<SingingModule> = {}): SingingModule {
+    const events: { title: string; eventId: string }[] = [];
+    return {
+      peekCached: over.peekCached ?? (() => false),
+      requestSong: over.requestSong ?? ((title, source) => {
+        events.push({ title, eventId: source.eventId });
+        return { ok: true, jobId: 'song-x', cached: false };
+      }),
+      job: over.job ?? (() => null),
+      jobs: over.jobs ?? (() => []),
+      cancelAll: over.cancelAll ?? (() => {}),
+      stop: over.stop ?? (() => {}),
+    };
+  }
+
+  it('缓存命中:确认表演(40)先派发,成片表演(35)后派发——不允许先唱后确认', async () => {
+    const { interaction, playback } = build({
+      singing: fakeSinging({
+        peekCached: () => true,
+        requestSong: (title, source) => {
+          // 模拟缓存命中:requestSong 内同步触发成片回调
+          interaction.enqueueSongReady({ jobId: 'song-x', eventId: source.eventId, title, key: null, audioUrl: '/media/audio/song-a.mp3' });
+          return { ok: true, jobId: 'song-x', cached: true };
+        },
+      }),
+    });
+    const result = interaction.enqueue(chatEvent('点歌 篇章'));
+    expect(result.accepted).toBe(true);
+    await settle();
+    expect(playback.plays.length).toBe(2);
+    const p0 = playback.plays[0]!;
+    const p1 = playback.plays[1]!;
+    expect(p0.performance.priority).toBe(40);
+    expect(p0.performance.say).toContain('这就来');
+    expect(p1.performance.priority).toBe(35);
+    expect(p1.performance.audioUrl).toBe('/media/audio/song-a.mp3');
+  });
+
+  it('非缓存点歌:确认派发,任务后台启动,成片暂不派发', async () => {
+    const { interaction, playback } = build({ singing: fakeSinging() });
+    const result = interaction.enqueue(chatEvent('点歌 好歌'));
+    expect(result.accepted).toBe(true);
+    await settle();
+    expect(playback.plays.length).toBe(1);
+    expect(playback.plays[0]!.performance.say).toContain('正在准备');
+  });
+
+  it('未注入 singing 模块时:点歌给提示回复,不崩溃', async () => {
+    const { interaction, playback } = build();
+    const result = interaction.enqueue(chatEvent('点歌 篇章'));
+    expect(result.accepted).toBe(true);
+    await settle();
+    expect(playback.plays.length).toBe(1);
+    expect(playback.plays[0]!.performance.say).toContain('还没准备好');
   });
 });

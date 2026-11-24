@@ -415,17 +415,24 @@ export function createInteraction(deps: {
     const singing = deps.singing?.() ?? null;
     const title = text.replace(/^点歌[\s,:：,]*/, '').trim();
     const ack = (say: string): EnqueueResult => ackItem(`${eventId}-ack`, userKey, say);
+    // 前置校验:确认语在任务启动前确定
     if (singing === null) return ack('唱歌功能还没准备好哦~');
     if (title === '') return ack('想听哪首呀?发「点歌 歌名」试试~');
+    if (!deps.settings().singing.enabled) return ack('唱歌功能暂时没开哦~');
+    const cached = singing.peekCached(title);
+    // WT-P3-007:确认条目必须先于任务启动入队——缓存命中时 requestSong 会同步触发
+    // 成片回调并派发(priority 35),若确认尚未入队就会出现先唱后确认。
+    const ackResult = ack(cached ? `《${title}》这就来~` : `收到~正在准备《${title}》,唱好就送上来~`);
+    if (!ackResult.accepted) return ackResult; // 确认都进不去(满载):不启动后台任务,接单结果=确认结果
     const req = singing.requestSong(title, { eventId });
     if (!req.ok) {
-      if (req.code === 'disabled') return ack('唱歌功能暂时没开哦~');
-      return ack('想听哪首呀?发「点歌 歌名」试试~');
+      logger.warn('interaction.song-request-rejected', { eventId, title, code: req.code, detail: req.detail });
+      return ackResult; // 确认已入队;后台未启动属运行态细节,不打回用户
     }
     // 点歌算一次有效互动:冷却锚点与活跃锚点都对齐
     touchCooldown(userKey);
     bumpActivity();
-    return ack(req.cached ? `《${title}》这就来~` : `收到~正在准备《${title}》,唱好就送上来~`);
+    return ackResult;
   }
 
   /** 成片就绪入队(P3):priority 35 高于问候/进场、低于聊天彩蛋;5 分钟内有效,过时不播。 */

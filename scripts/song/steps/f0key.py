@@ -5,6 +5,11 @@ stdout 最后一行输出 JSON: {medianHz}
 """
 import json, sys
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')  # Windows 重定向下默认 GBK(WT-P3-009)
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 import numpy as np
 
 def log(msg):

@@ -107,12 +107,22 @@ export function validateSinging(v: unknown): SettingsValidation {
     }
     return null;
   };
+  // WT-P3-006:移调边界必须整数(小数会让 Python 端 int() 转换抛错);
+  // clipSeconds 上限对齐后端安全时长(该 RVC 包 >24s 换声输入崩溃)。
+  const numInt = (key: string, min: number, max: number): SettingsValidation | null => {
+    const fail = num(key, min, max);
+    if (fail) return fail;
+    if (!Number.isInteger(v[key])) {
+      return { ok: false, field: `singing.${key}`, reason: '需为整数(半音数)' };
+    }
+    return null;
+  };
   for (const c of [
     num('clipStartRatio', 0, 0.9),
-    num('clipSeconds', 5, 90),
+    num('clipSeconds', 5, 24),
     num('targetHz', 100, 600),
-    num('keyMin', -12, 12),
-    num('keyMax', 6, 30),
+    numInt('keyMin', -12, 12),
+    numInt('keyMax', 6, 30),
     num('indexRate', 0, 1),
     num('protect', 0, 0.9),
     num('rmsMixRate', 0, 1),

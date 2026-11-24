@@ -4,6 +4,7 @@
 
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import type { Logger } from '../../infrastructure/logger.js';
 import type { SingingSettings } from '../../../shared/singing.js';
 import { keyForMedianF0 } from './keys.js';
@@ -21,7 +22,12 @@ export type PipelineDeps = {
 
 export type PipelineResult = {
   chosenTitle: string;
-  medianHz: number;
+  /** 输入人声 f0 中位(key 的计算依据)。 */
+  inputMedianHz: number;
+  /** 实际传给换声的移调半音数(WT-P3-008:上层直接使用,不得用输出 f0 重算)。 */
+  key: number;
+  /** 换声输出 f0 中位(仅诊断参考)。 */
+  outputMedianHz: number;
   wavPath: string;
 };
 
@@ -55,12 +61,17 @@ function runStep(
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
-      env: { ...process.env, ...(opts.env ?? {}) },
+      // WT-P3-009:固定 Python 子进程 IO 编码为 UTF-8(Windows 重定向下默认 GBK 损坏中文)
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', ...(opts.env ?? {}) },
       windowsHide: true,
     });
+    // WT-P3-009:跨数据块解码(多字节字符被 chunk 切开时逐块 toString 会损坏)
+    const decOut = new StringDecoder('utf8');
+    const decErr = new StringDecoder('utf8');
     let stdout = '';
     let stderr = '';
     let settled = false;
+    let killReason: string | null = null; // 非空=已发起 taskkill,等 close 再结算(WT-P3-002)
     const finish = (err: Error | null, out?: string): void => {
       if (settled) return;
       settled = true;
@@ -76,12 +87,12 @@ function runStep(
       spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
     };
     const timer = setTimeout(() => {
+      killReason = `timeout after ${opts.timeoutMs}ms`;
       killTree();
-      finish(new PipelineStepError(step, `timeout after ${opts.timeoutMs}ms`));
     }, opts.timeoutMs);
     const onAbort = (): void => {
+      killReason = 'aborted';
       killTree();
-      finish(new PipelineStepError(step, 'aborted'));
     };
     if (opts.signal.aborted) {
       onAbort();
@@ -89,13 +100,17 @@ function runStep(
     }
     opts.signal.addEventListener('abort', onAbort, { once: true });
     child.stdout.on('data', (d: Buffer) => {
-      stdout += d.toString('utf8');
+      stdout += decOut.write(d);
     });
     child.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString('utf8');
+      stderr += decErr.write(d);
     });
     child.on('error', (err) => finish(err));
     child.on('close', (code) => {
+      if (killReason !== null) {
+        finish(new PipelineStepError(step, killReason));
+        return;
+      }
       if (code === 0) finish(null, stdout);
       else {
         const tail = (stderr || stdout).split('\n').filter((l) => l.trim() !== '').slice(-14).join('\n');
@@ -177,8 +192,8 @@ export async function runPipeline(
     { timeoutMs: 90_000, signal: opts.signal },
     log,
   );
-  const medianHz = num(lastJson(f0Out).medianHz, 'medianHz');
-  const key = keyForMedianF0(medianHz, s.targetHz, s.keyMin, s.keyMax);
+  const inputMedianHz = num(lastJson(f0Out).medianHz, 'medianHz');
+  const key = keyForMedianF0(inputMedianHz, s.targetHz, s.keyMin, s.keyMax);
 
   // [4/4] RVC 换声(key 由参数传入)
   const convOut = await runStep(
@@ -196,13 +211,18 @@ export async function runPipeline(
   );
   const convJson = lastJson(convOut);
   const wavPath = str(convJson.wavPath, 'wavPath');
-  const convMedian = num(convJson.medianHz, 'medianHz');
+  const outputMedianHz = num(convJson.medianHz, 'medianHz');
 
-  return { chosenTitle, medianHz: convMedian > 0 ? convMedian : medianHz, wavPath };
+  return { chosenTitle, inputMedianHz, key, outputMedianHz, wavPath };
 }
 
-/** wav → mp3(成片发布格式)。 */
-export function encodeMp3(ffmpegPath: string, wavPath: string, outMp3Path: string): Promise<void> {
+/** wav → mp3(成片发布格式);支持中止与超时(WT-P3-002:停止后不再遗留临时成片)。 */
+export function encodeMp3(
+  ffmpegPath: string,
+  wavPath: string,
+  outMp3Path: string,
+  opts: { timeoutMs: number; signal: AbortSignal },
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       ffmpegPath,
@@ -210,10 +230,36 @@ export function encodeMp3(ffmpegPath: string, wavPath: string, outMp3Path: strin
       { windowsHide: true },
     );
     let stderr = '';
+    let settled = false;
+    const finish = (err: Error | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      opts.signal.removeEventListener('abort', onAbort);
+      if (err) reject(err);
+      else resolve();
+    };
+    const killTree = (): void => {
+      const pid = child.pid;
+      if (pid !== undefined) spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+    };
+    const timer = setTimeout(() => {
+      killTree();
+      finish(new Error(`encode timeout after ${opts.timeoutMs}ms`));
+    }, opts.timeoutMs);
+    const onAbort = (): void => {
+      killTree();
+      finish(new Error('aborted'));
+    };
+    if (opts.signal.aborted) {
+      onAbort();
+      return;
+    }
+    opts.signal.addEventListener('abort', onAbort, { once: true });
     child.stderr.on('data', (d: Buffer) => {
       stderr += d.toString('utf8');
     });
-    child.on('error', reject);
-    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exit=${code}: ${stderr.slice(-300)}`))));
+    child.on('error', (err) => finish(err));
+    child.on('close', (code) => (code === 0 ? finish(null) : finish(new Error(`ffmpeg exit=${code}: ${stderr.slice(-300)}`))));
   });
 }

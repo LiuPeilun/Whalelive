@@ -259,6 +259,8 @@ export function mountSettingsPanel(context: ControlContext): void {
       llm: {
         provider: llmProviderSelect.value as 'fixed-local' | 'deepseek',
       },
+      // 唱歌管线(P3):本批未提供界面控件,保存时透传当前值避免被丢弃(WT-P3-001)
+      singing: { ...view.user.singing },
     };
     const result = await apiFetch('/api/settings', context.credential, {
       method: 'PUT',

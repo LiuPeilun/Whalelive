@@ -66,7 +66,8 @@ export function createQueue(opts: { capacity: number; now(): number }) {
     let victimIndex = -1;
     for (let i = 0; i < items.length; i++) {
       const candidate = items[i]!;
-      if (candidate.type !== 'chat' && candidate.priority > EVICTABLE_LOW_PRIORITY) continue;
+      // WT-P3-003:song 成片与问候一样属可腾位条目——满队列时高优先级互动(弹幕/高档)不得被堵死
+      if (candidate.type !== 'chat' && candidate.type !== 'song' && candidate.priority > EVICTABLE_LOW_PRIORITY) continue;
       if (victimIndex === -1) {
         victimIndex = i;
         continue;
@@ -93,7 +94,7 @@ export function createQueue(opts: { capacity: number; now(): number }) {
       // 弹幕/高档答谢/人工也可挤出低优先级问候(WT-P2-012)。
       if (victim && item.priority >= victim.priority) {
         items.splice(victimIndex, 1);
-        recordDrop(victim.eventId, victim.type === 'chat' ? 'capacity-evict-chat' : 'capacity-evict-greeting');
+        recordDrop(victim.eventId, victim.type === 'song' ? 'capacity-evict-song' : victim.type === 'chat' ? 'capacity-evict-chat' : 'capacity-evict-greeting');
       } else {
         // queue-full 不在此处记录(WT-P2-006 复审):腾位/合并调用方可能重试成功,
         // 最终拒收由调用方经 recordReject 记入丢弃视图,避免"已入队却显示已丢弃"的误报。

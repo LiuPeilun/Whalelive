@@ -6,6 +6,11 @@ stdout 最后一行输出 JSON: {wavPath, medianHz}
 """
 import glob, json, os, sys
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')  # Windows 重定向下默认 GBK(WT-P3-009)
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 MY_ARGV = sys.argv[1:]
 
 def log(msg):
