@@ -138,7 +138,7 @@ P0 是可观察的原型。P1 完成完整本地输入到直播画面的 MVP。P
 - [ ] 形成一键启动入口和完整操作文档。
 - [ ] 分发构建输出服务端与页面产物，验证从项目外目录启动、配置定位和数据目录沿用。
 - [ ] 按需接入 Live2D / 3D 与口型驱动，或复用 dsh-pet HTTP 作为第二渲染适配器。
-- [ ] 点歌唱歌（RVC 翻唱路线）：搜歌→人声分离→切副歌定 key→换声→缓存；耗时步骤后台执行，期间正常回弹幕、谢礼物，成品用现有音频轨与唱歌循环动作播出。验收为从未处理过的歌曲收到弹幕后能唱出正确版本的几句，测几首不同歌并记录首次耗时与角色音色相似度。（2026-11-21 方案确认，属互动玩法第二批候选）
+- [ ] 点歌唱歌（RVC 翻唱路线）：搜歌→人声分离→切副歌定 key→换声→缓存；耗时步骤后台执行，期间正常回弹幕、谢礼物，成品用现有音频轨与唱歌循环动作播出。验收为从未处理过的歌曲收到弹幕后能唱出正确版本的几句，测几首不同歌并记录首次耗时与角色音色相似度。（2026-11-21 方案确认，属互动玩法第二批候选；**2026-11-24 音色模型训练完成并经操作者试听验收，进入管线接入批次**，见 2026-11-24 实施记录）
 
 ### 验收
 
@@ -390,6 +390,22 @@ P1 第一批的审核问题（WT-P1-001～014，共十四项，跨 `2026-11-18_1
 - 验证：`npm run check` **241/241**；隔离冒烟 **27/27**。修复沿用分支 `fix/p2-batch3-review-2026-11-22`，[本轮修复记录](reviews/2026-11/2026-11-22_142456-fixes.md)。
 
 **第四轮修复复审（2026-11-22）**。提交 `c631d18` 通过代码复审，WT-P2-011～016 全部关闭。专项复验确认音频故障后已开始的冷场会等动画结束再接替，等待起播的冷场仍可让位。`npm run check` 通过双端类型检查与 241/241 项测试，`node scripts/e2e-llm.mjs` 通过 21/21，隔离运行 `node scripts/ws-smoke.mjs <port>` 通过 27/27。浏览器音画、OBS 与 B 站真实推送仍待实测。[复审报告](reviews/2026-11/2026-11-22_143624-review.md)
+
+### 2026-11-23 ~ 11-24 · 唱歌音色模型训练（RVC，昇腾 NPU + 本机换声冒烟）
+
+**本次实现的功能**（RVC 翻唱路线的前置批次：一次性音色模型，之后每首歌只做换声不训练）：
+- **训练语料**：晓伊（zh-CN-XiaoyiNeural，pitch +20Hz，直播间最终音色）TTS 干声 101 句（`scripts/song/corpus-zh.txt` 逐句 edge-tts 合成，产物在 `data/song/corpus/`，data/ 不入库）。RVC 官方完整包 `.tools/rvc/RVC20260718DML/`（自包含 runtime，不入库）。
+- **本地 CPU 试训**：五步管线打通（preprocess 40k → rmvpe f0 → HuBERT 特征 → faiss index → GAN 训练），因速度过慢（数小时级）经操作者确认停止，零存档损失。
+- **昇腾 910B NPU 训练**（隔离 Docker 容器 `rvc-tidepost`，镜像 vllm-ascend:v0.19.1rc1，仅绑 davinci0，`--shm-size 16g`；不动 base 环境与其他运行服务）：断点续训至全量 100 epoch 完成，日志证据 `Training completed; saving the final model`，每轮实测 1 分 54 秒。训练日志中的 EOFError/TBE 报错为 `os._exit` 收尾噪音，spec 缓存 135 个逐一校验 0 损坏。
+- **产物提取**：容器精简工作区缺 `assets/weights/` 导致训练末尾自动提取失败；补目录后在 CPU 直接调用 `extract_small_model` 成功提取 `tidepost.pth`（55.2MB）+ `added_IVF511_Flat_nprobe_1_tidepost_v2.index`（63MB），回传本机 RVC 包对应目录。服务器容器与 `/data/rvc-training/` 数据保留。
+- **本机换声冒烟**：`.tools/rvc/RVC20260718DML/smoke-tidepost.py`（runtime Python，CPU）跨音色验证——以**晓晓**（非训练语料声音）试听音为输入，输出 8.1 秒成片，特征 1.6s / F0 7.8s / 合成 4.5s。脚本要点：包内 configs 在导入时抢解析 argv（需置空）；`VC.get_vc` 需 `weight_root`、pipeline 需 `rmvpe_root` 环境变量；`vc_single` 返回 `(info, (tgt_sr, audio_int16))`；打包的 soundfile 0.14 需 `SoundFile` 对象写盘。
+- **音色验收**：`data/song/auditions/换声冒烟-晓晓输入→晓伊模型.mp3`，操作者试听后确认音色非常满意（2026-11-24）——模型音色与直播间晓伊+20Hz 一致，音色批次验收通过。
+
+**实际运行命令**：冒烟换声 `SMOKE_IN=<输入音频> SMOKE_OUT=<输出wav> .tools/rvc/RVC20260718DML/runtime/python.exe smoke-tidepost.py`（在 RVC 包目录下执行）。
+
+**实测范围**：换声冒烟为本机 CPU 实测（8 秒语料）；**唱歌全链路（在线搜歌→Demucs 人声分离→切副歌→换声→混伴奏→直播播放）尚未实现**——Demucs（conda env whaletalk-song）此前已冒烟通过，搜歌源与管线接入待开发。
+
+**下一项可继续任务**：唱歌管线接入批次——在线搜歌源选型与接入、分离/换声/合成流水线服务化、弹幕点歌触发与队列编排、成片用音频轨播放。
 
 ## 实施记录模板
 
