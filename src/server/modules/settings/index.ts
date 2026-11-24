@@ -87,7 +87,15 @@ export function createSettings(deps: { paths: AppPaths; env: Record<string, stri
       greetings: { ...defaults.greetings, ...user?.greetings },
       playback: { ...defaults.playback, ...user?.playback },
       lease: { ...defaults.lease, ...user?.lease },
-      tts: { ...defaults.tts, ...user?.tts },
+      // WT-P2-017 音调迁移语义:旧版配置(用户显式自选音色、pitch 字段引入前保存,故缺失)
+      // 升级后补空偏移而非新默认值,保持升级前听感;全新安装用新默认组合;
+      // 显式保存的音调(含空串=不调)原样生效。
+      tts: (() => {
+        if (!user?.tts) return { ...defaults.tts };
+        return user.tts.pitch === undefined
+          ? { ...defaults.tts, ...user.tts, pitch: '' }
+          : { ...defaults.tts, ...user.tts };
+      })(),
       // singing 为 P3 新增段:旧配置缺失时取新默认(无听感连续性问题);显式保存原样生效。
       singing: user?.singing ? { ...defaults.singing, ...user.singing } : { ...defaults.singing },
       llm: { ...defaults.llm, ...user?.llm },

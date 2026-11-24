@@ -97,4 +97,51 @@ describe('settings 分层配置与原子保存', () => {
     expect(rejected.ok).toBe(false);
     expect(fs.existsSync(paths.userSettingsFile)).toBe(false);
   });
+
+  // WT-P2-017:默认音调(pitch 为后加字段)不得改变旧版自选音色的听感。
+  function writeLegacySettings(paths: AppPaths, tts: Record<string, string>): void {
+    fs.mkdirSync(path.dirname(paths.userSettingsFile), { recursive: true });
+    fs.writeFileSync(
+      paths.userSettingsFile,
+      JSON.stringify({
+        formatVersion: 1,
+        savedVersion: 1,
+        settings: { ...validSettings(), tts },
+      }),
+    );
+  }
+
+  it('旧自选音色缺失 pitch(字段引入前的旧配置)时补空偏移,不被新默认音调污染', () => {
+    const paths = makePaths();
+    writeLegacySettings(paths, { provider: 'edge-tts', voice: 'zh-CN-liaoning-XiaobeiNeural' });
+    const settings = createSettings({ paths, env: {}, logger: silentLogger });
+    const tts = settings.effective().tts;
+    expect(tts.voice).toBe('zh-CN-liaoning-XiaobeiNeural');
+    expect(tts.pitch).toBe('');
+  });
+
+  it('旧配置显式保存的音调(含空串)原样生效', () => {
+    const paths = makePaths();
+    writeLegacySettings(paths, {
+      provider: 'edge-tts',
+      voice: 'zh-CN-liaoning-XiaobeiNeural',
+      pitch: '+15Hz',
+    });
+    expect(createSettings({ paths, env: {}, logger: silentLogger }).effective().tts.pitch).toBe('+15Hz');
+
+    const paths2 = makePaths();
+    writeLegacySettings(paths2, {
+      provider: 'edge-tts',
+      voice: 'zh-CN-liaoning-XiaobeiNeural',
+      pitch: '',
+    });
+    expect(createSettings({ paths: paths2, env: {}, logger: silentLogger }).effective().tts.pitch).toBe('');
+  });
+
+  it('干净目录(全新安装)使用新默认音色组合(晓伊+20Hz)', () => {
+    const settings = createSettings({ paths: makePaths(), env: {}, logger: silentLogger });
+    const tts = settings.effective().tts;
+    expect(tts.voice).toBe('zh-CN-XiaoyiNeural');
+    expect(tts.pitch).toBe('+20Hz');
+  });
 });
