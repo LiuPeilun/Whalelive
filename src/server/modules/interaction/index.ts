@@ -423,29 +423,40 @@ export function createInteraction(deps: {
     if (singing === null) return ack('唱歌功能还没准备好哦~');
     if (title === '') return ack('想听哪首呀?发「点歌 歌名」试试~');
     if (!deps.settings().singing.enabled) return ack('唱歌功能暂时没开哦~');
-    // WT-P3-007 复审:probe 预判可接性(缓存命中/配额)+待播容量预判——
-    // 确认语一次到位:满载/队列将满时直接如实告知"排满了",
-    // 不再出现"这就来"+"排满了"或"正在准备"+"排满了"的自相矛盾序列。
+    // WT-P3-007 复审:用队列的准入干跑精确模拟"确认条目入队后,歌曲能否入队"——
+    // 确认语一次到位,不再出现"这就来"+"排满了"或"正在准备"+"排满了"的矛盾序列。
     const probe = singing.probe(title);
-    const queueSaturated = queue.length() >= queue.getCapacity();
-    const willServe = probe.cached && !queueSaturated;
-    const ackResult = ack(
-      probe.cached && !queueSaturated
-        ? `《${title}》这就来~`
-        : probe.acceptable && !queueSaturated
-          ? `收到~正在准备《${title}》,唱好就送上来~`
-          : '现在唱歌排满了,这首先记下来,稍后再点一次哦~',
-    );
-    if (!ackResult.accepted) return ackResult; // 确认都进不去(满载):不启动后台任务,接单结果=确认结果
-    if (!probe.acceptable || queueSaturated) {
-      // 预判不可接(配额满,或缓存命中但待播队列将满):不启动任务/不入队成片,
-      // 接单结果如实为未受理
+    const ackProbe: QueueItem = {
+      eventId: `${eventId}-ack`, type: 'chat', priority: 40,
+      enqueuedAt: now(), expiresAt: now() + deps.settings().queue.chatTtlMs,
+      say: '', action: 'talk', text: null, isCommand: true, userKey,
+    };
+    const songProbe: QueueItem = {
+      eventId: `${eventId}-song`, type: 'song', priority: 35,
+      enqueuedAt: now(), expiresAt: now() + 5 * 60_000,
+      say: '', action: deps.settings().singing.actionId, text: null, isCommand: true,
+      userKey: null, songAudioUrl: 'probe',
+    };
+    // songOk 模拟确认条目已占位(extraCount=1)后歌曲能否入队;ackOk 为确认自身能否入队
+    const songOk = queue.wouldAccept(songProbe, 1).ok;
+    const ackOk = queue.wouldAccept(ackProbe, 0).ok;
+    const ackSay = probe.cached && songOk
+      ? `《${title}》这就来~`
+      : probe.acceptable && songOk
+        ? `收到~正在准备《${title}》,唱好就送上来~`
+        : probe.cached
+          ? `《${title}》的成片还在,待播队列满了,稍后再点一次哦~`
+          : '现在唱歌排满了,这首先记下来,稍后再点一次哦~';
+    const ackResult = ack(ackSay);
+    if (!ackResult.accepted) return ackResult; // 确认都进不去:不启动后台任务,接单结果=确认结果
+    if (!ackOk || !songOk) {
+      // 预判不可接(队列容量/腾位不足以同时容纳确认与歌曲):无任务可启动,接单结果如实未受理
       touchCooldown(userKey);
       return { accepted: false, eventId, reason: 'song-busy-limit' };
     }
     const req = singing.requestSong(title, { eventId });
     if (!req.ok) {
-      // 竞态兜底(probe 可接但受理时恰好满):确认语可能已乐观,接单结果如实反映未受理
+      // 竞态兜底(probe 可接但受理时恰好满):接单结果如实反映未受理
       logger.warn('interaction.song-request-rejected', { eventId, title, code: req.code, detail: req.detail });
       touchCooldown(userKey);
       return { accepted: false, eventId, reason: 'song-busy-limit' };

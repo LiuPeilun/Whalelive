@@ -80,29 +80,50 @@ export function createQueue(opts: { capacity: number; now(): number }) {
     return victimIndex;
   }
 
+  /** WT-P3-007 复审:共享准入判定(push 与 wouldAccept 干跑共用,杜绝预判漂移)。
+   *  extraCount=模拟未来将入队的更高优先级条目数(如点歌确认语),预判其占位后本条目能否入队。 */
+  function admitDecision(item: QueueItem, extraCount = 0): { ok: boolean; reason?: string; victimIndex: number } {
+    if (item.expiresAt <= opts.now()) {
+      return { ok: false, reason: 'expired-on-arrival', victimIndex: -1 };
+    }
+    const effectiveLength = items.length + extraCount;
+    if (effectiveLength < capacity) return { ok: true, victimIndex: -1 };
+    const victimIndex = evictableIndex();
+    const victim = victimIndex >= 0 ? items[victimIndex] : null;
+    // 新事件优先级不低于被挤出者才允许腾位;礼物/大航海/人工可进满载的聊天队列,
+    // 弹幕/高档答谢/人工也可挤出低优先级问候(WT-P2-012)。
+    if (victim && item.priority >= victim.priority) {
+      return { ok: true, victimIndex };
+    }
+    return { ok: false, reason: 'queue-full', victimIndex };
+  }
+
   function push(item: QueueItem): PushResult {
-    const now = opts.now();
-    if (item.expiresAt <= now) {
+    if (item.expiresAt <= opts.now()) {
       recordDrop(item.eventId, 'expired-on-arrival');
       return { ok: false, reason: 'expired-on-arrival' };
     }
     sweepExpired();
-    if (items.length >= capacity) {
-      const victimIndex = evictableIndex();
-      const victim = victimIndex >= 0 ? items[victimIndex] : null;
-      // 新事件优先级不低于被挤出者才允许腾位;礼物/大航海/人工可进满载的聊天队列,
-      // 弹幕/高档答谢/人工也可挤出低优先级问候(WT-P2-012)。
-      if (victim && item.priority >= victim.priority) {
-        items.splice(victimIndex, 1);
-        recordDrop(victim.eventId, victim.type === 'song' ? 'capacity-evict-song' : victim.type === 'chat' ? 'capacity-evict-chat' : 'capacity-evict-greeting');
-      } else {
-        // queue-full 不在此处记录(WT-P2-006 复审):腾位/合并调用方可能重试成功,
-        // 最终拒收由调用方经 recordReject 记入丢弃视图,避免"已入队却显示已丢弃"的误报。
-        return { ok: false, reason: 'queue-full' };
-      }
+    const decision = admitDecision(item);
+    if (!decision.ok) {
+      // queue-full 不在此处记录(WT-P2-006 复审):腾位/合并调用方可能重试成功,
+      // 最终拒收由调用方经 recordReject 记入丢弃视图,避免"已入队却显示已丢弃"的误报。
+      return { ok: false, reason: decision.reason ?? 'queue-full' };
+    }
+    if (decision.victimIndex >= 0) {
+      const victim = items[decision.victimIndex]!;
+      items.splice(decision.victimIndex, 1);
+      recordDrop(victim.eventId, victim.type === 'song' ? 'capacity-evict-song' : victim.type === 'chat' ? 'capacity-evict-chat' : 'capacity-evict-greeting');
     }
     items.push(item);
     return { ok: true };
+  }
+
+  /** WT-P3-007 复审:干跑探测——extraCount 模拟未来将入队的确认条目占位。 */
+  function wouldAccept(item: QueueItem, extraCount = 0): { ok: boolean; reason?: string } {
+    sweepExpired();
+    const decision = admitDecision(item, extraCount);
+    return decision.ok ? { ok: true } : { ok: false, reason: decision.reason ?? 'queue-full' };
   }
 
   /** 弹出下一条:先清理过期,再取最高优先级,同优先级取最早入队。 */
@@ -192,5 +213,5 @@ export function createQueue(opts: { capacity: number; now(): number }) {
     return [...drops].slice(-20);
   }
 
-  return { push, popBest, clear, removeMany, sweepExpired, setCapacity, getCapacity, length, snapshot, dropLog };
+  return { push, popBest, clear, removeMany, sweepExpired, setCapacity, getCapacity, length, snapshot, dropLog, wouldAccept };
 }

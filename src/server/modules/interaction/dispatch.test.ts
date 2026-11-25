@@ -373,24 +373,77 @@ describe('唱歌点歌接入(P3)', () => {
     expect(playback.plays[0]!.performance.say).toContain('还没准备好');
   });
 
-  it('WT-P3-007 复审:待播队列满时,缓存命中点歌只给拒绝提示且无 song 条目', async () => {
+  it('WT-P3-007 复审:队列剩一格时,缓存命中点歌只给拒绝提示且无 song 条目', async () => {
     const singing = fakeSinging({
       peekCached: () => true,
       probe: () => ({ cached: true, acceptable: true }),
       requestSong: () => ({ ok: true, jobId: 'song-x', cached: true }),
     });
     const { interaction, playback } = build({ singing });
-    // 用 20 条普通弹幕填满待播队列(capacity 20),清空派发避免影响计数
-    for (let i = 0; i < 20; i++) {
+    interaction.pause(); // 暂停派发,精确控制队列内容
+    // 19 条普通弹幕占位(capacity 20,剩一格)
+    for (let i = 0; i < 19; i++) {
       interaction.enqueue(chatEvent(`普通弹幕 ${i}`, `user-${i}`));
     }
+    const result = interaction.enqueue(chatEvent('点歌 篇章', '点歌员-a'));
     await settle();
-    // 队列满:点缓存歌 → 确认条目进不去(或为拒绝提示),成片不会入队
-    const result = interaction.enqueue(chatEvent('点歌 篇章', '点歌员'));
-    await settle();
+    // 预判:确认(40)占最后一格后,歌曲(35)无法挤过普通弹幕(40)→ 确认语即拒绝,不接单
+    if (result.accepted) throw new Error('expected rejection');
+    expect(result.reason).toBe('song-busy-limit');
     const songs = interaction.state().queue.items.filter((q) => q.type === 'song');
-    expect(songs.length).toBe(0); // 队列满,成片未入队(未接单)
+    expect(songs.length).toBe(0);
+    // 拒绝提示条目已入队(chat)
+    expect(interaction.state().queue.items.some((q) => q.type === 'chat')).toBe(true);
     void playback;
+  });
+
+  it('WT-P3-007 复审:队列有两格时,缓存命中确认与歌曲均正常入队', async () => {
+    const singing = fakeSinging({
+      peekCached: () => true,
+      probe: () => ({ cached: true, acceptable: true }),
+      requestSong: () => {
+        interaction.enqueueSongReady({ jobId: 'song-x', eventId: 'evt-song', title: '篇章', key: null, audioUrl: '/media/audio/song-a.mp3' });
+        return { ok: true, jobId: 'song-x', cached: true };
+      },
+    });
+    const { interaction, playback } = build({ singing });
+    interaction.pause();
+    for (let i = 0; i < 18; i++) {
+      interaction.enqueue(chatEvent(`普通弹幕 ${i}`, `user-${i}`));
+    }
+    const result = interaction.enqueue(chatEvent('点歌 篇章', '点歌员-a'));
+    expect(result.accepted).toBe(true);
+    await settle();
+    const types = interaction.state().queue.items.filter((q) => q.type === 'chat' || q.type === 'song').map((q) => q.type);
+    expect(types[0]).toBe('chat'); // 确认(40)先
+    expect(types).toContain('song'); // 歌曲(35)后
+    void playback;
+  });
+
+  it('WT-P3-007 复审:全 song 队列滚动腾位——确认与成片均入队,无矛盾提示', async () => {
+    const singing = fakeSinging({
+      peekCached: () => true,
+      probe: () => ({ cached: true, acceptable: true }),
+      requestSong: (title, source) => {
+        // 模拟缓存命中:requestSong 内同步触发成片回调
+        interaction.enqueueSongReady({ jobId: `job-${title}`, eventId: source.eventId, title, key: null, audioUrl: `/media/audio/${title}.mp3` });
+        return { ok: true, jobId: `job-${title}`, cached: true };
+      },
+    });
+    const { interaction } = build({ singing });
+    interaction.pause(); // 暂停派发,精确控制队列内容
+    // 10 首缓存歌 × (确认 40 + 成片 35) = 20 条填满;第 11 首起滚动腾位最旧
+    for (let i = 0; i < 11; i++) {
+      const result = interaction.enqueue(chatEvent(`点歌 歌${i}`, `点歌员`));
+      expect(result.accepted).toBe(true);
+    }
+    await settle();
+    const items = interaction.state().queue.items;
+    const songs = items.filter((q) => q.type === 'song');
+    const busyAcks = items.filter((q) => q.eventId.includes('-busy'));
+    // 滚动腾位:容量 20,11 首各占确认+成片两格,最旧两首被挤出(第 2~11 首保留)
+    expect(songs.length).toBe(9);
+    expect(busyAcks.length).toBe(0); // 全程无矛盾提示
   });
 });
 
