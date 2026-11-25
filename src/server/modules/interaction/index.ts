@@ -427,7 +427,13 @@ export function createInteraction(deps: {
     const req = singing.requestSong(title, { eventId });
     if (!req.ok) {
       logger.warn('interaction.song-request-rejected', { eventId, title, code: req.code, detail: req.detail });
-      return ackResult; // 确认已入队;后台未启动属运行态细节,不打回用户
+      // WT-P3-007 复审:后台满载时确认语说过的"正在准备"不成立,补一条如实的更正提示
+      if (req.code === 'busy-limit') {
+        const busyAck = ackItem(`${eventId}-busy`, userKey, '现在唱歌排满了,这首先记下来,稍后再点一次哦~');
+        if (!busyAck.accepted) logger.warn('interaction.song-busy-ack-dropped', { eventId });
+        return busyAck;
+      }
+      return ackResult; // 其他拒绝(disabled 等)已在上方前置校验覆盖
     }
     // 点歌算一次有效互动:冷却锚点与活跃锚点都对齐
     touchCooldown(userKey);

@@ -22,9 +22,11 @@ export function settingsFingerprint(s: {
 }
 
 const SONG_MAX_FILES = 30;
+/** WT-P3-005 复审:新近写入豁免窗口——已入队/在播的成片(必然是新近生成的)不被淘汰。 */
+const SONG_RECENT_MS = 10 * 60_000;
 
-/** 歌曲成片容量约束(WT-P3-005):超出按最旧淘汰(TTS 音频的淘汰入口不含本类文件)。 */
-function pruneSongs(audioDir: string, keep: string): void {
+/** 歌曲成片容量约束:超出按最旧淘汰;10 分钟内写入的保留(硬超限时才强制删最旧)。 */
+function pruneSongs(audioDir: string, keep: string, recentWindowMs: number): void {
   let entries: { name: string; mtime: number }[];
   try {
     entries = fs
@@ -37,10 +39,16 @@ function pruneSongs(audioDir: string, keep: string): void {
   const excess = entries.length - SONG_MAX_FILES + 1;
   if (excess <= 0) return;
   entries.sort((a, b) => a.mtime - b.mtime);
-  for (const entry of entries.slice(0, excess)) {
+  const recentCutoff = Date.now() - recentWindowMs;
+  const hard = recentWindowMs <= 0 || entries.length > SONG_MAX_FILES + 20;
+  let removed = 0;
+  for (const entry of entries) {
+    if (removed >= excess) break;
     if (entry.name === keep) continue;
+    if (!hard && entry.mtime > recentCutoff) continue; // 新近豁免
     try {
       fs.rmSync(path.join(audioDir, entry.name));
+      removed += 1;
     } catch {
       /* 清理失败不影响写入 */
     }
@@ -63,8 +71,9 @@ export type SongCache = {
   store(mp3: Buffer, title: string, fingerprint: string): string;
 };
 
-export function createSongCache(deps: { audioDir: string }): SongCache {
+export function createSongCache(deps: { audioDir: string; recentWindowMs?: number }): SongCache {
   const { audioDir } = deps;
+  const recentWindowMs = deps.recentWindowMs ?? 10 * 60_000;
   fs.mkdirSync(audioDir, { recursive: true });
 
   function filePath(audioId: string): string {
@@ -83,7 +92,7 @@ export function createSongCache(deps: { audioDir: string }): SongCache {
 
   function store(mp3: Buffer, title: string, fingerprint: string): string {
     const id = songCacheId(title, fingerprint);
-    pruneSongs(audioDir, id);
+    pruneSongs(audioDir, id, recentWindowMs);
     const target = filePath(id);
     const tmp = `${target}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, mp3);

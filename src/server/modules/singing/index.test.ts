@@ -133,7 +133,7 @@ describe('songCache(成片缓存)', () => {
     expect(normalizeTitle('  篇章   张韶涵 ')).toBe('篇章 张韶涵');
     const fp = '0.4|24|310|-6|24|0.3|0.33|0.25';
     expect(songCacheId('篇章 张韶涵', fp)).toBe(songCacheId('篇章 张韶涵 ', fp));
-    const cache = createSongCache({ audioDir: path.join(tmpDir, 'cache-case') });
+    const cache = createSongCache({ audioDir: path.join(tmpDir, 'cache-case'), recentWindowMs: 0 });
     expect(cache.lookup('篇章', fp)).toBeNull();
     const id = cache.store(Buffer.from('mp3data'), '篇章', fp);
     expect(id).toMatch(/^song-[0-9a-f]{12}\.mp3$/);
@@ -152,7 +152,7 @@ describe('singing 任务生命周期', () => {
   it('缓存命中:直接 ready 并触发 onSongReady,不跑管线', async () => {
     const { paths, module, readyPayloads } = makeModule();
     // 预置成片文件
-    const cache = createSongCache({ audioDir: paths.audioCacheDir });
+    const cache = createSongCache({ audioDir: paths.audioCacheDir, recentWindowMs: 0 });
     cache.store(Buffer.from('cached'), '旧歌', '0.4|24|310|-6|24|0.3|0.33|0.25');
     const req = module.requestSong('旧歌', { eventId: 'evt-1' });
     expect(req).toEqual({ ok: true, jobId: expect.any(String), cached: true });
@@ -206,14 +206,20 @@ describe('singing 任务生命周期', () => {
     expect(module.job((req as { jobId: string }).jobId)?.error).toContain('no results');
   });
 
-  it('紧急取消:在途任务 failed(reason=cancelled)', async () => {
+  it('紧急取消:任务进入 cancelling 且仍占并发配额(WT-P3-002 复审)', async () => {
     runCalls.push({ title: 'x', workDir: 'x', resolveWith: 'hang' });
     const { module } = makeModule();
-    const req = module.requestSong('长任务', { eventId: 'evt-6' });
+    const r1 = module.requestSong('长任务一', { eventId: 'evt-6' });
+    const r2 = module.requestSong('长任务二', { eventId: 'evt-7' });
     module.cancelAll('emergency-stop');
-    const job = module.job((req as { jobId: string }).jobId);
-    expect(job?.stage).toBe('failed');
-    expect(job?.error).toContain('cancelled: emergency-stop');
+    // 已发起取消但管线未退出:处于 cancelling,配额未释放
+    const j1 = module.job((r1 as { jobId: string }).jobId);
+    const j2 = module.job((r2 as { jobId: string }).jobId);
+    expect(j1?.stage).toBe('cancelling');
+    expect(j2?.stage).toBe('cancelling');
+    expect(module.requestSong('新歌', { eventId: 'evt-8' })).toEqual({
+      ok: false, code: 'busy-limit', detail: 'too many active jobs',
+    });
   });
 
   it('禁用时拒绝;空标题拒绝', () => {
@@ -242,10 +248,11 @@ describe('WT-P3-002/006 修复回归', () => {
     // 同标题在途不受影响(仍复用)
     const again = module.requestSong('歌一', { eventId: 'e4' });
     expect(again).toEqual({ ok: true, jobId: (r1 as { jobId: string }).jobId, cached: false });
-    // 紧急取消后腾出配额
+    // 紧急取消:cancelling 期间配额不释放(WT-P3-002 复审)
     module.cancelAll('test');
-    const r4 = module.requestSong('歌三', { eventId: 'e5' });
-    expect(r4.ok).toBe(true);
+    expect(module.requestSong('歌三', { eventId: 'e5' })).toEqual({
+      ok: false, code: 'busy-limit', detail: 'too many active jobs',
+    });
   });
 
   it('schema:移调边界必须整数,clipSeconds 上限 24', async () => {

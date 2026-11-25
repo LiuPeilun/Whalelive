@@ -231,6 +231,7 @@ export function encodeMp3(
     );
     let stderr = '';
     let settled = false;
+    let killReason: string | null = null; // WT-P3-002 复审:kill 后等 close 确认退出才结算
     const finish = (err: Error | null): void => {
       if (settled) return;
       settled = true;
@@ -244,12 +245,12 @@ export function encodeMp3(
       if (pid !== undefined) spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
     };
     const timer = setTimeout(() => {
+      killReason = `encode timeout after ${opts.timeoutMs}ms`;
       killTree();
-      finish(new Error(`encode timeout after ${opts.timeoutMs}ms`));
     }, opts.timeoutMs);
     const onAbort = (): void => {
+      killReason = 'aborted';
       killTree();
-      finish(new Error('aborted'));
     };
     if (opts.signal.aborted) {
       onAbort();
@@ -260,6 +261,13 @@ export function encodeMp3(
       stderr += d.toString('utf8');
     });
     child.on('error', (err) => finish(err));
-    child.on('close', (code) => (code === 0 ? finish(null) : finish(new Error(`ffmpeg exit=${code}: ${stderr.slice(-300)}`))));
+    child.on('close', (code) => {
+      if (killReason !== null) {
+        finish(new Error(`encode ${killReason}`));
+        return;
+      }
+      if (code === 0) finish(null);
+      else finish(new Error(`ffmpeg exit=${code}: ${stderr.slice(-300)}`));
+    });
   });
 }

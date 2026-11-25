@@ -114,6 +114,15 @@ export function createSinging(deps: {
     touch(job, { stage: 'failed', error, controller: null });
   }
 
+  /** WT-P3-002 复审:急停/中止后的收尾。此时子进程树已确认退出(管线 close 后才结算),
+   * 临时成片一并清理,配额从此处才真正释放。 */
+  function settleCancelled(job: JobState, outMp3Path: string | null): void {
+    if (outMp3Path !== null) {
+      try { fs.rmSync(outMp3Path, { force: true }); } catch { /* 已不存在 */ }
+    }
+    fail(job, 'cancelled');
+  }
+
   async function execute(job: JobState): Promise<void> {
     const s = settings();
     const controller = new AbortController();
@@ -127,7 +136,10 @@ export function createSinging(deps: {
         settings: s,
         signal: controller.signal,
       });
-      if (controller.signal.aborted || stopped) return;
+      if (controller.signal.aborted || stopped) {
+        settleCancelled(job, null);
+        return;
+      }
       touch(job, { chosenTitle: result.chosenTitle });
 
       // key 为管线内基于输入 f0 的实际换声参数(WT-P3-008:不再用输出 f0 二次重算)
@@ -141,7 +153,11 @@ export function createSinging(deps: {
         timeoutMs: 120_000,
         signal: controller.signal,
       });
-      if (controller.signal.aborted || stopped) return;
+      if (controller.signal.aborted || stopped) {
+        // WT-P3-002 复审:被中止的编码也可能留下半成品 MP3,清理后才释放配额
+        settleCancelled(job, outMp3);
+        return;
+      }
 
       const published = cache.store(fs.readFileSync(outMp3), job.title, settingsFingerprint(s));
       fs.rmSync(outMp3, { force: true });
@@ -155,7 +171,10 @@ export function createSinging(deps: {
       fs.rmSync(workDir, { recursive: true, force: true });
       deps.onSongReady({ jobId: job.jobId, eventId: job.eventId, title: job.title, key, audioUrl: url });
     } catch (err) {
-      if (controller.signal.aborted || stopped) return;
+      if (controller.signal.aborted || stopped) {
+        settleCancelled(job, null);
+        return;
+      }
       const message = err instanceof PipelineStepError ? `${err.step}: ${err.tail.slice(-200)}` : String(err);
       fail(job, message);
     } finally {
@@ -180,12 +199,38 @@ export function createSinging(deps: {
           return { ok: true, jobId: job.jobId, cached: false };
         }
       }
-      // WT-P3-002:并发上限(不同歌名同时点不无限启动管线,争抢 CPU/磁盘)
+      // WT-P3-002:并发上限(不同歌名同时点不无限启动管线,争抢 CPU/磁盘)。
+      // 复审修正:cancelling(已 abort 但子进程尚未退出)仍占配额——急停后旧任务
+      // 退出前,新点歌不允许启动,避免实际并发的任务数突破上限。
       const activeCount = [...jobs.values()].filter((j) => j.stage !== 'ready' && j.stage !== 'failed').length;
       if (activeCount >= MAX_ACTIVE) {
         return { ok: false, code: 'busy-limit', detail: 'too many active jobs' };
       }
+      // WT-P3-007 复审:缓存命中零成本,不受 CPU 配额约束——先于配额检查
       const cachedId = cache.lookup(clean, settingsFingerprint(settings()));
+      if (cachedId !== null) {
+        const cachedJob: JobState = {
+          jobId: `song-${randomUUID().slice(0, 8)}`,
+          eventId: source.eventId,
+          title: clean,
+          stage: 'ready',
+          key: null,
+          audioUrl: `/media/audio/${cachedId}`,
+          chosenTitle: null,
+          cached: true,
+          error: null,
+          startedAt: now(),
+          updatedAt: now(),
+          controller: null,
+        };
+        jobs.set(cachedJob.jobId, cachedJob);
+        logger.info('singing.cache-hit', { jobId: cachedJob.jobId, title: clean, audioUrl: cachedJob.audioUrl });
+        deps.onSongReady({
+          jobId: cachedJob.jobId, eventId: source.eventId, title: clean,
+          key: null, audioUrl: cachedJob.audioUrl!,
+        });
+        return { ok: true, jobId: cachedJob.jobId, cached: true };
+      }
       const job: JobState = {
         jobId: `song-${randomUUID().slice(0, 8)}`,
         eventId: source.eventId,
@@ -226,10 +271,12 @@ export function createSinging(deps: {
 
     cancelAll(reason: string): void {
       for (const job of jobs.values()) {
-        if (job.stage === 'ready' || job.stage === 'failed') continue;
+        if (job.stage === 'ready' || job.stage === 'failed' || job.stage === 'cancelling') continue;
+        // WT-P3-002 复审:只发起中止并标记 cancelling(仍占并发配额);
+        // 待管线 close 确认退出后由 execute 的 settleCancelled 落 failed 并释放配额。
         job.controller?.abort();
-        touch(job, { stage: 'failed', error: `cancelled: ${reason}`, controller: null });
-        logger.info('singing.job-cancelled', { jobId: job.jobId, title: job.title, reason });
+        touch(job, { stage: 'cancelling' });
+        logger.info('singing.job-cancelling', { jobId: job.jobId, title: job.title, reason });
       }
     },
 

@@ -10,6 +10,8 @@ export type SongJobStage =
   | 'separating'
   | 'analyzing'
   | 'converting'
+  /** 已发起取消但子进程树尚未确认退出(WT-P3-002:此间仍占并发配额)。 */
+  | 'cancelling'
   | 'ready'
   | 'failed';
 

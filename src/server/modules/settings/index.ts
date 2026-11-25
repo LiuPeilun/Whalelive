@@ -74,6 +74,24 @@ export function createSettings(deps: { paths: AppPaths; env: Record<string, stri
     return Number.isFinite(n) ? n : undefined;
   }
 
+  /** WT-P3-006 复审:旧版落盘值规范化到当前安全范围(读取迁移)。 */
+  function sanitizeSinging(v: UserSettings['singing'], fallback: UserSettings['singing']): UserSettings['singing'] {
+    const clamp = (n: number, lo: number, hi: number, fb: number): number =>
+      Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : fb;
+    return {
+      enabled: typeof v.enabled === 'boolean' ? v.enabled : fallback.enabled,
+      clipStartRatio: clamp(v.clipStartRatio, 0, 0.9, fallback.clipStartRatio),
+      clipSeconds: clamp(v.clipSeconds, 5, 24, fallback.clipSeconds),
+      targetHz: clamp(v.targetHz, 100, 600, fallback.targetHz),
+      keyMin: clamp(v.keyMin, -12, 12, fallback.keyMin),
+      keyMax: clamp(v.keyMax, 6, 30, fallback.keyMax),
+      indexRate: clamp(v.indexRate, 0, 1, fallback.indexRate),
+      protect: clamp(v.protect, 0, 0.9, fallback.protect),
+      rmsMixRate: clamp(v.rmsMixRate, 0, 1, fallback.rmsMixRate),
+      actionId: typeof v.actionId === 'string' && v.actionId !== '' ? v.actionId : fallback.actionId,
+    };
+  }
+
   function baseUser(): UserSettings {
     const user = userFile?.settings;
     return {
@@ -96,8 +114,13 @@ export function createSettings(deps: { paths: AppPaths; env: Record<string, stri
           ? { ...defaults.tts, ...user.tts, pitch: '' }
           : { ...defaults.tts, ...user.tts };
       })(),
-      // singing 为 P3 新增段:旧配置缺失时取新默认(无听感连续性问题);显式保存原样生效。
-      singing: user?.singing ? { ...defaults.singing, ...user.singing } : { ...defaults.singing },
+      // singing 为 P3 新增段:旧配置缺失时取新默认;显式保存原样生效。
+      // WT-P3-006 复审:旧版落盘可能含超范围值(如首轮允许的 clipSeconds:40),读取时
+      // 规范化钳制到当前安全范围——超长片段不派发,面板透传也能通过新校验。
+      singing: sanitizeSinging(
+        user?.singing ? { ...defaults.singing, ...user.singing } : { ...defaults.singing },
+        defaults.singing,
+      ),
       llm: { ...defaults.llm, ...user?.llm },
     };
   }

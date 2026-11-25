@@ -21,8 +21,9 @@ export type AudioCache = {
 
 const MIME: Record<string, string> = { wav: 'audio/wav', mp3: 'audio/mpeg' };
 
-export function createAudioCache(deps: { audioDir: string; logger: Logger; now(): number }): AudioCache {
+export function createAudioCache(deps: { audioDir: string; logger: Logger; now(): number; recentWindowMs?: number }): AudioCache {
   const { audioDir, logger } = deps;
+  const recentWindowMs = deps.recentWindowMs ?? 10 * 60_000;
   fs.mkdirSync(audioDir, { recursive: true });
 
   function evictIfNeeded(): void {
@@ -37,10 +38,17 @@ export function createAudioCache(deps: { audioDir: string; logger: Logger; now()
     }
     if (entries.length < MAX_ENTRIES) return;
     entries.sort((a, b) => a.mtime - b.mtime);
+    // WT-P3-005 复审:新近写入豁免(可能已入队/在播被引用);堆积超硬限时忽略豁免
+    const recentCutoff = deps.now() - recentWindowMs;
+    const hard = recentWindowMs <= 0 || entries.length > MAX_ENTRIES + 50;
     const excess = entries.length - MAX_ENTRIES + 1;
-    for (const entry of entries.slice(0, excess)) {
+    let removed = 0;
+    for (const entry of entries) {
+      if (removed >= excess) break;
+      if (!hard && entry.mtime > recentCutoff) continue;
       try {
         fs.rmSync(path.join(audioDir, entry.name));
+        removed += 1;
         logger.info('audio-cache.evicted', { file: entry.name });
       } catch {
         /* 清理失败不影响写入 */

@@ -43,17 +43,19 @@ BAD = ["现场", "饭拍", "翻唱", "reaction", "Reaction", "反应", "教唱",
 GOOD = ["MV", "官方", "原曲", "OST", "主题曲", "音源", "高清", "4K", "完整版"]
 
 def rank(items, keyword):
-    # WT-P3-004:查询词(歌名+歌手)命中优先于任何 GOOD 加分——缺查询词的无关项
-    # 不得凭"官方MV"字样压过精确匹配;BAD 降权防同名错版(现场/翻唱)。
+    # WT-P3-004 复审:非 GOOD 词(歌名/歌手)缺失 -5——两个词命中(+4)抵消不了
+    # 指定歌手缺席(-5),同名错版与仅修饰词达标的候选都会落选;GOOD 词缺失只轻罚。
+    good_lower = {g.lower() for g in GOOD}
     words = [w.lower() for w in keyword.split() if w]
     for it in items:
-        t = it["title"]
-        tl = t.lower()
-        hit = sum(1 for w in words if w in tl)
-        miss = len(words) - hit
-        score = hit * 2.0 - miss * 3.0
+        tl = it["title"].lower()
+        score = 0.0
+        for w in words:
+            if w in tl:
+                score += 0.5 if w in good_lower else 2.0
+            else:
+                score -= 1.0 if w in good_lower else 5.0
         score -= sum(1 for b in BAD if b in tl) * 3.0
-        score += sum(1 for g in GOOD if g in tl) * 0.5
         it["score"] = score
     return sorted(items, key=lambda x: -x["score"])
 

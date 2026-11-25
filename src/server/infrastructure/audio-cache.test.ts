@@ -25,7 +25,7 @@ function newCache(): { cache: ReturnType<typeof createAudioCache>; dir: string }
   const dir = path.join(tmpRoot, `case-${dirs.length}`);
   dirs.push(dir);
   fs.mkdirSync(dir, { recursive: true });
-  const cache = createAudioCache({ audioDir: dir, logger: silentLogger, now: () => Date.now() });
+  const cache = createAudioCache({ audioDir: dir, logger: silentLogger, now: () => Date.now(), recentWindowMs: 0 });
   return { cache, dir };
 }
 
