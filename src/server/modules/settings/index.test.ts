@@ -145,3 +145,39 @@ describe('settings 分层配置与原子保存', () => {
     expect(tts.pitch).toBe('+20Hz');
   });
 });
+
+// WT-P3-006 第二轮复审:迁移钳制不得破坏合法小数(连续字段不取整)
+describe('singing 配置迁移规范化(WT-P3-006)', () => {
+  it('全新目录:默认比例参数 0.4/0.3/0.33/0.25 原样保留,不被取整', () => {
+    const settings = createSettings({ paths: makePaths(), env: {}, logger: silentLogger });
+    const s = settings.effective().singing;
+    expect(s.clipStartRatio).toBe(0.4);
+    expect(s.indexRate).toBe(0.3);
+    expect(s.protect).toBe(0.33);
+    expect(s.rmsMixRate).toBe(0.25);
+    expect(s.clipSeconds).toBe(24);
+  });
+
+  it('旧落盘 clipSeconds:40 迁移钳制为 24;合法小数保存回读一致', () => {
+    const paths = makePaths();
+    fs.mkdirSync(path.dirname(paths.userSettingsFile), { recursive: true });
+    fs.writeFileSync(
+      paths.userSettingsFile,
+      JSON.stringify({
+        formatVersion: 1,
+        savedVersion: 1,
+        settings: { ...validSettings(), singing: { enabled: true, clipStartRatio: 0.75, clipSeconds: 40, targetHz: 320, keyMin: -3, keyMax: 20, indexRate: 0.7, protect: 0.5, rmsMixRate: 0.4, actionId: 'talk' } },
+      }),
+    );
+    const settings = createSettings({ paths, env: {}, logger: silentLogger });
+    const s = settings.effective().singing;
+    expect(s.clipSeconds).toBe(24); // 旧超长片段迁移到安全范围
+    expect(s.clipStartRatio).toBeCloseTo(0.75);
+    expect(s.indexRate).toBeCloseTo(0.7);
+    expect(s.protect).toBeCloseTo(0.5);
+    expect(s.rmsMixRate).toBeCloseTo(0.4);
+    expect(s.targetHz).toBe(320);
+    expect(s.keyMin).toBe(-3);
+    expect(s.keyMax).toBe(20);
+  });
+});

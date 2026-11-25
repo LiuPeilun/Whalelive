@@ -158,6 +158,22 @@ OBS 浏览器源支持网页画面、透明背景与音频。**实测（OBS 33.0
 
 推流密钥同样属于本地敏感配置。开播与收礼用途采用覆盖相应用途的角色授权。[素材许可](https://github.com/PC2005-cloud/dsh-pet#许可)
 
+### 7.1 点歌唱歌（P3）
+
+观众发弹幕「点歌 歌名 歌手」即可触发（首次约 2 分钟后台准备，二次点同一首秒出；角色清唱副歌片段，音色与说话一致）。该功能依赖三个**本地工具链**，缺一不可：
+
+1. **RVC 运行时与音色模型**（`.tools/rvc/RVC20260718DML/`）：官方 RVC 完整包（含自带 `runtime/python.exe` 与 `ffmpeg.exe`），解压到该路径；音色模型 `tidepost.pth` 放入其 `assets/weights/`，faiss 索引 `added_*tidepost_v2.index` 放入其 `logs/tidepost/`。
+2. **Demucs 分离环境**（`.tools/conda/whaletalk-song/`）：conda 环境（Python ≥3.10 + torch CPU + demucs），用于人声/伴奏分离；模型缓存写在 `.tools/torch-home/`（自动生成）。
+3. **容量与权限**：`.tools/` 与 `data/` 所在磁盘预留 ≥2GB；**不要把数据目录放在系统临时目录**（RVC 运行时写 %TEMP% 会被杀软拦截）。
+
+验证安装是否完整（全绿即可用）：
+
+```
+node scripts/singing-smoke.mjs 3721
+```
+
+冒烟会启动隔离实例并发起一次真实点歌（B 站搜歌→分离→换声→落盘），约 2-3 分钟。缺依赖时的提示：`spawn` 报 `ENOENT` 对应路径不存在；`PYTHONIOENCODING` 乱码说明用了非官方 runtime；日志出现 `search: no reliable match` 说明该歌没有可靠源（换歌名重试）。
+
 ## 8. 常见问题
 
 | 现象 | 排查顺序 |

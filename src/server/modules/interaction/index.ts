@@ -52,6 +52,8 @@ export type InteractionModule = {
   manualAction(actionId: string, say?: string): EnqueueResult;
   /** 唱歌成片就绪(singing 模块回调,app.ts 接线):入队 song 条目。 */
   enqueueSongReady(payload: SongReadyPayload): void;
+  /** WT-P3-005 复审:音频是否仍被引用(待播 song 条目或当前表演)——淘汰保护用。 */
+  isAudioInUse(audioId: string): boolean;
   pause(): void;
   resume(): void;
   stop(): void;
@@ -101,6 +103,8 @@ type CurrentTask = {
   provider: string;
   /** 冷场话题任务(WT-P2-013):尚未开口时可被真实互动取消。 */
   cold: boolean;
+  /** 唱歌成片地址(P3):WT-P3-005 引用保护查询用(仅 song 条目派发时设置)。 */
+  audioUrl?: string;
 };
 
 /** 派生 signal:父任务中止传导给提供方调用;超时只取消调用本身,不杀任务。 */
@@ -429,9 +433,11 @@ export function createInteraction(deps: {
       logger.warn('interaction.song-request-rejected', { eventId, title, code: req.code, detail: req.detail });
       // WT-P3-007 复审:后台满载时确认语说过的"正在准备"不成立,补一条如实的更正提示
       if (req.code === 'busy-limit') {
+        // WT-P3-007 复审:补发如实的繁忙提示,但接单结果必须反映"歌未接"——
+        // accepted:false + reason,与已入队的确认/更正条目并存。
         const busyAck = ackItem(`${eventId}-busy`, userKey, '现在唱歌排满了,这首先记下来,稍后再点一次哦~');
         if (!busyAck.accepted) logger.warn('interaction.song-busy-ack-dropped', { eventId });
-        return busyAck;
+        return { accepted: false, eventId, reason: 'song-busy-limit' };
       }
       return ackResult; // 其他拒绝(disabled 等)已在上方前置校验覆盖
     }
@@ -661,6 +667,7 @@ export function createInteraction(deps: {
     current = {
       ...current,
       performanceId: performance.id, stage: 'waiting-playback', say, action: performance.action,
+      ...(audioUrl !== undefined ? { audioUrl } : {}), // WT-P3-005 复审:引用保护查询用
       timings: { ...current.timings, synthesisDoneAt, playbackAt: synthesisDoneAt },
     };
     logger.info('interaction.dispatch', {
@@ -938,6 +945,15 @@ export function createInteraction(deps: {
     notify();
   }
 
+  /** WT-P3-005 复审:淘汰保护查询——audioId 出现在待播 song 条目或当前表演即视为在用。 */
+  function isAudioInUse(audioId: string): boolean {
+    for (const item of queue.snapshot()) {
+      if (item.type === 'song' && (item.songAudioUrl ?? '').includes(audioId)) return true;
+    }
+    // 当前任务:dispatchTask 已把 audioUrl 记到 current.audioUrl(WT-P3-005 复审)
+    return (current?.audioUrl?.includes(audioId)) ?? false;
+  }
+
   function state(): InteractionState {
     const settings = deps.settings();
     return {
@@ -978,5 +994,5 @@ export function createInteraction(deps: {
     };
   }
 
-  return { enqueue, manualAction, enqueueSongReady, pause, resume, stop, tick, state, onChange(cb) { listeners.add(cb); return () => listeners.delete(cb); } };
+  return { enqueue, manualAction, enqueueSongReady, isAudioInUse, pause, resume, stop, tick, state, onChange(cb) { listeners.add(cb); return () => listeners.delete(cb); } };
 }

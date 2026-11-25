@@ -43,21 +43,24 @@ BAD = ["现场", "饭拍", "翻唱", "reaction", "Reaction", "反应", "教唱",
 GOOD = ["MV", "官方", "原曲", "OST", "主题曲", "音源", "高清", "4K", "完整版"]
 
 def rank(items, keyword):
-    # WT-P3-004 复审:非 GOOD 词(歌名/歌手)缺失 -5——两个词命中(+4)抵消不了
-    # 指定歌手缺席(-5),同名错版与仅修饰词达标的候选都会落选;GOOD 词缺失只轻罚。
+    # WT-P3-004 复审:非 GOOD 词(歌名/歌手)缺失 -5,且**硬性要求全部非 GOOD 词命中**——
+    # 长歌名的多词命中积分无法抵消指定歌手缺席(第二轮复审的 My Heart Will Go On 用例);
+    # GOOD 词(修饰)不作硬性要求,缺失轻罚。
     good_lower = {g.lower() for g in GOOD}
     words = [w.lower() for w in keyword.split() if w]
+    core_words = [w for w in words if w not in good_lower]
+    scored = []
     for it in items:
         tl = it["title"].lower()
+        if any(w not in tl for w in core_words):
+            continue  # 硬过滤:核心词(歌名/歌手)缺一即出局
         score = 0.0
         for w in words:
-            if w in tl:
-                score += 0.5 if w in good_lower else 2.0
-            else:
-                score -= 1.0 if w in good_lower else 5.0
+            score += (0.5 if w in good_lower else 2.0) if w in tl else (-1.0 if w in good_lower else -2.0)
         score -= sum(1 for b in BAD if b in tl) * 3.0
         it["score"] = score
-    return sorted(items, key=lambda x: -x["score"])
+        scored.append(it)
+    return sorted(scored, key=lambda x: -x["score"])
 
 def fetch_audio(bvid, out_path):
     j = json.loads(http_get("https://api.bilibili.com/x/web-interface/view?bvid=" + bvid))
@@ -84,10 +87,10 @@ def main():
     if not items:
         raise RuntimeError("search: no results")
     ranked = rank(items, title)
+    if not ranked:
+        # 硬过滤后无候选(指定歌手/歌名缺席)= 查无可靠版本,宁可不唱不唱错版(WT-P3-004 复审)
+        raise RuntimeError("search: no reliable match for %r" % title)
     best = ranked[0]
-    if best["score"] < 1.0:
-        # 需至少命中一个查询词(词命中 +2)且未被 BAD 显著降权;否则宁可不唱不唱错版
-        raise RuntimeError("search: no reliable match for %r (best=%r score=%.1f)" % (title, best["title"][:40], best["score"]))
     log("chosen: %s %s" % (best["bvid"], best["title"][:60]))
 
     raw_path = os.path.join(work_dir, "song.m4s")

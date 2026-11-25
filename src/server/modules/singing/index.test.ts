@@ -267,3 +267,24 @@ describe('WT-P3-002/006 修复回归', () => {
     expect(validateSinging({ ...base, keyMin: -6, keyMax: 24, clipSeconds: 24 }).ok).toBe(true);
   });
 });
+
+describe('WT-P3-007 复审:满载时缓存命中不受配额约束', () => {
+  it('两个在途占满配额后,已有成片的标题仍直接 ready 并触发回调', async () => {
+    runCalls.push({ title: 'a', workDir: 'a', resolveWith: 'hang' });
+    runCalls.push({ title: 'b', workDir: 'b', resolveWith: 'hang' });
+    const { paths, module, readyPayloads } = makeModule();
+    // 预置成片(与在途任务不同标题)
+    const cache = createSongCache({ audioDir: paths.audioCacheDir, recentWindowMs: 0 });
+    const fp = '0.4|24|310|-6|24|0.3|0.33|0.25';
+    const cachedId = cache.store(Buffer.from('cached'), '已有成片的歌', fp);
+    expect(module.requestSong('歌一', { eventId: 'e1' }).ok).toBe(true);
+    expect(module.requestSong('歌二', { eventId: 'e2' }).ok).toBe(true);
+    const req = module.requestSong('已有成片的歌', { eventId: 'e3' });
+    expect(req).toEqual({ ok: true, jobId: expect.any(String), cached: true });
+    const job = module.job((req as { jobId: string }).jobId);
+    expect(job?.stage).toBe('ready');
+    expect(job?.audioUrl).toBe(`/media/audio/${cachedId}`);
+    expect(readyPayloads).toHaveLength(1);
+    expect(runCalls).toHaveLength(2); // 缓存命中不启动管线
+  });
+});

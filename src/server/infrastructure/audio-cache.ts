@@ -21,7 +21,14 @@ export type AudioCache = {
 
 const MIME: Record<string, string> = { wav: 'audio/wav', mp3: 'audio/mpeg' };
 
-export function createAudioCache(deps: { audioDir: string; logger: Logger; now(): number; recentWindowMs?: number }): AudioCache {
+export function createAudioCache(deps: {
+  audioDir: string;
+  logger: Logger;
+  now(): number;
+  recentWindowMs?: number;
+  /** WT-P3-005 复审:引用保护——已入队/在播的音频不参与淘汰。 */
+  isProtected?: (audioId: string) => boolean;
+}): AudioCache {
   const { audioDir, logger } = deps;
   const recentWindowMs = deps.recentWindowMs ?? 10 * 60_000;
   fs.mkdirSync(audioDir, { recursive: true });
@@ -45,6 +52,7 @@ export function createAudioCache(deps: { audioDir: string; logger: Logger; now()
     let removed = 0;
     for (const entry of entries) {
       if (removed >= excess) break;
+      if (deps.isProtected?.(entry.name)) continue; // 引用保护(WT-P3-005 复审)
       if (!hard && entry.mtime > recentCutoff) continue;
       try {
         fs.rmSync(path.join(audioDir, entry.name));

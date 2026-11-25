@@ -54,13 +54,18 @@ export function createSinging(deps: {
   paths: AppPaths;
   pipeline: PipelineDeps;
   settings(): SingingSettings;
+  /** WT-P3-005 复审:成片引用保护(已入队/在播的成片不参与缓存淘汰)。 */
+  isProtected?(audioId: string): boolean;
   logger: Logger;
   now(): number;
   /** 成片就绪回调(interaction 组装队列条目)。 */
   onSongReady(payload: SongReadyPayload): void;
 }): SingingModule {
   const { paths, pipeline: pipelineDeps, logger, now } = deps;
-  const cache: SongCache = createSongCache({ audioDir: paths.audioCacheDir });
+  const cache: SongCache = createSongCache({
+    audioDir: paths.audioCacheDir,
+    ...(deps.isProtected ? { isProtected: deps.isProtected } : {}),
+  });
   const jobs = new Map<string, JobState>();
   let stopped = false;
 
@@ -128,6 +133,8 @@ export function createSinging(deps: {
     const controller = new AbortController();
     touch(job, { controller });
     const workDir = path.join(paths.dataDir, 'song-work', job.jobId);
+    // WT-P3-002 复审:中止/失败路径也要清理半成品 MP3(路径提前声明供所有收尾分支使用)
+    let outMp3: string | null = null;
     try {
       fs.mkdirSync(workDir, { recursive: true });
       const result = await runPipeline(pipelineDeps, {
@@ -148,13 +155,13 @@ export function createSinging(deps: {
 
       // wav → mp3 → 确定性缓存文件(二次点歌秒出);编码同样可中止(WT-P3-002)
       const audioId = `song-${job.jobId}.mp3`.replace(/[^A-Za-z0-9_.-]/g, '_');
-      const outMp3 = path.join(paths.audioCacheDir, audioId);
+      outMp3 = path.join(paths.audioCacheDir, audioId);
       await encodeMp3(pipelineDeps.ffmpegPath, result.wavPath, outMp3, {
         timeoutMs: 120_000,
         signal: controller.signal,
       });
       if (controller.signal.aborted || stopped) {
-        // WT-P3-002 复审:被中止的编码也可能留下半成品 MP3,清理后才释放配额
+        // 被中止的编码可能留下半成品 MP3,清理后才释放配额
         settleCancelled(job, outMp3);
         return;
       }
@@ -172,7 +179,8 @@ export function createSinging(deps: {
       deps.onSongReady({ jobId: job.jobId, eventId: job.eventId, title: job.title, key, audioUrl: url });
     } catch (err) {
       if (controller.signal.aborted || stopped) {
-        settleCancelled(job, null);
+        // WT-P3-002 复审:中止路径清理半成品 MP3,子进程确认退出后才释放配额
+        settleCancelled(job, outMp3);
         return;
       }
       const message = err instanceof PipelineStepError ? `${err.step}: ${err.tail.slice(-200)}` : String(err);
@@ -199,14 +207,7 @@ export function createSinging(deps: {
           return { ok: true, jobId: job.jobId, cached: false };
         }
       }
-      // WT-P3-002:并发上限(不同歌名同时点不无限启动管线,争抢 CPU/磁盘)。
-      // 复审修正:cancelling(已 abort 但子进程尚未退出)仍占配额——急停后旧任务
-      // 退出前,新点歌不允许启动,避免实际并发的任务数突破上限。
-      const activeCount = [...jobs.values()].filter((j) => j.stage !== 'ready' && j.stage !== 'failed').length;
-      if (activeCount >= MAX_ACTIVE) {
-        return { ok: false, code: 'busy-limit', detail: 'too many active jobs' };
-      }
-      // WT-P3-007 复审:缓存命中零成本,不受 CPU 配额约束——先于配额检查
+      // WT-P3-007 复审:缓存命中零成本,不受 CPU 配额约束——必须先于配额检查
       const cachedId = cache.lookup(clean, settingsFingerprint(settings()));
       if (cachedId !== null) {
         const cachedJob: JobState = {
@@ -230,6 +231,13 @@ export function createSinging(deps: {
           key: null, audioUrl: cachedJob.audioUrl!,
         });
         return { ok: true, jobId: cachedJob.jobId, cached: true };
+      }
+      // WT-P3-002:并发上限(不同歌名同时点不无限启动管线,争抢 CPU/磁盘)。
+      // 复审修正:cancelling(已 abort 但子进程尚未退出)仍占配额——急停后旧任务
+      // 退出前,新点歌不允许启动,避免实际并发的任务数突破上限。
+      const activeCount = [...jobs.values()].filter((j) => j.stage !== 'ready' && j.stage !== 'failed').length;
+      if (activeCount >= MAX_ACTIVE) {
+        return { ok: false, code: 'busy-limit', detail: 'too many active jobs' };
       }
       const job: JobState = {
         jobId: `song-${randomUUID().slice(0, 8)}`,

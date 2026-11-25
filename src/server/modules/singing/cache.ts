@@ -26,7 +26,12 @@ const SONG_MAX_FILES = 30;
 const SONG_RECENT_MS = 10 * 60_000;
 
 /** 歌曲成片容量约束:超出按最旧淘汰;10 分钟内写入的保留(硬超限时才强制删最旧)。 */
-function pruneSongs(audioDir: string, keep: string, recentWindowMs: number): void {
+function pruneSongs(
+  audioDir: string,
+  keep: string,
+  recentWindowMs: number,
+  isProtected: (audioId: string) => boolean,
+): void {
   let entries: { name: string; mtime: number }[];
   try {
     entries = fs
@@ -45,6 +50,7 @@ function pruneSongs(audioDir: string, keep: string, recentWindowMs: number): voi
   for (const entry of entries) {
     if (removed >= excess) break;
     if (entry.name === keep) continue;
+    if (isProtected(entry.name)) continue; // 已入队/在播引用保护(WT-P3-005 复审)
     if (!hard && entry.mtime > recentCutoff) continue; // 新近豁免
     try {
       fs.rmSync(path.join(audioDir, entry.name));
@@ -71,7 +77,12 @@ export type SongCache = {
   store(mp3: Buffer, title: string, fingerprint: string): string;
 };
 
-export function createSongCache(deps: { audioDir: string; recentWindowMs?: number }): SongCache {
+export function createSongCache(deps: {
+  audioDir: string;
+  recentWindowMs?: number;
+  /** WT-P3-005 复审:引用保护——返回 true 的文件不参与淘汰(已入队/在播)。 */
+  isProtected?: (audioId: string) => boolean;
+}): SongCache {
   const { audioDir } = deps;
   const recentWindowMs = deps.recentWindowMs ?? 10 * 60_000;
   fs.mkdirSync(audioDir, { recursive: true });
@@ -92,7 +103,8 @@ export function createSongCache(deps: { audioDir: string; recentWindowMs?: numbe
 
   function store(mp3: Buffer, title: string, fingerprint: string): string {
     const id = songCacheId(title, fingerprint);
-    pruneSongs(audioDir, id, recentWindowMs);
+    // WT-P3-005 复审:写入前淘汰,候选先过引用保护(已入队/在播不删)
+    pruneSongs(audioDir, id, recentWindowMs, deps.isProtected ?? (() => false));
     const target = filePath(id);
     const tmp = `${target}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, mp3);

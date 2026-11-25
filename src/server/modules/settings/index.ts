@@ -74,20 +74,24 @@ export function createSettings(deps: { paths: AppPaths; env: Record<string, stri
     return Number.isFinite(n) ? n : undefined;
   }
 
-  /** WT-P3-006 复审:旧版落盘值规范化到当前安全范围(读取迁移)。 */
+  /** WT-P3-006:旧版落盘值规范化到当前安全范围(读取迁移)。
+   *  第二轮复审修正:连续字段(比例/混合率)仅钳制不取整——默认 0.4/0.3/0.33/0.25
+   *  与用户合法小数必须原样保留;仅时长/音高/半音边界取整。 */
   function sanitizeSinging(v: UserSettings['singing'], fallback: UserSettings['singing']): UserSettings['singing'] {
-    const clamp = (n: number, lo: number, hi: number, fb: number): number =>
+    const clampF = (n: number, lo: number, hi: number, fb: number): number =>
+      Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fb;
+    const clampI = (n: number, lo: number, hi: number, fb: number): number =>
       Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : fb;
     return {
       enabled: typeof v.enabled === 'boolean' ? v.enabled : fallback.enabled,
-      clipStartRatio: clamp(v.clipStartRatio, 0, 0.9, fallback.clipStartRatio),
-      clipSeconds: clamp(v.clipSeconds, 5, 24, fallback.clipSeconds),
-      targetHz: clamp(v.targetHz, 100, 600, fallback.targetHz),
-      keyMin: clamp(v.keyMin, -12, 12, fallback.keyMin),
-      keyMax: clamp(v.keyMax, 6, 30, fallback.keyMax),
-      indexRate: clamp(v.indexRate, 0, 1, fallback.indexRate),
-      protect: clamp(v.protect, 0, 0.9, fallback.protect),
-      rmsMixRate: clamp(v.rmsMixRate, 0, 1, fallback.rmsMixRate),
+      clipStartRatio: clampF(v.clipStartRatio, 0, 0.9, fallback.clipStartRatio),
+      clipSeconds: clampI(v.clipSeconds, 5, 24, fallback.clipSeconds),
+      targetHz: clampI(v.targetHz, 100, 600, fallback.targetHz),
+      keyMin: clampI(v.keyMin, -12, 12, fallback.keyMin),
+      keyMax: clampI(v.keyMax, 6, 30, fallback.keyMax),
+      indexRate: clampF(v.indexRate, 0, 1, fallback.indexRate),
+      protect: clampF(v.protect, 0, 0.9, fallback.protect),
+      rmsMixRate: clampF(v.rmsMixRate, 0, 1, fallback.rmsMixRate),
       actionId: typeof v.actionId === 'string' && v.actionId !== '' ? v.actionId : fallback.actionId,
     };
   }

@@ -95,7 +95,11 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
     model: env.DEEPSEEK_MODEL?.trim() || 'deepseek-flash',
     thinking: env.DEEPSEEK_THINKING?.trim().toLowerCase() === 'enabled',
   };
-  const audioCache = createAudioCache({ audioDir: paths.audioCacheDir, logger, now });
+  // WT-P3-005 复审:淘汰引用保护——interaction 在下方初始化,闭包运行期取值
+  const audioCache = createAudioCache({
+    audioDir: paths.audioCacheDir, logger, now,
+    isProtected: (audioId) => interaction.isAudioInUse(audioId),
+  });
   const fixedReply = withProviderLabel(createFixedReplyProvider({ fallbackReplies: persona.fallbackReplies }), 'fixed-local');
   const deepseek = createDeepSeekReplyProvider({
     config: deepSeekConfig,
@@ -130,6 +134,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
         logger,
       },
       settings: () => effective().singing,
+      isProtected: (audioId) => interaction.isAudioInUse(audioId),
       logger,
       now,
       onSongReady: (payload) => interaction.enqueueSongReady(payload),
