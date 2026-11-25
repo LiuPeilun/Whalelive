@@ -19,3 +19,4 @@ coverage/
 
 # 本地模型服务接入文档:含服务器 IP/SSH 端口/内网拓扑,禁止入库(仅本地保留)
 docs/MODEL_SERVICE_ACCESS.md
+__pycache__/
