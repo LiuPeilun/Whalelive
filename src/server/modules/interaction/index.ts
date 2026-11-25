@@ -423,34 +423,32 @@ export function createInteraction(deps: {
     if (singing === null) return ack('唱歌功能还没准备好哦~');
     if (title === '') return ack('想听哪首呀?发「点歌 歌名」试试~');
     if (!deps.settings().singing.enabled) return ack('唱歌功能暂时没开哦~');
-    // WT-P3-007 复审:probe 预判可接性(缓存命中/配额)——确认语一次到位,
-    // 满载时直接如实告知"排满了",不再出现"正在准备"+busy 更正的自相矛盾序列。
+    // WT-P3-007 复审:probe 预判可接性(缓存命中/配额)+待播容量预判——
+    // 确认语一次到位:满载/队列将满时直接如实告知"排满了",
+    // 不再出现"这就来"+"排满了"或"正在准备"+"排满了"的自相矛盾序列。
     const probe = singing.probe(title);
+    const queueSaturated = queue.length() >= queue.getCapacity();
+    const willServe = probe.cached && !queueSaturated;
     const ackResult = ack(
-      probe.cached
+      probe.cached && !queueSaturated
         ? `《${title}》这就来~`
-        : probe.acceptable
+        : probe.acceptable && !queueSaturated
           ? `收到~正在准备《${title}》,唱好就送上来~`
           : '现在唱歌排满了,这首先记下来,稍后再点一次哦~',
     );
     if (!ackResult.accepted) return ackResult; // 确认都进不去(满载):不启动后台任务,接单结果=确认结果
-    if (!probe.acceptable) {
-      // 探测已判不可接:无任务可启动,接单结果如实为未受理
+    if (!probe.acceptable || queueSaturated) {
+      // 预判不可接(配额满,或缓存命中但待播队列将满):不启动任务/不入队成片,
+      // 接单结果如实为未受理
       touchCooldown(userKey);
       return { accepted: false, eventId, reason: 'song-busy-limit' };
     }
     const req = singing.requestSong(title, { eventId });
     if (!req.ok) {
+      // 竞态兜底(probe 可接但受理时恰好满):确认语可能已乐观,接单结果如实反映未受理
       logger.warn('interaction.song-request-rejected', { eventId, title, code: req.code, detail: req.detail });
-      // WT-P3-007 复审:后台满载时确认语说过的"正在准备"不成立,补一条如实的更正提示
-      if (req.code === 'busy-limit') {
-        // WT-P3-007 复审:补发如实的繁忙提示,但接单结果必须反映"歌未接"——
-        // accepted:false + reason,与已入队的确认/更正条目并存。
-        const busyAck = ackItem(`${eventId}-busy`, userKey, '现在唱歌排满了,这首先记下来,稍后再点一次哦~');
-        if (!busyAck.accepted) logger.warn('interaction.song-busy-ack-dropped', { eventId });
-        return { accepted: false, eventId, reason: 'song-busy-limit' };
-      }
-      return ackResult; // 其他拒绝(disabled 等)已在上方前置校验覆盖
+      touchCooldown(userKey);
+      return { accepted: false, eventId, reason: 'song-busy-limit' };
     }
     // 点歌算一次有效互动:冷却锚点与活跃锚点都对齐
     touchCooldown(userKey);

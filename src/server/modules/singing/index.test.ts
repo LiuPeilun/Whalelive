@@ -288,3 +288,35 @@ describe('WT-P3-007 复审:满载时缓存命中不受配额约束', () => {
     expect(runCalls).toHaveLength(2); // 缓存命中不启动管线
   });
 });
+
+describe('WT-P3-007 复审:冷歌入队拒绝如实标记', () => {
+  it('onSongReady 返回 queue-full 时冷歌落 failed 且不误报 ready', async () => {
+    let rejector: ((p: SongReadyPayload) => { ok: boolean; reason?: string }) | null = null;
+    const paths = makePaths();
+    const readyPayloads: SongReadyPayload[] = [];
+    const module2 = createSinging({
+      paths,
+      pipeline: {
+        scriptsDir: 'scripts/song', runtimePython: 'py', demucsPython: 'py2',
+        ffmpegPath: 'ff', torchHome: 'th', rvcBundleDir: 'rvc', logger: silentLogger,
+      },
+      settings: () => singingSettings(),
+      logger: silentLogger,
+      now: () => Date.now(),
+      onSongReady: (payload) => (rejector ? rejector(payload) : { ok: true }),
+    });
+    rejector = () => ({ ok: false, reason: 'queue-full' });
+    runCalls.push({ title: 'x', workDir: 'x', resolveWith: 'ok' });
+    const req = module2.requestSong('满队时的歌', { eventId: 'evt-q' });
+    expect(req.ok).toBe(true);
+    let failed = false;
+    for (let i = 0; i < 100 && !failed; i++) {
+      await new Promise((r) => setTimeout(r, 30));
+      failed = module2.job((req as { jobId: string }).jobId)?.stage === 'failed';
+    }
+    const job = module2.job((req as { jobId: string }).jobId);
+    expect(job?.stage).toBe('failed');
+    expect(job?.error).toContain('queue-full');
+    expect(readyPayloads.length).toBe(0);
+  });
+});

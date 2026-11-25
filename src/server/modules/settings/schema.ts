@@ -113,14 +113,14 @@ export function validateSinging(v: unknown): SettingsValidation {
     const fail = num(key, min, max);
     if (fail) return fail;
     if (!Number.isInteger(v[key])) {
-      return { ok: false, field: `singing.${key}`, reason: '需为整数(半音数)' };
+      return { ok: false, field: `singing.${key}`, reason: '需为整数' };
     }
     return null;
   };
   for (const c of [
     num('clipStartRatio', 0, 0.9),
-    num('clipSeconds', 5, 24),
-    num('targetHz', 100, 600),
+    numInt('clipSeconds', 5, 24),
+    numInt('targetHz', 100, 600),
     numInt('keyMin', -12, 12),
     numInt('keyMax', 6, 30),
     num('indexRate', 0, 1),

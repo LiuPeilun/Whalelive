@@ -318,7 +318,8 @@ describe('唱歌点歌接入(P3)', () => {
     const events: { title: string; eventId: string }[] = [];
     return {
       peekCached: over.peekCached ?? (() => false),
-      probe: over.probe ?? (() => ({ cached: false, acceptable: true })),
+      probe: over.probe ?? (() => ({ cached: false, reusable: false, acceptable: true })),
+      assess: over.assess ?? (() => ({ cached: false, reusable: false, acceptable: true })),
       requestSong: over.requestSong ?? ((title, source) => {
         events.push({ title, eventId: source.eventId });
         return { ok: true, jobId: 'song-x', cached: false };
@@ -371,4 +372,25 @@ describe('唱歌点歌接入(P3)', () => {
     expect(playback.plays.length).toBe(1);
     expect(playback.plays[0]!.performance.say).toContain('还没准备好');
   });
+
+  it('WT-P3-007 复审:待播队列满时,缓存命中点歌只给拒绝提示且无 song 条目', async () => {
+    const singing = fakeSinging({
+      peekCached: () => true,
+      probe: () => ({ cached: true, acceptable: true }),
+      requestSong: () => ({ ok: true, jobId: 'song-x', cached: true }),
+    });
+    const { interaction, playback } = build({ singing });
+    // 用 20 条普通弹幕填满待播队列(capacity 20),清空派发避免影响计数
+    for (let i = 0; i < 20; i++) {
+      interaction.enqueue(chatEvent(`普通弹幕 ${i}`, `user-${i}`));
+    }
+    await settle();
+    // 队列满:点缓存歌 → 确认条目进不去(或为拒绝提示),成片不会入队
+    const result = interaction.enqueue(chatEvent('点歌 篇章', '点歌员'));
+    await settle();
+    const songs = interaction.state().queue.items.filter((q) => q.type === 'song');
+    expect(songs.length).toBe(0); // 队列满,成片未入队(未接单)
+    void playback;
+  });
 });
+

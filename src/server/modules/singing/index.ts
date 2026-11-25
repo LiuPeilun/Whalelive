@@ -23,6 +23,8 @@ export type SongReadyPayload = {
 export type SingingModule = {
   /** 只读探测缓存命中(不产生副作用)。 */
   peekCached(title: string): boolean;
+  /** WT-P3-007 复审:可接性判定(单一实现,probe 与 requestSong 共用)。 */
+  assess(title: string): { cached: boolean; reusable: boolean; acceptable: boolean };
   /** WT-P3-007 复审:只读探测可接性(缓存命中不受配额约束)。 */
   probe(title: string): { cached: boolean; acceptable: boolean };
   requestSong(title: string, source: { eventId: string }): SongRequestResult;
@@ -172,6 +174,14 @@ export function createSinging(deps: {
       const published = cache.store(fs.readFileSync(outMp3), job.title, settingsFingerprint(s));
       fs.rmSync(outMp3, { force: true });
       const url = `/media/audio/${published}`;
+      // WT-P3-007 复审:onSongReady(可能因待播队列满拒绝)先于 ready touch——
+      // 入队失败时 fail() 才能落 failed,不再谎报 ready。
+      const accepted = deps.onSongReady({ jobId: job.jobId, eventId: job.eventId, title: job.title, key, audioUrl: url });
+      if (!accepted.ok) {
+        fail(job, `queue-full: ${accepted.reason ?? ''}`);
+        fs.rmSync(workDir, { recursive: true, force: true });
+        return;
+      }
       touch(job, { stage: 'ready', audioUrl: url, controller: null });
       logger.info('singing.job-ready', {
         jobId: job.jobId, title: job.title, chosenTitle: result.chosenTitle,
@@ -179,12 +189,6 @@ export function createSinging(deps: {
       });
       // workDir 清理(中间产物只保留日志结论)
       fs.rmSync(workDir, { recursive: true, force: true });
-      const accepted = deps.onSongReady({ jobId: job.jobId, eventId: job.eventId, title: job.title, key, audioUrl: url });
-      if (!accepted.ok) {
-        // WT-P3-007 复审:成片无法入队(待播队列满)——如实标记,允许重新点歌
-        fail(job, `queue-full: ${accepted.reason ?? ''}`);
-        return;
-      }
     } catch (err) {
       if (controller.signal.aborted || stopped) {
         // 中止路径:清理半成品 MP3,子进程确认退出后才释放配额
@@ -207,17 +211,27 @@ export function createSinging(deps: {
     peekCached(title: string): boolean {
       return cache.lookup(title.trim(), settingsFingerprint(settings())) !== null;
     },
-    /** WT-P3-007 复审:只读探测可接性(缓存命中不受配额约束)——供互动预判确认语,
-     *  避免"正在准备"与后续 busy 更正自相矛盾。 */
-    probe(title: string): { cached: boolean; acceptable: boolean } {
+    /** WT-P3-007 复审:可接性判定单一实现(probe 与 requestSong 共用,杜绝预判漂移)。
+   *  cached=已有成片(零成本,不受配额);reusable=同标题在途可复用(不新增管线,不受配额);
+   *  acceptable=enabled 且 (cached || reusable || 活跃<配额)。cancelling 计入占用。 */
+    assess(title: string): { cached: boolean; reusable: boolean; acceptable: boolean } {
       const s = settings();
       const clean = title.trim();
       const cached = clean !== '' && cache.lookup(clean, settingsFingerprint(s)) !== null;
-      const activeCount = [...jobs.values()].filter((j) => j.stage !== 'ready' && j.stage !== 'failed' && j.stage !== 'cancelling').length;
-      return {
-        cached,
-        acceptable: s.enabled && clean !== '' && (cached || activeCount < MAX_ACTIVE),
-      };
+      let reusable = false;
+      let activeCount = 0;
+      for (const job of jobs.values()) {
+        const ended = job.stage === 'ready' || job.stage === 'failed';
+        if (!ended) activeCount += 1;
+        if (job.title === clean && !ended && job.stage !== 'cancelling') reusable = true;
+      }
+      const acceptable = s.enabled && clean !== '' && (cached || reusable || activeCount < MAX_ACTIVE);
+      return { cached, reusable, acceptable };
+    },
+    /** 只读探测(供互动预判确认语)。 */
+    probe(title: string): { cached: boolean; acceptable: boolean } {
+      const a = this.assess(title);
+      return { cached: a.cached, acceptable: a.acceptable };
     },
     requestSong(title, source): SongRequestResult {
       if (!settings().enabled) return { ok: false, code: 'disabled', detail: 'singing disabled' };
@@ -225,24 +239,17 @@ export function createSinging(deps: {
       if (clean === '') return { ok: false, code: 'empty-title', detail: 'empty title' };
       prune();
 
-      // 同标题在途任务复用(同一首歌多人点不重复跑管线)。
-      // WT-P3-007 复审:cancelling(急停中)的任务不会产出成片,不可复用——否则
-      // 返回 ok 却永远等不到歌;复用缓存命中与配额检查在下方各自处理。
-      for (const job of jobs.values()) {
-        if (job.title === clean && job.stage !== 'ready' && job.stage !== 'failed' && job.stage !== 'cancelling') {
-          return { ok: true, jobId: job.jobId, cached: false };
-        }
-      }
-      // WT-P3-007 复审:缓存命中零成本,不受 CPU 配额约束——必须先于配额检查
-      const cachedId = cache.lookup(clean, settingsFingerprint(settings()));
-      if (cachedId !== null) {
+      // WT-P3-007 复审:可接性判定单一来源(assess),probe 与此处共用,杜绝预判漂移
+      const a = this.assess(clean);
+      if (a.cached) {
+        // 缓存命中:零成本直接就绪;先入队回调(可能因待播队列满失败),失败如实标记
         const cachedJob: JobState = {
           jobId: `song-${randomUUID().slice(0, 8)}`,
           eventId: source.eventId,
           title: clean,
-          stage: 'ready',
+          stage: 'queued',
           key: null,
-          audioUrl: `/media/audio/${cachedId}`,
+          audioUrl: null,
           chosenTitle: null,
           cached: true,
           error: null,
@@ -251,29 +258,42 @@ export function createSinging(deps: {
           controller: null,
         };
         jobs.set(cachedJob.jobId, cachedJob);
-        logger.info('singing.cache-hit', { jobId: cachedJob.jobId, title: clean, audioUrl: cachedJob.audioUrl });
-        deps.onSongReady({
+        const audioId = cache.lookup(clean, settingsFingerprint(settings()));
+        const accepted = deps.onSongReady({
           jobId: cachedJob.jobId, eventId: source.eventId, title: clean,
-          key: null, audioUrl: cachedJob.audioUrl!,
+          key: null, audioUrl: `/media/audio/${audioId}`,
         });
+        if (!accepted.ok) {
+          fail(cachedJob, `queue-full: ${accepted.reason ?? ''}`);
+          return { ok: false, code: 'busy-limit', detail: 'cache hit but queue full' };
+        }
+        touch(cachedJob, { stage: 'ready', audioUrl: `/media/audio/${audioId}` });
+        logger.info('singing.cache-hit', { jobId: cachedJob.jobId, title: clean, audioUrl: cachedJob.audioUrl });
         return { ok: true, jobId: cachedJob.jobId, cached: true };
       }
-      // WT-P3-002:并发上限(不同歌名同时点不无限启动管线,争抢 CPU/磁盘)。
-      // 复审修正:cancelling(已 abort 但子进程尚未退出)仍占配额——急停后旧任务
-      // 退出前,新点歌不允许启动,避免实际并发的任务数突破上限。
-      const activeCount = [...jobs.values()].filter((j) => j.stage !== 'ready' && j.stage !== 'failed').length;
-      if (activeCount >= MAX_ACTIVE) {
+      if (a.reusable) {
+        // 同标题在途任务复用(同一首歌多人点不重复跑管线);cancelling 不可复用
+        for (const job of jobs.values()) {
+          if (job.title === clean && job.stage !== 'ready' && job.stage !== 'failed' && job.stage !== 'cancelling') {
+            return { ok: true, jobId: job.jobId, cached: false };
+          }
+        }
+      }
+      if (!a.acceptable) {
+        // WT-P3-002:并发上限(不同歌名同时点不无限启动管线,争抢 CPU/磁盘);
+        // cancelling 仍占配额——急停后旧任务退出前,新点歌不允许启动。
         return { ok: false, code: 'busy-limit', detail: 'too many active jobs' };
       }
+      const cachedId = null;
       const job: JobState = {
         jobId: `song-${randomUUID().slice(0, 8)}`,
         eventId: source.eventId,
         title: clean,
-        stage: cachedId !== null ? 'ready' : 'queued',
+        stage: 'queued',
         key: null,
-        audioUrl: cachedId !== null ? `/media/audio/${cachedId}` : null,
+        audioUrl: null,
         chosenTitle: null,
-        cached: cachedId !== null,
+        cached: false,
         error: null,
         startedAt: now(),
         updatedAt: now(),

@@ -107,8 +107,14 @@ export function createSongCache(deps: {
     pruneSongs(audioDir, id, recentWindowMs, deps.isProtected ?? (() => false));
     const target = filePath(id);
     const tmp = `${target}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, mp3);
-    fs.renameSync(tmp, target);
+    try {
+      fs.writeFileSync(tmp, mp3);
+      fs.renameSync(tmp, target);
+    } catch (err) {
+      // WT-P3-002 复审:原子写/改名失败(目标被占等)清理临时发布文件
+      try { fs.rmSync(tmp, { force: true }); } catch { /* 已不存在 */ }
+      throw err;
+    }
     return id;
   }
 
