@@ -15,7 +15,7 @@ import { createCharacters, type CharactersModule } from './modules/characters/in
 import { createEvents } from './modules/events/index.js';
 import { createInteraction, RESERVED_GIFT_ACTIONS, type InteractionModule } from './modules/interaction/index.js';
 import { createSinging } from './modules/singing/index.js';
-import { warmConvertRuntime, type PipelineDeps } from './modules/singing/pipeline.js';
+import { warmConvertRuntime, type PipelineDeps, type WarmupHandle } from './modules/singing/pipeline.js';
 import { createPlayback, type PlaybackModule } from './modules/playback/index.js';
 import { mockEvent, type MockEventInput } from './integrations/platforms/mock.js';
 import { createBilibiliOpenClient, type BilibiliOpenHandle } from './integrations/platforms/bilibili-open.js';
@@ -121,6 +121,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
 
   // 唱歌模块(P3):本机工具链路径(仓库相对,GETTING_STARTED 摆放约定);interaction 先建,singing 惰性回接
   let singingModule: ReturnType<typeof createSinging> | null = null;
+  let singingWarmup: WarmupHandle | null = null;
   {
     const rvcBundle = path.join(paths.projectRoot, '.tools', 'rvc', 'RVC20260718DML');
     const singingPipeline: PipelineDeps = {
@@ -142,9 +143,10 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
       onSongReady: (payload) => interaction.enqueueSongReady(payload),
     });
     // 启动期缓存预热(W,操作者已采纳):唱歌开启时拉起一个换声工作进程,完成依赖导入与
-    // 模型加载(热态 16-28 秒)后立即收尾——把首次磁盘读取与杀软扫描挪到启动期。
+    // 模型加载(热态 16-28 秒)后自行收尾——把首次磁盘读取与杀软扫描挪到启动期。
     // 无常驻内存;工具链缺失或被拦截时仅记日志,不影响服务。
-    if (effective().singing.enabled) warmConvertRuntime(singingPipeline, logger);
+    // 句柄纳入应用生命周期(WT-P3-028):close() 时终止预热进程并等其退出。
+    singingWarmup = effective().singing.enabled ? warmConvertRuntime(singingPipeline, logger) : null;
   }
 
   // 控制台试听:直接经 edge 适配器(验证真实通道),音色可覆盖;超时对齐 generation.ttsTimeoutMs
@@ -365,6 +367,11 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
     clearInterval(ticker);
     interaction.stop();
     singingModule?.stop();
+    // WT-P3-028:启动预热纳入生命周期——终止预热进程并等其退出(有界,防 taskkill 异常阻塞关停)
+    if (singingWarmup) {
+      singingWarmup.stop();
+      await Promise.race([singingWarmup.done, new Promise<void>((resolve) => setTimeout(resolve, 5_000))]);
+    }
     edgeTts.close();
     ws.closeAll();
     wss.close();

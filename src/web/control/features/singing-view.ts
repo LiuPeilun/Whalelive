@@ -29,6 +29,9 @@ const STEP_FAILURES: Record<string, string> = {
   convert: '换声失败',
 };
 
+/** 成片被缓存淘汰后的提示(任务结果保留,试听资源已不在)。 */
+const EXPIRED_NOTE = '成片缓存已被淘汰,重新点歌即可再生成';
+
 function firstLine(text: string): string {
   return text.split('\n').map((l) => l.trim()).find((l) => l !== '') ?? text;
 }
@@ -136,15 +139,27 @@ export function mountSingingView(context: ControlContext): void {
           ...(job.stage === 'failed'
             ? [el('div', { className: 'job-error mono', textContent: describeFailure(job.error ?? '未知原因'), title: failureDetail(job.error ?? '未知原因') })]
             : []),
+          // WT-P3-029:成片已被缓存淘汰时任务结果保留,如实反映试听资源当前不可用
+          ...(job.stage === 'ready' && job.audioAvailable === false
+            ? [el('div', { className: 'muted job-expired', textContent: EXPIRED_NOTE })]
+            : []),
         );
-        if (job.stage === 'ready' && job.audioUrl !== null && entry.audio === null) {
+        const audioUrl = job.audioUrl;
+        const audioUsable = job.stage === 'ready' && audioUrl !== null && job.audioAvailable !== false;
+        if (audioUsable && entry.audio === null) {
           // 成片地址由服务端按缓存文件名生成(/media/audio/song-<hash>.mp3),不经观众输入
           const audio = document.createElement('audio');
           audio.controls = true;
           audio.preload = 'none';
-          audio.src = job.audioUrl;
+          audio.src = audioUrl;
           entry.audio = audio;
           entry.li.append(audio);
+        }
+        if (!audioUsable && entry.audio !== null) {
+          // 成片淘汰:停止并移除指向已失效地址的试听元素
+          entry.audio.pause();
+          entry.audio.remove();
+          entry.audio = null;
         }
       }
       entry.elapsed.textContent = elapsedLabel(job, nowMs);

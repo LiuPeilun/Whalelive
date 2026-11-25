@@ -93,6 +93,11 @@ export function createSinging(deps: {
       audioUrl: job.audioUrl,
       chosenTitle: job.chosenTitle,
       cached: job.cached,
+      // WT-P3-029:成片可能已被缓存淘汰(30 个名额),任务历史结果保留,试听可用性按当前文件如实反映
+      audioAvailable:
+        job.audioUrl === null
+          ? null
+          : fs.existsSync(path.join(paths.audioCacheDir, path.basename(job.audioUrl))),
       error: job.error,
       startedAt: job.startedAt,
       updatedAt: job.updatedAt,

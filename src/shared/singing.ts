@@ -26,6 +26,9 @@ export type SongJobView = {
   chosenTitle: string | null;
   /** 是否命中成片缓存(二次点歌秒出)。 */
   cached: boolean;
+  /** 成片文件当前是否仍在缓存中(ready 任务专用,面板据此显示/隐藏试听;
+   *  缓存淘汰后为 false,任务历史结果保留;其余阶段为 null)。 */
+  audioAvailable: boolean | null;
   error: string | null;
   startedAt: number;
   updatedAt: number;

@@ -16,7 +16,7 @@ import type { SingingSettings } from '../../../shared/singing.js';
 // pipeline/encodeMp3 用可编程替身,不真跑子进程。
 
 // ── 可编程替身:挂起/失败的受控 pipeline ──
-type RunCall = { title: string; workDir: string; resolveWith: 'ok' | 'fail' | 'hang' | 'steps' };
+type RunCall = { title: string; workDir: string; resolveWith: 'ok' | 'fail' | 'hang' | 'steps' | 'reject-on-abort' };
 const runCalls: RunCall[] = [];
 let resolveAll: (() => void) | null = null;
 /** 'steps' 模式:管线挂起,阶段回报句柄交给测试经 pushStage 推进。 */
@@ -25,8 +25,9 @@ function pushStage(stage: SongJobStage): void {
   stageSink?.(stage);
 }
 
-vi.mock('./pipeline.js', () => ({
-  PipelineStepError: class extends Error {
+vi.mock('./pipeline.js', () => {
+  // 工厂内局部错误类(vi.mock 提升后不能引用外部导入)
+  class StepError extends Error {
     step: string;
     tail: string;
     constructor(step: string, tail: string) {
@@ -34,13 +35,26 @@ vi.mock('./pipeline.js', () => ({
       this.step = step;
       this.tail = tail;
     }
-  },
-  runPipeline: (_deps: unknown, opts: { title: string; workDir: string; onStage?: (stage: SongJobStage) => void }) => {
+  }
+  return {
+    PipelineStepError: StepError,
+  runPipeline: (_deps: unknown, opts: { title: string; workDir: string; signal: AbortSignal; onStage?: (stage: SongJobStage) => void }) => {
     const mode = runCalls[runCalls.length - 1]?.resolveWith ?? 'ok';
     if (mode === 'steps') {
       return new Promise<never>(() => { stageSink = opts.onStage ?? null; });
     }
     if (mode === 'hang') return new Promise<void>(() => { resolveAll = () => { /* 挂起占位 */ }; });
+    if (mode === 'reject-on-abort') {
+      // WT-P3-002 复审:中止后管线按 close 确认语义拒绝(替身即时模拟已确认退出的终态)
+      return new Promise<never>((_resolve, reject) => {
+        const fail = (): void => reject(new StepError('convert', 'aborted'));
+        if (opts.signal.aborted) {
+          fail();
+          return;
+        }
+        opts.signal.addEventListener('abort', fail, { once: true });
+      });
+    }
     if (mode === 'fail') return Promise.reject(new Error('fetch: no results'));
     // ok:产出一个最小 wav 文件(sufficient for encodeMp3 替身读取)
     const wav = path.join(opts.workDir, 'song-converted.wav');
@@ -55,7 +69,8 @@ vi.mock('./pipeline.js', () => ({
     fs.writeFileSync(outPath, fs.readFileSync(wavPath));
     return Promise.resolve();
   },
-}));
+  };
+});
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whaletalk-singing-'));
 afterAll(() => {
@@ -229,6 +244,49 @@ describe('singing 任务生命周期', () => {
     expect(module.requestSong('新歌', { eventId: 'evt-8' })).toEqual({
       ok: false, code: 'busy-limit', detail: 'too many active jobs',
     });
+  });
+
+  it('WT-P3-002 复审:急停任务结算后配额释放,可重新受理点歌', async () => {
+    runCalls.push({ title: 'x', workDir: 'x', resolveWith: 'reject-on-abort' });
+    runCalls.push({ title: 'x', workDir: 'x', resolveWith: 'reject-on-abort' });
+    const { module } = makeModule();
+    const r1 = module.requestSong('急停歌一', { eventId: 'evt-r1' });
+    const r2 = module.requestSong('急停歌二', { eventId: 'evt-r2' });
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+    module.cancelAll('emergency-stop');
+    // 管线确认退出并拒绝后:任务落 failed('cancelled'),在途归零,新点歌立即可受理
+    const waitReleased = async (): Promise<boolean> => {
+      for (let i = 0; i < 100; i += 1) {
+        if (module.jobsView().active === 0) return true;
+        await new Promise((r2) => setTimeout(r2, 20));
+      }
+      return false;
+    };
+    expect(await waitReleased()).toBe(true);
+    const j1 = module.job((r1 as { jobId: string }).jobId);
+    expect(j1?.stage).toBe('failed');
+    expect(j1?.error).toBe('cancelled');
+    expect(module.jobsView().active).toBe(0);
+    expect(module.requestSong('急停后的新歌', { eventId: 'evt-r3' }).ok).toBe(true);
+    module.cancelAll('test-cleanup');
+  });
+
+  it('WT-P3-029 复审:成片被缓存淘汰后任务结果保留,试听可用性如实反映', () => {
+    const { paths, module } = makeModule();
+    const cache = createSongCache({ audioDir: paths.audioCacheDir, recentWindowMs: 0 });
+    const id = cache.store(Buffer.from('cached'), '淘汰歌', '0.4|24|310|-6|24|0.3|0.33|0.25');
+    const req = module.requestSong('淘汰歌', { eventId: 'evt-exp' }) as { jobId: string };
+    const ready = module.job(req.jobId);
+    expect(ready?.stage).toBe('ready');
+    expect(ready?.audioAvailable).toBe(true);
+    expect(ready?.audioUrl).toBe(`/media/audio/${id}`);
+    // 成片文件被淘汰(如 30 名额满/手动清理):任务历史保留,试听不可用如实标记
+    fs.rmSync(path.join(paths.audioCacheDir, id), { force: true });
+    const after = module.job(req.jobId);
+    expect(after?.stage).toBe('ready');
+    expect(after?.audioUrl).toBe(`/media/audio/${id}`);
+    expect(after?.audioAvailable).toBe(false);
   });
 
   it('禁用时拒绝;空标题拒绝', () => {
