@@ -261,6 +261,7 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
       baseUrl: deepSeekConfig.baseUrl,
       thinking: deepSeekConfig.thinking,
     },
+    singing: singingModule,
     logger,
   });
 

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createSinging, type SongReadyPayload } from './index.js';
-import type { SongJobView } from '../../../shared/singing.js';
+import type { SongJobStage, SongJobView } from '../../../shared/singing.js';
 type SingingModuleView = SongJobView | null;
 import { keyForMedianF0 } from './keys.js';
 import { createSongCache, normalizeTitle, songCacheId } from './cache.js';
@@ -16,9 +16,14 @@ import type { SingingSettings } from '../../../shared/singing.js';
 // pipeline/encodeMp3 用可编程替身,不真跑子进程。
 
 // ── 可编程替身:挂起/失败的受控 pipeline ──
-type RunCall = { title: string; workDir: string; resolveWith: 'ok' | 'fail' | 'hang' };
+type RunCall = { title: string; workDir: string; resolveWith: 'ok' | 'fail' | 'hang' | 'steps' };
 const runCalls: RunCall[] = [];
 let resolveAll: (() => void) | null = null;
+/** 'steps' 模式:管线挂起,阶段回报句柄交给测试经 pushStage 推进。 */
+let stageSink: ((stage: SongJobStage) => void) | null = null;
+function pushStage(stage: SongJobStage): void {
+  stageSink?.(stage);
+}
 
 vi.mock('./pipeline.js', () => ({
   PipelineStepError: class extends Error {
@@ -30,8 +35,11 @@ vi.mock('./pipeline.js', () => ({
       this.tail = tail;
     }
   },
-  runPipeline: (_deps: unknown, opts: { title: string; workDir: string }) => {
+  runPipeline: (_deps: unknown, opts: { title: string; workDir: string; onStage?: (stage: SongJobStage) => void }) => {
     const mode = runCalls[runCalls.length - 1]?.resolveWith ?? 'ok';
+    if (mode === 'steps') {
+      return new Promise<never>(() => { stageSink = opts.onStage ?? null; });
+    }
     if (mode === 'hang') return new Promise<void>(() => { resolveAll = () => { /* 挂起占位 */ }; });
     if (mode === 'fail') return Promise.reject(new Error('fetch: no results'));
     // ok:产出一个最小 wav 文件(sufficient for encodeMp3 替身读取)
@@ -85,7 +93,7 @@ function singingSettings(patch?: Partial<SingingSettings>): SingingSettings {
   };
 }
 
-function makeModule(opts?: { settings?: SingingSettings; ready: SongReadyPayload[] }) {
+function makeModule(opts?: { settings?: SingingSettings; ready: SongReadyPayload[]; now?: () => number }) {
   const paths = makePaths();
   let enabled = true;
   const settingsPatch = opts?.settings;
@@ -102,7 +110,7 @@ function makeModule(opts?: { settings?: SingingSettings; ready: SongReadyPayload
       return { ...base, enabled };
     },
     logger: silentLogger,
-    now: () => Date.now(),
+    now: opts?.now ?? (() => Date.now()),
     onSongReady: (payload) => { readyPayloads.push(payload); return { ok: true }; },
   });
   return { paths, module, readyPayloads, setEnabled: (v: boolean) => { enabled = v; } };
@@ -111,6 +119,7 @@ function makeModule(opts?: { settings?: SingingSettings; ready: SongReadyPayload
 beforeEach(() => {
   runCalls.length = 0;
   resolveAll = null;
+  stageSink = null;
 });
 
 describe('keyForMedianF0(f0 自适应移调公式)', () => {
@@ -318,5 +327,80 @@ describe('WT-P3-007 复审:冷歌入队拒绝如实标记', () => {
     expect(job?.stage).toBe('failed');
     expect(job?.error).toContain('queue-full');
     expect(readyPayloads.length).toBe(0);
+  });
+});
+
+describe('点歌面板视图(GET /api/singing/jobs 数据源)', () => {
+  it('阶段随管线步骤推进:取数时看到真实进度,而不是全程停在 queued', () => {
+    runCalls.push({ title: 'x', workDir: 'x', resolveWith: 'steps' });
+    const { module } = makeModule({ ready: [] });
+    const req = module.requestSong('阶段歌', { eventId: 'evt-stage' }) as { jobId: string };
+    expect(module.jobsView().jobs[0]).toMatchObject({ jobId: req.jobId, stage: 'queued' });
+    const seen: Array<string | undefined> = [];
+    for (const stage of ['fetching', 'separating', 'analyzing', 'converting'] as const) {
+      pushStage(stage);
+      seen.push(module.jobsView().jobs[0]?.stage);
+    }
+    expect(seen).toEqual(['fetching', 'separating', 'analyzing', 'converting']);
+    expect(module.jobsView().active).toBe(1);
+    module.cancelAll('test');
+  });
+
+  it('紧急停止置位的 cancelling 不被迟到的阶段回报覆盖,也不被同标题点歌复用', () => {
+    runCalls.push({ title: 'x', workDir: 'x', resolveWith: 'steps' });
+    const { module } = makeModule({ ready: [] });
+    const req = module.requestSong('取消歌', { eventId: 'evt-cancel' }) as { jobId: string };
+    pushStage('fetching');
+    module.cancelAll('emergency-stop');
+    expect(module.job(req.jobId)?.stage).toBe('cancelling');
+    // 步骤之间被中止:下一步开始前的阶段回报晚于取消到达
+    pushStage('separating');
+    expect(module.job(req.jobId)?.stage).toBe('cancelling');
+    expect(module.jobsView().active).toBe(1);
+    expect(module.assess('取消歌')).toMatchObject({ reusable: false });
+  });
+
+  it('在途数与受理配额同口径;任务按开始时间新 → 旧排列', () => {
+    runCalls.push({ title: 'x', workDir: 'x', resolveWith: 'hang' });
+    let clock = 1_000;
+    const { module } = makeModule({ ready: [], now: () => clock });
+    expect(module.jobsView()).toMatchObject({ enabled: true, maxActive: 2, active: 0, jobs: [] });
+    clock += 1;
+    const first = module.requestSong('歌一', { eventId: 'evt-v1' }) as { jobId: string };
+    clock += 1;
+    const second = module.requestSong('歌二', { eventId: 'evt-v2' }) as { jobId: string };
+    const view = module.jobsView();
+    expect(view.active).toBe(2);
+    expect(view.jobs.map((j) => j.jobId)).toEqual([second.jobId, first.jobId]);
+    // 占满并发上限:第三个不同标题被拒,与视图显示的「在途 2 / 2」一致
+    expect(module.requestSong('歌三', { eventId: 'evt-v3' })).toEqual({ ok: false, code: 'busy-limit', detail: 'too many active jobs' });
+    module.cancelAll('test');
+  });
+
+  it('已结束任务保留在视图中:就绪带成片地址与移调值,失败带原因;在途数归零', async () => {
+    const { module } = makeModule({ ready: [] });
+    runCalls.push({ title: 'x', workDir: 'x', resolveWith: 'fail' });
+    const bad = module.requestSong('不存在的歌', { eventId: 'evt-f' }) as { jobId: string };
+    runCalls.push({ title: 'x', workDir: 'x', resolveWith: 'ok' });
+    const good = module.requestSong('好歌', { eventId: 'evt-g' }) as { jobId: string };
+    const waitEnded = async (jobId: string): Promise<void> => {
+      for (let i = 0; i < 100; i += 1) {
+        const stage = module.job(jobId)?.stage;
+        if (stage === 'ready' || stage === 'failed') return;
+        await new Promise((r) => setTimeout(r, 30));
+      }
+    };
+    await waitEnded(bad.jobId);
+    await waitEnded(good.jobId);
+    const view = module.jobsView();
+    expect(view.active).toBe(0);
+    const byId = new Map(view.jobs.map((j) => [j.jobId, j]));
+    expect(byId.get(bad.jobId)).toMatchObject({ stage: 'failed', error: expect.stringContaining('no results'), audioUrl: null });
+    expect(byId.get(good.jobId)).toMatchObject({ stage: 'ready', key: 7, audioUrl: expect.stringMatching(/^\/media\/audio\//), error: null });
+  });
+
+  it('唱歌关闭时视图如实显示未开启', () => {
+    const { module } = makeModule({ settings: singingSettings({ enabled: false }), ready: [] });
+    expect(module.jobsView()).toMatchObject({ enabled: false, active: 0, jobs: [] });
   });
 });

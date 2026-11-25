@@ -81,10 +81,10 @@ BILIBILI_COOKIE=
 BILIBILI_OPEN_ACCESS_KEY_ID=
 BILIBILI_OPEN_ACCESS_KEY_SECRET=
 BILIBILI_OPEN_APP_ID=
-BILIBILI_OPEN_ANCHOR_CODE=
+BILIBILI_OPEN_CODE=
 ```
 
-初始 `PLATFORM=mock` 使用模拟事件。`bilibili-web` 接法按实现和当前平台要求配置房间号及登录信息，`bilibili-open` 接法配置应用凭据和主播身份码。TTS 音色列表由所选提供方加载，正式云语音服务增加其对应配置。
+初始 `PLATFORM=mock` 使用模拟事件。`bilibili-web` 接法按实现和当前平台要求配置房间号及登录信息，`bilibili-open` 接法配置应用凭据和主播身份码（键名 `BILIBILI_OPEN_CODE`）。TTS 音色列表由所选提供方加载，正式云语音服务增加其对应配置。
 
 ### 3.0 语音（已默认配置，无需额外步骤）
 
@@ -172,7 +172,15 @@ OBS 浏览器源支持网页画面、透明背景与音频。**实测（OBS 33.0
 node scripts/singing-smoke.mjs 3721
 ```
 
-冒烟会启动隔离实例并发起一次真实点歌（B 站搜歌→分离→换声→落盘），约 2-3 分钟。缺依赖时的提示：`spawn` 报 `ENOENT` 对应路径不存在；`PYTHONIOENCODING` 乱码说明用了非官方 runtime；日志出现 `search: no reliable match` 说明该歌没有可靠源（换歌名重试）。
+冒烟会启动隔离实例并发起两次真实点歌（B 站搜歌→分离→换声→落盘，另有一次「查无此歌」的失败路径），约 2-3 分钟；18 项全部通过说明管线与控制台点歌面板的数据源都正常。缺依赖时的提示：`spawn` 报 `ENOENT` 对应路径不存在；`PYTHONIOENCODING` 乱码说明用了非官方 runtime；日志出现 `search: no reliable match` 说明该歌没有可靠源（换歌名重试）。
+
+**查看点歌进度**：控制台的「点歌任务」区块列出最近任务——阶段（排队中 → 搜歌下载 → 人声分离 → 音高分析 → 换声中 → 已就绪）、来源视频标题、移调值与耗时。「已就绪」的任务带试听播放器（成片已同时排入待播队列）；失败任务显示中文原因（如「取歌失败:…」），鼠标悬停可看完整报错。「在途 n / 2」是正在制作的任务数，占满时新点歌会被婉拒。点歌后没动静时先看这里。
+
+面板本身的浏览器实测（需要本机 Edge，用预置成片缓存，不跑完整管线）：
+
+```
+node scripts/singing-panel-e2e.mjs 3793
+```
 
 ## 8. 常见问题
 

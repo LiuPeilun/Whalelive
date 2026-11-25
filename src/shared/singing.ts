@@ -31,6 +31,18 @@ export type SongJobView = {
   updatedAt: number;
 };
 
+/** 点歌面板只读快照(GET /api/singing/jobs,控制台凭据)。 */
+export type SingingJobsView = {
+  /** 当前生效的 singing.enabled。 */
+  enabled: boolean;
+  /** 并发在途上限:超出直接拒绝(busy-limit),不排队。 */
+  maxActive: number;
+  /** 在途任务数(含 cancelling),与点歌受理判定同口径。 */
+  active: number;
+  /** 最近任务,新 → 旧;已结束任务保留一段时间后被清理。 */
+  jobs: SongJobView[];
+};
+
 export type SongRequestResult =
   | { ok: true; jobId: string; cached: boolean }
   | { ok: false; code: 'disabled' | 'empty-title' | 'busy-title' | 'busy-limit'; detail: string };

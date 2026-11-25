@@ -13,6 +13,7 @@ import type { EdgeTtsSpeech } from '../../integrations/tts/edge-tts.js';
 import type { ReplyProvider } from '../../modules/interaction/providers.js';
 import type { ReplyRouter } from '../../integrations/llm/reply-router.js';
 import { LlmPreviewError } from '../../integrations/llm/reply-router.js';
+import type { SingingModule } from '../../modules/singing/index.js';
 import type { createAccessControl } from '../auth.js';
 
 // 路由、请求校验、响应与资源传输(PROJECT_STRUCTURE《接口与页面路径》)。
@@ -41,6 +42,8 @@ export type HttpDeps = {
     baseUrl: string;
     thinking: boolean;
   };
+  /** 点歌面板只读快照(P3 增强)。 */
+  singing: Pick<SingingModule, 'jobsView'>;
   logger: Logger;
 };
 
@@ -265,6 +268,13 @@ export function registerHttpRoutes(fastify: FastifyInstance, deps: HttpDeps): vo
   fastify.get('/api/control/character', async (request, reply) => {
     if (!guardControl(deps, request, reply)) return reply;
     return deps.characters.view();
+  });
+
+  // 点歌面板只读快照:控制台凭据(与 /api/state 同一校验),播放端凭据不可读——
+  // 任务标题来自观众输入,失败原因含子进程 stderr,只给本机操作者。
+  fastify.get('/api/singing/jobs', async (request, reply) => {
+    if (!guardControl(deps, request, reply)) return reply;
+    return deps.singing.jobsView();
   });
 
   fastify.post('/api/control/pause', async (request, reply) => {

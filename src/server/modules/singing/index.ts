@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { AppPaths } from '../../infrastructure/paths.js';
 import type { Logger } from '../../infrastructure/logger.js';
-import type { SingingSettings, SongJobStage, SongJobView, SongRequestResult } from '../../../shared/singing.js';
+import type { SingingJobsView, SingingSettings, SongJobStage, SongJobView, SongRequestResult } from '../../../shared/singing.js';
 import { encodeMp3, PipelineStepError, runPipeline, type PipelineDeps } from './pipeline.js';
 import { createSongCache, settingsFingerprint, type SongCache } from './cache.js';
 
@@ -30,6 +30,8 @@ export type SingingModule = {
   requestSong(title: string, source: { eventId: string }): SongRequestResult;
   job(jobId: string): SongJobView | null;
   jobs(): SongJobView[];
+  /** 点歌面板只读快照(GET /api/singing/jobs)。 */
+  jobsView(): SingingJobsView;
   /** 紧急停止:终止全部在途任务(成片缓存不受影响)。 */
   cancelAll(reason: string): void;
   stop(): void;
@@ -97,6 +99,11 @@ export function createSinging(deps: {
     };
   }
 
+  /** 在途判定(并发配额与面板视图共用同一口径):未到 ready/failed 即在途,cancelling 计入。 */
+  function isActive(stage: SongJobStage): boolean {
+    return stage !== 'ready' && stage !== 'failed';
+  }
+
   // WT-P3-002:只清理已结束任务(活跃任务永不删,否则紧急取消与状态追踪会漏);
   // 容量上限只对已结束任务生效,最旧优先淘汰。
   function prune(): void {
@@ -147,6 +154,10 @@ export function createSinging(deps: {
         workDir,
         settings: s,
         signal: controller.signal,
+        // 阶段随管线步骤推进(点歌面板显示真实进度);cancelling 由紧急停止置位,不被后续步骤覆盖
+        onStage: (stage) => {
+          if (job.stage !== 'cancelling') touch(job, { stage });
+        },
       });
       if (controller.signal.aborted || stopped) {
         settleCancelled(job, null);
@@ -221,7 +232,7 @@ export function createSinging(deps: {
       let reusable = false;
       let activeCount = 0;
       for (const job of jobs.values()) {
-        const ended = job.stage === 'ready' || job.stage === 'failed';
+        const ended = !isActive(job.stage);
         if (!ended) activeCount += 1;
         if (job.title === clean && !ended && job.stage !== 'cancelling') reusable = true;
       }
@@ -321,6 +332,16 @@ export function createSinging(deps: {
     jobs(): SongJobView[] {
       prune();
       return [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt).map(view);
+    },
+
+    jobsView(): SingingJobsView {
+      const all = this.jobs();
+      return {
+        enabled: settings().enabled,
+        maxActive: MAX_ACTIVE,
+        active: all.filter((job) => isActive(job.stage)).length,
+        jobs: all,
+      };
     },
 
     cancelAll(reason: string): void {

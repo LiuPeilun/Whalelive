@@ -85,6 +85,11 @@ WhaleTalk/
 │  │  │  └─ settings/                配置加载、校验、保存与生效
 │  │  │     ├─ index.ts              模块公开入口
 │  │  │     └─ schema.ts             服务端配置结构与校验
+│  │  │  ├─ singing/                 P3 点歌任务、成片缓存与换声管线编排
+│  │  │  │  ├─ index.ts              模块公开入口与任务生命周期
+│  │  │  │  ├─ pipeline.ts           子进程管线编排（搜歌 → 分离 → 测 f0 → 换声）
+│  │  │  │  ├─ cache.ts              成片确定性缓存
+│  │  │  │  └─ keys.ts               f0 自适应移调
 │  │  │
 │  │  ├─ integrations/
 │  │  │  ├─ platforms/
@@ -160,6 +165,7 @@ WhaleTalk/
 | `playback` | 向播放端派发表演、核对回执、完成与失败恢复 | 当前表演的音画状态、播放端租约 | `play`、`report`、`stop`、播放状态视图 |
 | `characters` | 角色清单、动作白名单、资源定位和授权元数据 | 已校验角色目录与资源索引 | `list`、`resolveAction`、`resolveAsset` |
 | `settings` | 默认值、用户覆盖、环境覆盖、原子保存和生效 | 已校验的有效配置与版本 | `read`、`update`、脱敏设置视图 |
+| `singing` | P3 点歌任务生命周期、成片缓存、换声子进程管线编排 | 内存任务表与并发配额（成片落盘持久，重启后仍可命中缓存） | `requestSong`、`probe`、`jobsView`、`cancelAll` |
 
 `interaction` 的当前任务可以处于等待、生成、合成或等待播放完成。`playback` 记录实际播放端的音画轨道和回执。前端队列视图来自服务端状态快照，控制操作通过命令交给持有相应状态的模块执行。
 
@@ -241,6 +247,7 @@ type PlaybackResult =
 | `POST /api/control/stop` | 紧急停止并保持暂停 | interaction 与 playback |
 | `GET /api/settings` | 脱敏设置与生效状态 | settings |
 | `PUT /api/settings` | 校验并保存用户设置 | settings |
+| `GET /api/singing/jobs` | 点歌面板只读快照：任务阶段、成片地址、失败原因 | singing |
 | `GET /media/pets/:petId/:assetId` | 通过清单解析角色资源 | characters |
 | `GET /media/audio/:audioId` | 返回有界音频缓存 | audio-cache |
 | `/ws` | 状态推送、播放端登记、表演与回执 | `transport/ws` |

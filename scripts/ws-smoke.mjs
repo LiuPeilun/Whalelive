@@ -78,6 +78,20 @@ const controlAuth = { authorization: `Bearer ${access.control}` };
   check('播放端凭据访问控制接口被拒(401)', playbackCred.status === 401, `status=${playbackCred.status}`);
   const control = await http('/api/state', { headers: controlAuth });
   check('控制凭据访问 /api/state 通过', control.status === 200 && typeof control.body.runId === 'string');
+
+  // 点歌面板快照(P3 增强)与 /api/state 共用控制台凭据校验;只读,不触发任何制作任务
+  const jobsNone = await http('/api/singing/jobs');
+  check('无凭据访问 /api/singing/jobs 被拒(401)', jobsNone.status === 401, `status=${jobsNone.status}`);
+  const jobsPlayback = await http('/api/singing/jobs', { headers: { authorization: `Bearer ${access.playback}` } });
+  check('播放端凭据访问 /api/singing/jobs 被拒(401)', jobsPlayback.status === 401, `status=${jobsPlayback.status}`);
+  const jobsControl = await http('/api/singing/jobs', { headers: controlAuth });
+  const jobsBody = jobsControl.body ?? {};
+  check(
+    '控制凭据读取点歌面板快照(结构完整)',
+    jobsControl.status === 200 && typeof jobsBody.enabled === 'boolean' && Number.isInteger(jobsBody.maxActive)
+      && Number.isInteger(jobsBody.active) && Array.isArray(jobsBody.jobs),
+    JSON.stringify(jobsControl.body),
+  );
 }
 
 // 3. WS:错误凭据被拒

@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import type { Logger } from '../../infrastructure/logger.js';
-import type { SingingSettings } from '../../../shared/singing.js';
+import type { SingingSettings, SongJobStage } from '../../../shared/singing.js';
 import { keyForMedianF0 } from './keys.js';
 
 export type PipelineDeps = {
@@ -155,6 +155,8 @@ export async function runPipeline(
     workDir: string;
     settings: SingingSettings;
     signal: AbortSignal;
+    /** 每步开始前回报阶段(任务视图据此显示真实进度;失败时停在该步)。 */
+    onStage?(stage: SongJobStage): void;
   },
 ): Promise<PipelineResult> {
   const { scriptsDir, runtimePython, demucsPython, ffmpegPath, torchHome, rvcBundleDir, logger } = deps;
@@ -163,6 +165,7 @@ export async function runPipeline(
   const log = (line: string): void => logger.info('singing.step', { title: opts.title, line });
 
   // [1/4] 搜歌+下载+切片(runtime python,仅标准库+ffmpeg)
+  opts.onStage?.('fetching');
   const fetchOut = await runStep(
     'fetch',
     runtimePython,
@@ -175,6 +178,7 @@ export async function runPipeline(
   const chosenTitle = str(fetchJson.chosenTitle, 'chosenTitle');
 
   // [2/4] Demucs 分离片段(whaletalk-song 环境;TORCH_HOME 指项目内缓存)
+  opts.onStage?.('separating');
   const sepOut = await runStep(
     'separate',
     demucsPython,
@@ -185,6 +189,7 @@ export async function runPipeline(
   const vocalsPath = str(lastJson(sepOut).vocalsPath, 'vocalsPath');
 
   // [3/4] 测 f0(RVC runtime 带 librosa/pyin);key 由 Node 侧 keys.ts 计算(单一权威实现)
+  opts.onStage?.('analyzing');
   const f0Out = await runStep(
     'analyze',
     runtimePython,
@@ -196,6 +201,7 @@ export async function runPipeline(
   const key = keyForMedianF0(inputMedianHz, s.targetHz, s.keyMin, s.keyMax);
 
   // [4/4] RVC 换声(key 由参数传入)
+  opts.onStage?.('converting');
   const convOut = await runStep(
     'convert',
     runtimePython,

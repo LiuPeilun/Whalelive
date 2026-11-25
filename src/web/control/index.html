@@ -31,6 +31,13 @@
     .tag { background: #eef2f6; border-radius: 4px; padding: 0 6px; font-size: 11px; color: #486581; }
     .tag.warn { background: #fff3e0; color: #8a5a00; }
     .tag.err { background: #fdecea; color: #8a1c21; }
+    .tag.ok { background: #e3f6e8; color: #1f7a4d; }
+    #singing-list { max-height: 460px; }
+    #sec-singing li.job { flex-direction: column; align-items: stretch; gap: 4px; }
+    #sec-singing .job-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    #sec-singing .job-title { font-weight: 600; word-break: break-all; }
+    #sec-singing .job-error { color: #8a1c21; }
+    #sec-singing audio { width: 100%; height: 34px; margin-top: 2px; }
     .copybox { display: flex; gap: 6px; }
     .copybox input { flex: 1; }
     #msg { position: fixed; bottom: 12px; right: 12px; max-width: 420px; background: #102a43; color: #fff; border-radius: 8px; padding: 8px 12px; font-size: 13px; display: none; }
@@ -102,6 +109,16 @@
       <div id="metrics" class="muted mono" style="white-space:pre-wrap">暂无完成记录</div>
       <h2 style="margin-top:10px">丢弃记录</h2>
       <ul class="list" id="drop-list"></ul>
+    </section>
+    <section id="sec-singing">
+      <h2>点歌任务</h2>
+      <div class="row">
+        <span class="tag" id="singing-enabled">唱歌:-</span>
+        <span class="tag" id="singing-active">在途:-</span>
+      </div>
+      <div class="row"><span class="muted" id="singing-note"></span></div>
+      <ul class="list" id="singing-list"></ul>
+      <p class="muted">观众发「点歌 歌名」后在这里查看制作进度;「已就绪」的成片已排入待播队列,可直接试听。</p>
     </section>
     <section id="sec-settings">
       <h2>设置</h2>

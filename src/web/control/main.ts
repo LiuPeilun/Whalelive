@@ -5,6 +5,7 @@ import { mountStatusBar } from './features/status-bar.js';
 import { mountSimulator } from './features/simulator.js';
 import { mountManualAction } from './features/manual-action.js';
 import { mountQueueView } from './features/queue-view.js';
+import { mountSingingView } from './features/singing-view.js';
 import { mountSettingsPanel } from './features/settings-panel.js';
 import { mountOverlayLink } from './features/overlay-link.js';
 
@@ -76,6 +77,7 @@ function main(): void {
   mountSimulator(context);
   mountManualAction(context);
   mountQueueView(context);
+  mountSingingView(context);
   mountSettingsPanel(context);
   mountOverlayLink(context);
 }

@@ -329,6 +329,7 @@ describe('唱歌点歌接入(P3)', () => {
       }),
       job: over.job ?? (() => null),
       jobs: over.jobs ?? (() => []),
+      jobsView: over.jobsView ?? (() => ({ enabled: true, maxActive: 2, active: 0, jobs: [] })),
       cancelAll: over.cancelAll ?? (() => {}),
       stop: over.stop ?? (() => {}),
     };
@@ -464,6 +465,7 @@ describe('WT-P3-007 第七轮复审回归:唯一可腾位候选被确认抢占',
       }),
       job: over.job ?? (() => null),
       jobs: over.jobs ?? (() => []),
+      jobsView: over.jobsView ?? (() => ({ enabled: true, maxActive: 2, active: 0, jobs: [] })),
       cancelAll: over.cancelAll ?? (() => {}),
       stop: over.stop ?? (() => {}),
     };
@@ -514,6 +516,7 @@ describe('WT-P3-007/025 第九轮复审回归', () => {
       requestSong: over.requestSong ?? (() => ({ ok: true, jobId: 'song-x', cached: true })),
       job: over.job ?? (() => null),
       jobs: over.jobs ?? (() => []),
+      jobsView: over.jobsView ?? (() => ({ enabled: true, maxActive: 2, active: 0, jobs: [] })),
       cancelAll: over.cancelAll ?? (() => {}),
       stop: over.stop ?? (() => {}),
     };
