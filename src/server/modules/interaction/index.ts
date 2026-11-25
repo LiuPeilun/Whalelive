@@ -395,11 +395,11 @@ export function createInteraction(deps: {
   }
 
   /** 唱歌点歌(P3):入队确认回复即返回;成片就绪由 singing 回调 enqueueSongReady 再入 song 条目。 */
-  function ackItem(eventId: string, userKey: string, say: string): EnqueueResult {
+  function ackItem(eventId: string, userKey: string, say: string, opts: { priority?: number } = {}): EnqueueResult {
     const item: QueueItem = {
       eventId,
       type: 'chat',
-      priority: 40,
+      priority: opts.priority ?? 40,
       enqueuedAt: now(),
       expiresAt: now() + deps.settings().queue.chatTtlMs,
       say,
@@ -469,9 +469,17 @@ export function createInteraction(deps: {
           ? `《${title}》的成片还在,待播队列满了,稍后再点一次哦~`
           : '现在唱歌排满了,这首先记下来,稍后再点一次哦~';
     // WT-P3-002/007 复审:预判必须在确认入队之前——确认(40)入队会挤占可腾位候选,
-    // 未受理的点歌不能产生任何队列副作用(零副作用拒绝)。
+    // 未受理的点歌不能挤占歌曲的可腾位候选(旧歌保留)。
+    // 队列仍有空位(ackOk)时排入繁忙提示,让观众得到真实反馈(WT-P3-007 复审)。
     if (!ackOk || !songOk) {
       touchCooldown(userKey);
+      if (ackOk) {
+        // 繁忙提示用低优先级(25):队列满时挤不动任何条目则放弃提示——
+        // 不挤占歌曲的可腾位候选(WT-P3-007 复审:旧歌保留优先于提示展示)
+        const busyAck = ackItem(`${eventId}-busy`, userKey, ackSay, { priority: 25 });
+        if (!busyAck.accepted) logger.warn('interaction.song-busy-ack-dropped', { eventId });
+      }
+      notify();
       return { accepted: false, eventId, reason: 'song-busy-limit' };
     }
     const ackResult = ack(ackSay, true); // WT-P3-007 复审:确认入队不立即调度(统一在尾部 tick)
@@ -920,7 +928,7 @@ export function createInteraction(deps: {
   /** 调度心跳:礼物窗口出队 → 进场欢迎出窗 → 容量同步 → 高峰合并 → 冷场判定 → 空闲时取下一条。 */
   /** WT-P3-007 复审:点歌受理前结算礼物出窗——使队列状态确定(预判/确认语基于
    *  含礼物答谢的真实状态),避免确认入队后的 tick 意外出窗占位产生矛盾序列。 */
-  function flushPendingGifts(): void {
+  function flushPendingGifts(): { changed: boolean } {
     const emissions = gifts.sweep();
     for (const emission of emissions) {
       const tiering = deps.settings().gift.tiering;
@@ -947,15 +955,16 @@ export function createInteraction(deps: {
       const pushed = pushWithPeakRelief(item);
       if (!pushed.ok) recordReject(item.eventId, pushed.reason);
     }
-    mergePeakSmallThanks();
+    const merged = mergePeakSmallThanks();
+    return { changed: emissions.length > 0 || merged };
   }
 
   function tick(): void {
     queue.setCapacity(deps.settings().queue.capacity);
-    flushPendingGifts();
+    const giftFlush = flushPendingGifts();
     const greeted = sweepEnterWelcomes();
     const cold = maybeEnqueueCold();
-    if (greeted || cold) notify();
+    if (giftFlush.changed || greeted || cold) notify();
     if (paused || current !== null) return;
     const next = queue.popBest();
     if (next) void dispatch(next);

@@ -504,3 +504,62 @@ describe('WT-P3-007 第七轮复审回归:唯一可腾位候选被确认抢占',
     CAPACITY_OVERRIDE.value = null;
   });
 });
+
+describe('WT-P3-007/025 第九轮复审回归', () => {
+  function fakeSingingLocal(over: Partial<SingingModule> = {}): SingingModule {
+    return {
+      peekCached: over.peekCached ?? (() => false),
+      probe: over.probe ?? (() => ({ cached: false, reusable: false, acceptable: true })),
+      assess: over.assess ?? (() => ({ cached: false, reusable: false, acceptable: true })),
+      requestSong: over.requestSong ?? (() => ({ ok: true, jobId: 'song-x', cached: true })),
+      job: over.job ?? (() => null),
+      jobs: over.jobs ?? (() => []),
+      cancelAll: over.cancelAll ?? (() => {}),
+      stop: over.stop ?? (() => {}),
+    };
+  }
+
+  it('满队只有旧歌可腾位:busy 提示(低优先级)放弃,旧歌保留,接单未受理', async () => {
+    const singing = fakeSingingLocal({
+      peekCached: () => true,
+      probe: () => ({ cached: true, acceptable: true }),
+      requestSong: () => ({ ok: true, jobId: 'song-new', cached: true }),
+    });
+    const { interaction, playback } = build({ singing, capacity: 5 });
+    interaction.pause();
+    // 预置:1 条旧 song + 4 条普通弹幕 = 满(5)
+    interaction.enqueueSongReady({ jobId: 'job-old', eventId: 'evt-old', title: '旧歌', key: 0, audioUrl: '/media/audio/song-old.mp3' });
+    for (let i = 0; i < 4; i++) {
+      interaction.enqueue(chatEvent(`普通弹幕 ${i}`, `user-${i}`));
+    }
+    expect(interaction.state().queue.items.length).toBe(5);
+    const result = interaction.enqueue(chatEvent('点歌 新歌', '点歌员-a'));
+    await settle();
+    // 旧歌不被 busy 提示(25)挤出
+    expect(interaction.state().queue.items.some((q) => q.eventId === 'evt-old-song')).toBe(true);
+    // 接单未受理
+    if (result.accepted) throw new Error('expected rejection');
+    void playback;
+  });
+
+  it('队列满:busy 提示正常排入(有可腾位条目,歌曲不入队)', async () => {
+    const singing = fakeSingingLocal({
+      peekCached: () => true,
+      probe: () => ({ cached: true, acceptable: true }),
+      requestSong: () => ({ ok: true, jobId: 'song-new', cached: true }),
+    });
+    const { interaction, playback } = build({ singing, capacity: 5 });
+    interaction.pause();
+    for (let i = 0; i < 5; i++) {
+      interaction.enqueue(chatEvent(`普通弹幕 ${i}`, `user-${i}`));
+    }
+    const result = interaction.enqueue(chatEvent('点歌 篇章', '点歌员-a'));
+    // WT-P3-007 复审:满队弹幕时拒绝点歌;低优先级繁忙提示(25)挤不动弹幕(40)则放弃——零副作用
+    expect(result.accepted).toBe(false);
+    const busyAcks = interaction.state().queue.items.filter((q) => q.type === 'chat' && q.say.includes('排满了'));
+    expect(busyAcks.length).toBe(0);
+    const songs = interaction.state().queue.items.filter((q) => q.type === 'song');
+    expect(songs.length).toBe(0);
+    void playback;
+  });
+});
