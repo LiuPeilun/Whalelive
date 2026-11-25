@@ -23,6 +23,8 @@ export type SongReadyPayload = {
 export type SingingModule = {
   /** 只读探测缓存命中(不产生副作用)。 */
   peekCached(title: string): boolean;
+  /** WT-P3-007 复审:只读探测可接性(缓存命中不受配额约束)。 */
+  probe(title: string): { cached: boolean; acceptable: boolean };
   requestSong(title: string, source: { eventId: string }): SongRequestResult;
   job(jobId: string): SongJobView | null;
   jobs(): SongJobView[];
@@ -58,8 +60,9 @@ export function createSinging(deps: {
   isProtected?(audioId: string): boolean;
   logger: Logger;
   now(): number;
-  /** 成片就绪回调(interaction 组装队列条目)。 */
-  onSongReady(payload: SongReadyPayload): void;
+  /** 成片就绪回调(interaction 组装队列条目)。返回受理结果:
+   *  待播队列满等场景下成片可能无法入队(WT-P3-007 复审),job 将标记 failed 供状态查询。 */
+  onSongReady(payload: SongReadyPayload): { ok: boolean; reason?: string };
 }): SingingModule {
   const { paths, pipeline: pipelineDeps, logger, now } = deps;
   const cache: SongCache = createSongCache({
@@ -176,12 +179,21 @@ export function createSinging(deps: {
       });
       // workDir 清理(中间产物只保留日志结论)
       fs.rmSync(workDir, { recursive: true, force: true });
-      deps.onSongReady({ jobId: job.jobId, eventId: job.eventId, title: job.title, key, audioUrl: url });
+      const accepted = deps.onSongReady({ jobId: job.jobId, eventId: job.eventId, title: job.title, key, audioUrl: url });
+      if (!accepted.ok) {
+        // WT-P3-007 复审:成片无法入队(待播队列满)——如实标记,允许重新点歌
+        fail(job, `queue-full: ${accepted.reason ?? ''}`);
+        return;
+      }
     } catch (err) {
       if (controller.signal.aborted || stopped) {
-        // WT-P3-002 复审:中止路径清理半成品 MP3,子进程确认退出后才释放配额
+        // 中止路径:清理半成品 MP3,子进程确认退出后才释放配额
         settleCancelled(job, outMp3);
         return;
+      }
+      // WT-P3-002 复审:编码超时/进程报错/发布失败同样清理半成品 outMp3
+      if (outMp3 !== null) {
+        try { fs.rmSync(outMp3, { force: true }); } catch { /* 已不存在 */ }
       }
       const message = err instanceof PipelineStepError ? `${err.step}: ${err.tail.slice(-200)}` : String(err);
       fail(job, message);
@@ -195,15 +207,29 @@ export function createSinging(deps: {
     peekCached(title: string): boolean {
       return cache.lookup(title.trim(), settingsFingerprint(settings())) !== null;
     },
+    /** WT-P3-007 复审:只读探测可接性(缓存命中不受配额约束)——供互动预判确认语,
+     *  避免"正在准备"与后续 busy 更正自相矛盾。 */
+    probe(title: string): { cached: boolean; acceptable: boolean } {
+      const s = settings();
+      const clean = title.trim();
+      const cached = clean !== '' && cache.lookup(clean, settingsFingerprint(s)) !== null;
+      const activeCount = [...jobs.values()].filter((j) => j.stage !== 'ready' && j.stage !== 'failed' && j.stage !== 'cancelling').length;
+      return {
+        cached,
+        acceptable: s.enabled && clean !== '' && (cached || activeCount < MAX_ACTIVE),
+      };
+    },
     requestSong(title, source): SongRequestResult {
       if (!settings().enabled) return { ok: false, code: 'disabled', detail: 'singing disabled' };
       const clean = title.trim();
       if (clean === '') return { ok: false, code: 'empty-title', detail: 'empty title' };
       prune();
 
-      // 同标题在途任务复用(同一首歌多人点不重复跑管线)
+      // 同标题在途任务复用(同一首歌多人点不重复跑管线)。
+      // WT-P3-007 复审:cancelling(急停中)的任务不会产出成片,不可复用——否则
+      // 返回 ok 却永远等不到歌;复用缓存命中与配额检查在下方各自处理。
       for (const job of jobs.values()) {
-        if (job.title === clean && job.stage !== 'ready' && job.stage !== 'failed') {
+        if (job.title === clean && job.stage !== 'ready' && job.stage !== 'failed' && job.stage !== 'cancelling') {
           return { ok: true, jobId: job.jobId, cached: false };
         }
       }

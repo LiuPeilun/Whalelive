@@ -51,7 +51,7 @@ export type InteractionModule = {
   enqueue(event: LiveEvent): EnqueueResult;
   manualAction(actionId: string, say?: string): EnqueueResult;
   /** 唱歌成片就绪(singing 模块回调,app.ts 接线):入队 song 条目。 */
-  enqueueSongReady(payload: SongReadyPayload): void;
+  enqueueSongReady(payload: SongReadyPayload): { ok: boolean; reason?: string };
   /** WT-P3-005 复审:音频是否仍被引用(待播 song 条目或当前表演)——淘汰保护用。 */
   isAudioInUse(audioId: string): boolean;
   pause(): void;
@@ -423,11 +423,22 @@ export function createInteraction(deps: {
     if (singing === null) return ack('唱歌功能还没准备好哦~');
     if (title === '') return ack('想听哪首呀?发「点歌 歌名」试试~');
     if (!deps.settings().singing.enabled) return ack('唱歌功能暂时没开哦~');
-    const cached = singing.peekCached(title);
-    // WT-P3-007:确认条目必须先于任务启动入队——缓存命中时 requestSong 会同步触发
-    // 成片回调并派发(priority 35),若确认尚未入队就会出现先唱后确认。
-    const ackResult = ack(cached ? `《${title}》这就来~` : `收到~正在准备《${title}》,唱好就送上来~`);
+    // WT-P3-007 复审:probe 预判可接性(缓存命中/配额)——确认语一次到位,
+    // 满载时直接如实告知"排满了",不再出现"正在准备"+busy 更正的自相矛盾序列。
+    const probe = singing.probe(title);
+    const ackResult = ack(
+      probe.cached
+        ? `《${title}》这就来~`
+        : probe.acceptable
+          ? `收到~正在准备《${title}》,唱好就送上来~`
+          : '现在唱歌排满了,这首先记下来,稍后再点一次哦~',
+    );
     if (!ackResult.accepted) return ackResult; // 确认都进不去(满载):不启动后台任务,接单结果=确认结果
+    if (!probe.acceptable) {
+      // 探测已判不可接:无任务可启动,接单结果如实为未受理
+      touchCooldown(userKey);
+      return { accepted: false, eventId, reason: 'song-busy-limit' };
+    }
     const req = singing.requestSong(title, { eventId });
     if (!req.ok) {
       logger.warn('interaction.song-request-rejected', { eventId, title, code: req.code, detail: req.detail });
@@ -448,7 +459,7 @@ export function createInteraction(deps: {
   }
 
   /** 成片就绪入队(P3):priority 35 高于问候/进场、低于聊天彩蛋;5 分钟内有效,过时不播。 */
-  function enqueueSongReady(payload: SongReadyPayload): void {
+  function enqueueSongReady(payload: SongReadyPayload): { ok: boolean; reason?: string } {
     const item: QueueItem = {
       eventId: `${payload.eventId}-song`,
       type: 'song',
@@ -473,7 +484,10 @@ export function createInteraction(deps: {
     if (pushed.ok) {
       notify();
       tick();
+      return { ok: true };
     }
+    // WT-P3-007 复审:待播队列满——受理结果如实返回,由 singing 模块标记 job 失败
+    return { ok: false, reason: pushed.reason };
   }
 
   function manualAction(actionId: string, say = ''): EnqueueResult {

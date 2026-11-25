@@ -17,9 +17,18 @@ BUVID = "buvid3=0C3CB04F-B3BA-B3ED-8F20-1EBAF7BB864Cinfoc"  # 任意 buvid3 即�
 def log(msg):
     print(msg, file=sys.stderr)
 
-def http_get(url, referer="https://www.bilibili.com/"):
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": referer, "Cookie": BUVID})
-    return urllib.request.urlopen(req, timeout=25).read()
+def http_get(url, referer="https://www.bilibili.com/", retries=3):
+    last_err = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": referer, "Cookie": BUVID})
+            return urllib.request.urlopen(req, timeout=25).read()
+        except Exception as err:  # 网络瞬断自愈(SSL EOF/超时等)
+            last_err = err
+            log("http attempt %d/%d failed: %s" % (attempt + 1, retries, str(err)[:80]))
+            import time
+            time.sleep(2 * (attempt + 1))
+    raise last_err
 
 def clean_title(raw):
     # SSR 页面里 \\uXXXX 是字面转义;逐个替换,不能用 unicode_escape(会破坏 UTF-8 多字节)
@@ -49,11 +58,16 @@ def rank(items, keyword):
     good_lower = {g.lower() for g in GOOD}
     words = [w.lower() for w in keyword.split() if w]
     core_words = [w for w in words if w not in good_lower]
+    if not core_words:
+        # WT-P3-004 复审:查询只有修饰词(如"官方 MV")时无法定位歌曲,拒绝
+        raise RuntimeError("search: no core words in query %r" % keyword)
     scored = []
     for it in items:
         tl = it["title"].lower()
         if any(w not in tl for w in core_words):
             continue  # 硬过滤:核心词(歌名/歌手)缺一即出局
+        if any(b in tl for b in BAD):
+            continue  # WT-P3-004 复审:BAD 候选(纯伴奏/现场/翻唱等)直接出局,不可作换声源
         score = 0.0
         for w in words:
             score += (0.5 if w in good_lower else 2.0) if w in tl else (-1.0 if w in good_lower else -2.0)

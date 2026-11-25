@@ -318,6 +318,7 @@ describe('唱歌点歌接入(P3)', () => {
     const events: { title: string; eventId: string }[] = [];
     return {
       peekCached: over.peekCached ?? (() => false),
+      probe: over.probe ?? (() => ({ cached: false, acceptable: true })),
       requestSong: over.requestSong ?? ((title, source) => {
         events.push({ title, eventId: source.eventId });
         return { ok: true, jobId: 'song-x', cached: false };
@@ -333,6 +334,7 @@ describe('唱歌点歌接入(P3)', () => {
     const { interaction, playback } = build({
       singing: fakeSinging({
         peekCached: () => true,
+        probe: () => ({ cached: true, acceptable: true }),
         requestSong: (title, source) => {
           // 模拟缓存命中:requestSong 内同步触发成片回调
           interaction.enqueueSongReady({ jobId: 'song-x', eventId: source.eventId, title, key: null, audioUrl: '/media/audio/song-a.mp3' });

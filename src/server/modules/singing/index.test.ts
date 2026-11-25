@@ -103,7 +103,7 @@ function makeModule(opts?: { settings?: SingingSettings; ready: SongReadyPayload
     },
     logger: silentLogger,
     now: () => Date.now(),
-    onSongReady: (payload) => readyPayloads.push(payload),
+    onSongReady: (payload) => { readyPayloads.push(payload); return { ok: true }; },
   });
   return { paths, module, readyPayloads, setEnabled: (v: boolean) => { enabled = v; } };
 }
