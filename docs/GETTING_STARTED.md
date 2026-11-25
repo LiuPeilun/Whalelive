@@ -182,6 +182,14 @@ node scripts/singing-smoke.mjs 3721
 node scripts/singing-panel-e2e.mjs 3793
 ```
 
+想知道点歌慢在哪一步，可单独跑一遍分步计时（约 2–3 分钟，依次报告搜歌、分离、音高分析、换声、编码各用多少秒）：
+
+```
+node scripts/song/pipeline-timing-probe.mjs "篇章 张韶涵 MV"
+```
+
+电脑开机后第一次运行得到的是「冷启动」耗时，紧接着再运行一次是「热启动」耗时。
+
 ## 8. 常见问题
 
 | 现象 | 排查顺序 |
