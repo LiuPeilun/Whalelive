@@ -416,11 +416,30 @@ export function createInteraction(deps: {
   }
 
   function handleSongRequest(text: string, eventId: string, userKey: string): EnqueueResult {
+    // WT-P3-007 复审:先结算礼物出窗,再预判/确认/受理——队列状态全程确定,
+    // 确认入队后的 tick 不会意外出窗占位(第八轮复审的矛盾序列根因)。
+    flushPendingGifts();
     const singing = deps.singing?.() ?? null;
     const title = text.replace(/^点歌[\s,:：,]*/, '').trim();
-    const ack = (say: string): EnqueueResult => ackItem(`${eventId}-ack`, userKey, say);
+    const ack = (say: string, deferTick = false): EnqueueResult => {
+      const item: QueueItem = {
+        eventId: `${eventId}-ack`, type: 'chat', priority: 40,
+        enqueuedAt: now(), expiresAt: now() + deps.settings().queue.chatTtlMs,
+        say, action: 'talk', text: null, isCommand: true, userKey,
+      };
+      const pushed = queue.push(item);
+      if (!pushed.ok) return { accepted: false, eventId, reason: pushed.reason };
+      if (!deferTick) {
+        notify();
+        tick();
+      }
+      return { accepted: true, eventId };
+    };
     // 前置校验:确认语在任务启动前确定
+    // 前置校验拒绝无后续入队,立即调度派发提示
     if (singing === null) return ack('唱歌功能还没准备好哦~');
+    if (title === '') return ack('想听哪首呀?发「点歌 歌名」试试~');
+    if (!deps.settings().singing.enabled) return ack('唱歌功能暂时没开哦~');
     if (title === '') return ack('想听哪首呀?发「点歌 歌名」试试~');
     if (!deps.settings().singing.enabled) return ack('唱歌功能暂时没开哦~');
     // WT-P3-007 复审:用队列的准入干跑精确模拟"确认条目入队后,歌曲能否入队"——
@@ -455,18 +474,22 @@ export function createInteraction(deps: {
       touchCooldown(userKey);
       return { accepted: false, eventId, reason: 'song-busy-limit' };
     }
-    const ackResult = ack(ackSay);
+    const ackResult = ack(ackSay, true); // WT-P3-007 复审:确认入队不立即调度(统一在尾部 tick)
     if (!ackResult.accepted) return ackResult; // 确认都进不去:不启动后台任务,接单结果=确认结果
     const req = singing.requestSong(title, { eventId });
     if (!req.ok) {
       // 竞态兜底(probe 可接但受理时恰好满):接单结果如实反映未受理
       logger.warn('interaction.song-request-rejected', { eventId, title, code: req.code, detail: req.detail });
       touchCooldown(userKey);
+      notify();
       return { accepted: false, eventId, reason: 'song-busy-limit' };
     }
     // 点歌算一次有效互动:冷却锚点与活跃锚点都对齐
     touchCooldown(userKey);
     bumpActivity();
+    // 确认与歌曲(缓存命中)均已确定受理,统一调度派发(WT-P3-007 复审)
+    notify();
+    tick();
     return ackResult;
   }
 
@@ -895,8 +918,9 @@ export function createInteraction(deps: {
   }
 
   /** 调度心跳:礼物窗口出队 → 进场欢迎出窗 → 容量同步 → 高峰合并 → 冷场判定 → 空闲时取下一条。 */
-  function tick(): void {
-    queue.setCapacity(deps.settings().queue.capacity);
+  /** WT-P3-007 复审:点歌受理前结算礼物出窗——使队列状态确定(预判/确认语基于
+   *  含礼物答谢的真实状态),避免确认入队后的 tick 意外出窗占位产生矛盾序列。 */
+  function flushPendingGifts(): void {
     const emissions = gifts.sweep();
     for (const emission of emissions) {
       const tiering = deps.settings().gift.tiering;
@@ -923,10 +947,15 @@ export function createInteraction(deps: {
       const pushed = pushWithPeakRelief(item);
       if (!pushed.ok) recordReject(item.eventId, pushed.reason);
     }
-    const merged = mergePeakSmallThanks();
+    mergePeakSmallThanks();
+  }
+
+  function tick(): void {
+    queue.setCapacity(deps.settings().queue.capacity);
+    flushPendingGifts();
     const greeted = sweepEnterWelcomes();
     const cold = maybeEnqueueCold();
-    if (emissions.length > 0 || merged || greeted || cold) notify();
+    if (greeted || cold) notify();
     if (paused || current !== null) return;
     const next = queue.popBest();
     if (next) void dispatch(next);
