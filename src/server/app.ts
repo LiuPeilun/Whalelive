@@ -15,6 +15,7 @@ import { createCharacters, type CharactersModule } from './modules/characters/in
 import { createEvents } from './modules/events/index.js';
 import { createInteraction, RESERVED_GIFT_ACTIONS, type InteractionModule } from './modules/interaction/index.js';
 import { createSinging } from './modules/singing/index.js';
+import { warmConvertRuntime, type PipelineDeps } from './modules/singing/pipeline.js';
 import { createPlayback, type PlaybackModule } from './modules/playback/index.js';
 import { mockEvent, type MockEventInput } from './integrations/platforms/mock.js';
 import { createBilibiliOpenClient, type BilibiliOpenHandle } from './integrations/platforms/bilibili-open.js';
@@ -122,23 +123,28 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   let singingModule: ReturnType<typeof createSinging> | null = null;
   {
     const rvcBundle = path.join(paths.projectRoot, '.tools', 'rvc', 'RVC20260718DML');
+    const singingPipeline: PipelineDeps = {
+      scriptsDir: path.join(paths.projectRoot, 'scripts', 'song'),
+      runtimePython: path.join(rvcBundle, 'runtime', 'python.exe'),
+      demucsPython: path.join(paths.projectRoot, '.tools', 'conda', 'whaletalk-song', 'python.exe'),
+      ffmpegPath: path.join(rvcBundle, 'ffmpeg.exe'),
+      torchHome: path.join(paths.projectRoot, '.tools', 'torch-home'),
+      rvcBundleDir: rvcBundle,
+      logger,
+    };
     singingModule = createSinging({
       paths,
-      pipeline: {
-        scriptsDir: path.join(paths.projectRoot, 'scripts', 'song'),
-        runtimePython: path.join(rvcBundle, 'runtime', 'python.exe'),
-        demucsPython: path.join(paths.projectRoot, '.tools', 'conda', 'whaletalk-song', 'python.exe'),
-        ffmpegPath: path.join(rvcBundle, 'ffmpeg.exe'),
-        torchHome: path.join(paths.projectRoot, '.tools', 'torch-home'),
-        rvcBundleDir: rvcBundle,
-        logger,
-      },
+      pipeline: singingPipeline,
       settings: () => effective().singing,
       isProtected: (audioId) => interaction.isAudioInUse(audioId),
       logger,
       now,
       onSongReady: (payload) => interaction.enqueueSongReady(payload),
     });
+    // 启动期缓存预热(W,操作者已采纳):唱歌开启时拉起一个换声工作进程,完成依赖导入与
+    // 模型加载(热态 16-28 秒)后立即收尾——把首次磁盘读取与杀软扫描挪到启动期。
+    // 无常驻内存;工具链缺失或被拦截时仅记日志,不影响服务。
+    if (effective().singing.enabled) warmConvertRuntime(singingPipeline, logger);
   }
 
   // 控制台试听:直接经 edge 适配器(验证真实通道),音色可覆盖;超时对齐 generation.ttsTimeoutMs
