@@ -437,9 +437,11 @@ export function createInteraction(deps: {
       say: '', action: deps.settings().singing.actionId, text: null, isCommand: true,
       userKey: null, songAudioUrl: 'probe',
     };
-    // songOk 模拟确认条目已占位(extraCount=1)后歌曲能否入队;ackOk 为确认自身能否入队
-    const songOk = queue.wouldAccept(songProbe, 1).ok;
-    const ackOk = queue.wouldAccept(ackProbe, 0).ok;
+    // WT-P3-007 复审:顺序模拟两次入队(确认先占位改变腾位候选,再判歌曲)——
+    // 独立单条 wouldAccept 会把同一腾位候选重复计数(第七轮复审的唯一旧歌误判)。
+    const sim = queue.wouldAcceptSequence([ackProbe, songProbe]);
+    const ackOk = sim.results[0]?.ok ?? false;
+    const songOk = sim.results[1]?.ok ?? false;
     const ackSay = probe.cached && songOk
       ? `《${title}》这就来~`
       : probe.acceptable && songOk
@@ -447,13 +449,14 @@ export function createInteraction(deps: {
         : probe.cached
           ? `《${title}》的成片还在,待播队列满了,稍后再点一次哦~`
           : '现在唱歌排满了,这首先记下来,稍后再点一次哦~';
-    const ackResult = ack(ackSay);
-    if (!ackResult.accepted) return ackResult; // 确认都进不去:不启动后台任务,接单结果=确认结果
+    // WT-P3-002/007 复审:预判必须在确认入队之前——确认(40)入队会挤占可腾位候选,
+    // 未受理的点歌不能产生任何队列副作用(零副作用拒绝)。
     if (!ackOk || !songOk) {
-      // 预判不可接(队列容量/腾位不足以同时容纳确认与歌曲):无任务可启动,接单结果如实未受理
       touchCooldown(userKey);
       return { accepted: false, eventId, reason: 'song-busy-limit' };
     }
+    const ackResult = ack(ackSay);
+    if (!ackResult.accepted) return ackResult; // 确认都进不去:不启动后台任务,接单结果=确认结果
     const req = singing.requestSong(title, { eventId });
     if (!req.ok) {
       // 竞态兜底(probe 可接但受理时恰好满):接单结果如实反映未受理

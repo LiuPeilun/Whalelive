@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import type { LiveEvent } from '../../../shared/live-event.js';
 import type { EffectiveSettings } from '../../../shared/settings.js';
 import type { Performance } from '../../../shared/performance.js';
@@ -21,10 +21,12 @@ const silentLogger: Logger = {
   child: () => ({ ...silentLogger, child: () => silentLogger }),
 };
 
+const CAPACITY_OVERRIDE: { value: number | null } = { value: null };
+
 function settings(): EffectiveSettings {
   return {
     petId: 'main',
-    queue: { capacity: 20, chatTtlMs: 30_000, userCooldownMs: 0 },
+    queue: { capacity: CAPACITY_OVERRIDE.value ?? 20, chatTtlMs: 30_000, userCooldownMs: 0 },
     gift: { mergeWindowMs: 2_000, tiering: { smallMaxYuan: 1, largeMinYuan: 10, peakMergeCount: 6 } },
     greetings: { enabled: true, enterWindowMs: 10_000, maxNamedCount: 3, allRoomIntervalMs: 60_000, coldIdleMs: 180_000, coldIntervalMs: 300_000 },
     playback: { preloadTimeoutMs: 8_000, overallTimeoutMs: 120_000, noRendererGraceMs: 3_000 },
@@ -104,8 +106,9 @@ function chatEvent(text: string, user = 'u1'): LiveEvent {
 const persona = { name: '大肥鱼', fallbackReplies: ['保底回复A', '保底回复B'], commandReplies: { dance: '看好啦!' } };
 const giftRules = resolveGiftRules({ thanksTemplate: '谢谢 {user} 的 {gift} ×{count}!', celebrateText: '{kind}!' });
 
-function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechProvider>; now?: () => number; singing?: SingingModule | null } = {}) {
+function build(opts: { reply?: Partial<ReplyProvider>; speech?: Partial<SpeechProvider>; now?: () => number; singing?: SingingModule | null; capacity?: number } = {}) {
   const playback = fakePlayback();
+  if (opts.capacity !== undefined) CAPACITY_OVERRIDE.value = opts.capacity;
   const singingRef: SingingModule | null = opts.singing ?? null;
   const reply: ReplyProvider = { generate: opts.reply?.generate ?? (async () => ({ say: '生成的话', action: null })) };
   const speech: SpeechProvider = { synthesize: opts.speech?.synthesize ?? (async () => ({ audioUrl: '/media/audio/t.wav', audioId: 't.wav' })) };
@@ -392,8 +395,8 @@ describe('唱歌点歌接入(P3)', () => {
     expect(result.reason).toBe('song-busy-limit');
     const songs = interaction.state().queue.items.filter((q) => q.type === 'song');
     expect(songs.length).toBe(0);
-    // 拒绝提示条目已入队(chat)
-    expect(interaction.state().queue.items.some((q) => q.type === 'chat')).toBe(true);
+    // WT-P3-007 复审:拒绝场景零副作用——无确认/提示条目入队
+    expect(interaction.state().queue.items.some((q) => q.type === 'chat' && q.say.includes('这就来'))).toBe(false);
     void playback;
   });
 
@@ -447,3 +450,57 @@ describe('唱歌点歌接入(P3)', () => {
   });
 });
 
+
+describe('WT-P3-007 第七轮复审回归:唯一可腾位候选被确认抢占', () => {
+  function fakeSinging(over: Partial<SingingModule> = {}): SingingModule {
+    const events: { title: string; eventId: string }[] = [];
+    return {
+      peekCached: over.peekCached ?? (() => false),
+      probe: over.probe ?? (() => ({ cached: false, reusable: false, acceptable: true })),
+      assess: over.assess ?? (() => ({ cached: false, reusable: false, acceptable: true })),
+      requestSong: over.requestSong ?? ((title, source) => {
+        events.push({ title, eventId: source.eventId });
+        return { ok: true, jobId: 'song-x', cached: false };
+      }),
+      job: over.job ?? (() => null),
+      jobs: over.jobs ?? (() => []),
+      cancelAll: over.cancelAll ?? (() => {}),
+      stop: over.stop ?? (() => {}),
+    };
+  }
+  it('满队(4弹幕+1旧歌)点不同缓存歌:拒绝接单,确认语不含"这就来",旧歌不被挤出', async () => {
+    const singing = fakeSinging({
+      peekCached: () => true,
+      probe: () => ({ cached: true, acceptable: true }),
+      requestSong: () => ({ ok: true, jobId: 'song-new', cached: true }),
+    });
+    const { interaction, playback } = build({ singing, capacity: 5 });
+    interaction.pause(); // 暂停派发,冻结队列使断言稳定
+    // 预置:先入 4 条普通弹幕,再入旧 song(若腾位挤出则测试前置失败,定位问题)
+    for (let i = 0; i < 4; i++) {
+      interaction.enqueue(chatEvent(`普通弹幕 ${i}`, `user-${i}`));
+    }
+    interaction.enqueueSongReady({ jobId: 'job-old', eventId: 'evt-old', title: '旧歌', key: 0, audioUrl: '/media/audio/song-old.mp3' });
+    expect(interaction.state().queue.items.length).toBe(5);
+    const result = interaction.enqueue(chatEvent('点歌 新歌', '点歌员-a'));
+    await settle();
+    // 接单结果:未受理
+    if (result.accepted) throw new Error('expected rejection');
+    expect(result.reason).toBe('song-busy-limit');
+    // 确认语不含"这就来"(审核断言:不能留下成功确认)
+    const acks = interaction.state().queue.items.filter((q) => q.type === 'chat');
+    for (const ack of acks) {
+      expect(ack.say).not.toContain('这就来');
+    }
+    // 旧 song 未被挤出(点歌请求零副作用);view 层无 songAudioUrl,用 eventId 匹配
+    const oldStill = interaction.state().queue.items.some((q) => q.eventId === 'evt-old-song');
+    const newQueued = interaction.state().queue.items.some((q) => q.eventId === 'evt-new-song');
+    expect(oldStill).toBe(true);
+    expect(newQueued).toBe(false);
+    void playback;
+  });
+
+  afterAll(() => {
+    CAPACITY_OVERRIDE.value = null;
+  });
+});

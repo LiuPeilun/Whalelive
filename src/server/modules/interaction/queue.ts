@@ -119,11 +119,43 @@ export function createQueue(opts: { capacity: number; now(): number }) {
     return { ok: true };
   }
 
-  /** WT-P3-007 复审:干跑探测——extraCount 模拟未来将入队的确认条目占位。 */
-  function wouldAccept(item: QueueItem, extraCount = 0): { ok: boolean; reason?: string } {
-    sweepExpired();
-    const decision = admitDecision(item, extraCount);
-    return decision.ok ? { ok: true } : { ok: false, reason: decision.reason ?? 'queue-full' };
+  /** WT-P3-007 复审:顺序干跑模拟——按实际入队顺序依次判定多条目能否入队
+   *  (前一条占位会改变后一条的腾位候选,独立单条判定会误判)。
+   *  镜像 queue 的 push/腾位规则,规则变更时须同步本函数。 */
+  function wouldAcceptSequence(probes: QueueItem[]): { allOk: boolean; results: { ok: boolean; reason?: string }[] } {
+    let list: QueueItem[] = items.filter((it) => it.expiresAt > opts.now()); // 镜像 sweepExpired
+    const results: { ok: boolean; reason?: string }[] = [];
+    for (const item of probes) {
+      if (item.expiresAt <= opts.now()) {
+        results.push({ ok: false, reason: 'expired-on-arrival' });
+        break;
+      }
+      if (list.length < capacity) {
+        list = [...list, item];
+        results.push({ ok: true });
+        continue;
+      }
+      // 腾位:选 list 中最可挤出(优先级最低、同优先级最旧),规则镜像 evictableIndex
+      let victimIndex = -1;
+      for (let i = 0; i < list.length; i++) {
+        const c = list[i]!;
+        if (c.type !== 'chat' && c.type !== 'song' && c.priority > 30) continue;
+        if (victimIndex === -1) {
+          victimIndex = i;
+          continue;
+        }
+        const v = list[victimIndex]!;
+        if (c.priority < v.priority || (c.priority === v.priority && c.enqueuedAt < v.enqueuedAt)) victimIndex = i;
+      }
+      if (victimIndex === -1 || item.priority < list[victimIndex]!.priority) {
+        results.push({ ok: false, reason: 'queue-full' });
+        break;
+      }
+      list = list.filter((_, i) => i !== victimIndex);
+      list.push(item);
+      results.push({ ok: true });
+    }
+    return { allOk: results.every((r) => r.ok), results };
   }
 
   /** 弹出下一条:先清理过期,再取最高优先级,同优先级取最早入队。 */
@@ -213,5 +245,5 @@ export function createQueue(opts: { capacity: number; now(): number }) {
     return [...drops].slice(-20);
   }
 
-  return { push, popBest, clear, removeMany, sweepExpired, setCapacity, getCapacity, length, snapshot, dropLog, wouldAccept };
+  return { push, popBest, clear, removeMany, sweepExpired, setCapacity, getCapacity, length, snapshot, dropLog, wouldAcceptSequence };
 }
