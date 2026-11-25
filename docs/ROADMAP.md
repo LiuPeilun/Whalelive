@@ -532,6 +532,8 @@ P1 第一批的审核问题（WT-P1-001～014，共十四项，跨 `2026-11-18_1
 
 **2026-11-26 点歌面板与换声预热代码审查**。提交 `10ef8e1` 暂不通过。WT-P3-002（P1）重新打开，急停可能卡住点歌配额。新增 WT-P3-027～029，涉及预热进程退出回退、关停清理与试听失效状态。`npm run check`（293/293）、`node scripts/singing-panel-e2e.mjs 3795`（16/16）与 `node scripts/singing-smoke.mjs 3796`（18/18）通过。本轮真实换声走回退路径，真冷启动、OBS 和真实直播间点歌弹幕仍待验收。[审查报告](reviews/2026-11/2026-11-26_001227-review.md)
 
+**审核修复（2026-11-26，WT-P3-002 重开 + 027～029）**：四项修复提交 `d267a6f`（分支 `fix/p3-review-2026-11-26`，基准 `10ef8e1`）——①急停配额（已取消信号不再回退 spawn-per-job、`runStep` 已取消即拒绝不留无终态 Promise、worker 中止/超时的结算统一等 close 确认退出后才交付上层）；②就绪后提前退出的 worker 按下发时状态（`hasExited`）改走回退而非直接失败；③预热句柄纳入 `app.close()` 生命周期（`stop()` + 有界等退出），预热强制 CPU（`WHALETALK_CONVERT_DEVICE=cpu`）避免与首个任务的 DML 初始化并发冲突（本轮审查冒烟实测该冲突会把任务逼入回退，预热完成日志相应变为 `warmup finished (cpu)`）；④缓存淘汰后任务历史保留、`SongJobView.audioAvailable` 如实反映试听可用性，面板显示过期提示并移除失效试听元素。`npm run check` **299/299**（+6 回归：就绪中止、推理中止、配额释放后重受理、ready-exit 回退、预热 `stop()`、淘汰可用性）；`node scripts/singing-smoke.mjs 3791` 18/18（真实换声走 worker 路径）、`node scripts/singing-panel-e2e.mjs 3793` 16/16、`node scripts/ws-smoke.mjs 3290` 30/30。修复细节见 [修复记录](reviews/2026-11/2026-11-26_001227-fixes.md)，待复审。
+
 ## 实施记录模板
 
 每次完成任务后补充以下内容。
