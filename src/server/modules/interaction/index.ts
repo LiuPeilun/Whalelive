@@ -418,7 +418,8 @@ export function createInteraction(deps: {
   function handleSongRequest(text: string, eventId: string, userKey: string): EnqueueResult {
     // WT-P3-007 复审:先结算礼物出窗,再预判/确认/受理——队列状态全程确定,
     // 确认入队后的 tick 不会意外出窗占位(第八轮复审的矛盾序列根因)。
-    flushPendingGifts();
+    const giftFlush = flushPendingGifts();
+    if (giftFlush.changed) notify(); // WT-P3-026 复审:结算改变队列即推送新快照(含拒绝路径)
     const singing = deps.singing?.() ?? null;
     const title = text.replace(/^点歌[\s,:：,]*/, '').trim();
     const ack = (say: string, deferTick = false): EnqueueResult => {
@@ -438,8 +439,6 @@ export function createInteraction(deps: {
     // 前置校验:确认语在任务启动前确定
     // 前置校验拒绝无后续入队,立即调度派发提示
     if (singing === null) return ack('唱歌功能还没准备好哦~');
-    if (title === '') return ack('想听哪首呀?发「点歌 歌名」试试~');
-    if (!deps.settings().singing.enabled) return ack('唱歌功能暂时没开哦~');
     if (title === '') return ack('想听哪首呀?发「点歌 歌名」试试~');
     if (!deps.settings().singing.enabled) return ack('唱歌功能暂时没开哦~');
     // WT-P3-007 复审:用队列的准入干跑精确模拟"确认条目入队后,歌曲能否入队"——
