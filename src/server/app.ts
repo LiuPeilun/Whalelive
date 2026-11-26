@@ -122,32 +122,25 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   // 唱歌模块(P3):本机工具链路径(仓库相对,GETTING_STARTED 摆放约定);interaction 先建,singing 惰性回接
   let singingModule: ReturnType<typeof createSinging> | null = null;
   let singingWarmup: WarmupHandle | null = null;
-  {
-    const rvcBundle = path.join(paths.projectRoot, '.tools', 'rvc', 'RVC20260718DML');
-    const singingPipeline: PipelineDeps = {
-      scriptsDir: path.join(paths.projectRoot, 'scripts', 'song'),
-      runtimePython: path.join(rvcBundle, 'runtime', 'python.exe'),
-      demucsPython: path.join(paths.projectRoot, '.tools', 'conda', 'whaletalk-song', 'python.exe'),
-      ffmpegPath: path.join(rvcBundle, 'ffmpeg.exe'),
-      torchHome: path.join(paths.projectRoot, '.tools', 'torch-home'),
-      rvcBundleDir: rvcBundle,
-      logger,
-    };
-    singingModule = createSinging({
-      paths,
-      pipeline: singingPipeline,
-      settings: () => effective().singing,
-      isProtected: (audioId) => interaction.isAudioInUse(audioId),
-      logger,
-      now,
-      onSongReady: (payload) => interaction.enqueueSongReady(payload),
-    });
-    // 启动期缓存预热(W,操作者已采纳):唱歌开启时拉起一个换声工作进程,完成依赖导入与
-    // 模型加载(热态 16-28 秒)后自行收尾——把首次磁盘读取与杀软扫描挪到启动期。
-    // 无常驻内存;工具链缺失或被拦截时仅记日志,不影响服务。
-    // 句柄纳入应用生命周期(WT-P3-028):close() 时终止预热进程并等其退出。
-    singingWarmup = effective().singing.enabled ? warmConvertRuntime(singingPipeline, logger) : null;
-  }
+  const rvcBundle = path.join(paths.projectRoot, '.tools', 'rvc', 'RVC20260718DML');
+  const singingPipeline: PipelineDeps = {
+    scriptsDir: path.join(paths.projectRoot, 'scripts', 'song'),
+    runtimePython: path.join(rvcBundle, 'runtime', 'python.exe'),
+    demucsPython: path.join(paths.projectRoot, '.tools', 'conda', 'whaletalk-song', 'python.exe'),
+    ffmpegPath: path.join(rvcBundle, 'ffmpeg.exe'),
+    torchHome: path.join(paths.projectRoot, '.tools', 'torch-home'),
+    rvcBundleDir: rvcBundle,
+    logger,
+  };
+  singingModule = createSinging({
+    paths,
+    pipeline: singingPipeline,
+    settings: () => effective().singing,
+    isProtected: (audioId) => interaction.isAudioInUse(audioId),
+    logger,
+    now,
+    onSongReady: (payload) => interaction.enqueueSongReady(payload),
+  });
 
   // 控制台试听:直接经 edge 适配器(验证真实通道),音色可覆盖;超时对齐 generation.ttsTimeoutMs
   const ttsPreview = async (input: { text: string; voice?: string }): Promise<{ audioUrl: string } | null> => {
@@ -362,6 +355,13 @@ export async function createApp(opts: { env: Record<string, string | undefined>;
   logger.info('server.pages-ready', { hmr: VITE_HMR_PATH });
 
   logger.info('server.started', { runId, host, port, control: redactUrl(access.controlUrl()) });
+
+  // 启动期缓存预热(W,操作者已采纳):唱歌开启时拉起一个换声工作进程,完成依赖导入与
+  // 模型加载(热态 16-28 秒)后自行收尾——把首次磁盘读取与杀软扫描挪到启动期。
+  // 无常驻内存;工具链缺失或被拦截时仅记日志,不影响服务。
+  // 在初始化(含监听)完成后才启动(WT-P3-028 复审):启动失败(EADDRINUSE 等)抛出时
+  // 不存在需要回收的预热进程;正常关闭由 close() 终止并等待退出。
+  if (effective().singing.enabled) singingWarmup = warmConvertRuntime(singingPipeline, logger);
 
   async function close(): Promise<void> {
     clearInterval(ticker);

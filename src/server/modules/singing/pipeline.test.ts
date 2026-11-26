@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
-import { PipelineStepError, runPipeline, warmConvertRuntime, type PipelineDeps, type PipelineStepName } from './pipeline.js';
+import { PipelineStepError, runPipeline, warmConvertRuntime, type ConvertWorkerHandle, type PipelineDeps, type PipelineStepName } from './pipeline.js';
 import type { SingingSettings, SongJobStage } from '../../../shared/singing.js';
 import { keyForMedianF0 } from './keys.js';
 import type { Logger } from '../../infrastructure/logger.js';
@@ -265,6 +265,40 @@ describe('runPipeline 子进程编排', () => {
     warm.stop();
     const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('预热进程未在 5 秒内退出')), 5000));
     await Promise.race([warm.done, timeout]);
+  });
+
+  it('WT-P3-002 复审:前段失败时,拒绝在换声进程确认退出之后才交给上层', async () => {
+    // 可控替身 worker:尚未就绪(并行加载中),kill 后延迟 200ms 才确认退出——
+    // 若收尾只发起杀树不等待(旧缺陷),拒绝会在 'closed' 之前交付,事件顺序断言失败
+    const events: string[] = [];
+    let settleClosed: (() => void) | null = null;
+    const fakeWorker: ConvertWorkerHandle = {
+      whenReady: new Promise<string | null>(() => {}),
+      whenClosed: new Promise<void>((resolve) => {
+        settleClosed = () => {
+          events.push('closed');
+          resolve();
+        };
+      }),
+      hasExited: () => false,
+      convert: async () => {
+        throw new PipelineStepError('convert', '不应向未就绪的 worker 派发');
+      },
+      kill(reason) {
+        events.push(`kill:${reason}`);
+        setTimeout(() => settleClosed?.(), 200);
+      },
+    };
+    const deps = {
+      ...makeSteps({ failAt: 'fetch' }),
+      createConvertWorker: () => fakeWorker,
+    };
+    const recorder = stageRecorder(deps.scriptsDir); // fetch 替身核对自己的阶段标记
+    const promise = runPipeline(deps, { title: '任意', workDir: path.join(tmpDir, 'work-front-fail'), settings, signal: new AbortController().signal, onStage: recorder.onStage });
+    void promise.catch(() => {});
+    await expect(promise).rejects.toMatchObject({ step: 'fetch', tail: expect.stringContaining('stand-in fetch exploded') });
+    // 收到拒绝时:已发起杀树,且 close 已确认(顺序即「先等子进程退出再结算」的直接证据)
+    expect(events).toEqual(['kill:pipeline-finished', 'closed']);
   });
 
   it('某步失败:抛出带步骤名与输出尾部的 PipelineStepError,后续步骤不再启动', async () => {

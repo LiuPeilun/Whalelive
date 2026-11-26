@@ -19,6 +19,11 @@ export type PipelineDeps = {
   rvcBundleDir: string;
   /** 换声工作进程启动超时(默认 180 秒,覆盖冷盘首次读取与杀软首扫);仅测试注入更短值。 */
   convertWorkerStartupTimeoutMs?: number;
+  /** 测试注入点:替换工作进程创建(默认真实 spawn),供「子进程退出后才结算」类回归用。 */
+  createConvertWorker?: (
+    opts: { signal: AbortSignal; startupTimeoutMs: number },
+    log: (line: string) => void,
+  ) => ConvertWorkerHandle;
   logger: Logger;
 };
 
@@ -399,7 +404,9 @@ export async function runPipeline(
   // [0] 换声工作进程与搜歌并行启动:用管线前段(搜歌+分离+测 f0,热态约 1 分钟)完成
   // 依赖导入与模型加载(实测 16-28 秒),前段结束直接推理——省掉每首一次的换声启动开销。
   // 工作进程未能就绪(工具链缺失、被杀软拦截等)时回退为原 spawn-per-job 换声,行为不变。
-  const worker = spawnConvertWorker(deps, {
+  const spawnWorker = deps.createConvertWorker
+    ?? ((o: { signal: AbortSignal; startupTimeoutMs: number }, l: (line: string) => void) => spawnConvertWorker(deps, o, l));
+  const worker = spawnWorker({
     signal: opts.signal,
     startupTimeoutMs: deps.convertWorkerStartupTimeoutMs ?? 180_000,
   }, log);
@@ -487,6 +494,9 @@ export async function runPipeline(
   } finally {
     opts.signal.removeEventListener('abort', abortWorker);
     worker.kill('pipeline-finished'); // 成功路径脚本已自行退出;此处幂等兜底
+    // WT-P3-002 复审:失败/中止/成功的所有路径都要等换声进程确认退出后再把结果交给上层——
+    // 上层结算(清理工作目录/释放配额)不得早于子进程退出
+    await worker.whenClosed;
   }
 }
 
