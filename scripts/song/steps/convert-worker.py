@@ -47,6 +47,11 @@ def load_model():
     from infer.vc.modules import VC
 
     config = Config()
+    # 预热(W)强制 CPU:磁盘与杀软预热与推理设备无关,避免与首个任务的 DML 初始化
+    # 并发冲突(审核 001227 实测:预热与任务同时初始化 DirectML 时后者抛错逼入回退)
+    if os.environ.get("WHALETALK_CONVERT_DEVICE") == "cpu":
+        config.device = "cpu"
+        log("convert device forced to cpu (warmup)")
     vc = VC(config)
     vc.get_vc("tidepost.pth", 0.5, 0.33)
     log("model loaded. tgt_sr=%s" % vc.tgt_sr)

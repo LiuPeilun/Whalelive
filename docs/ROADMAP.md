@@ -530,6 +530,16 @@ P1 第一批的审核问题（WT-P1-001～014，共十四项，跨 `2026-11-18_1
 
 **下一项可继续任务**：待操作者对 CPU / yin / shifts=0 三项提速试听裁定；操作者实测项同前（OBS 实播、真实弹幕、冷启动计时回填）。
 
+**2026-11-26 点歌面板与换声预热代码审查**。提交 `10ef8e1` 暂不通过。WT-P3-002（P1）重新打开，急停可能卡住点歌配额。新增 WT-P3-027～029，涉及预热进程退出回退、关停清理与试听失效状态。`npm run check`（293/293）、`node scripts/singing-panel-e2e.mjs 3795`（16/16）与 `node scripts/singing-smoke.mjs 3796`（18/18）通过。本轮真实换声走回退路径，真冷启动、OBS 和真实直播间点歌弹幕仍待验收。[审查报告](reviews/2026-11/2026-11-26_001227-review.md)
+
+**审核修复（2026-11-26，WT-P3-002 重开 + 027～029）**：四项修复提交 `d267a6f`（分支 `fix/p3-review-2026-11-26`，基准 `10ef8e1`）——①急停配额（已取消信号不再回退 spawn-per-job、`runStep` 已取消即拒绝不留无终态 Promise、worker 中止/超时的结算统一等 close 确认退出后才交付上层）；②就绪后提前退出的 worker 按下发时状态（`hasExited`）改走回退而非直接失败；③预热句柄纳入 `app.close()` 生命周期（`stop()` + 有界等退出），预热强制 CPU（`WHALETALK_CONVERT_DEVICE=cpu`）避免与首个任务的 DML 初始化并发冲突（本轮审查冒烟实测该冲突会把任务逼入回退，预热完成日志相应变为 `warmup finished (cpu)`）；④缓存淘汰后任务历史保留、`SongJobView.audioAvailable` 如实反映试听可用性，面板显示过期提示并移除失效试听元素。`npm run check` **299/299**（+6 回归：就绪中止、推理中止、配额释放后重受理、ready-exit 回退、预热 `stop()`、淘汰可用性）；`node scripts/singing-smoke.mjs 3791` 18/18（真实换声走 worker 路径）、`node scripts/singing-panel-e2e.mjs 3793` 16/16、`node scripts/ws-smoke.mjs 3290` 30/30。修复细节见 [修复记录](reviews/2026-11/2026-11-26_001227-fixes.md)，待复审。
+
+**2026-11-26 点歌面板与换声预热修复复审**。提交 `58d5665` 暂不通过。WT-P3-027、029 关闭。WT-P3-002 的急停卡配额已通过，前段失败时仍可能在工作进程退出前释放配额（P2）。WT-P3-028 的正常关停已通过，端口占用导致启动失败时仍遗留预热进程（P2）。`npm run check`（299/299）、无头 Edge 面板专项（17/17）及 `node scripts/singing-smoke.mjs 3799`（18/18）通过，实际换声走 DirectML 工作进程。真冷启动、OBS 与真实 B 站直播间点歌仍待验收。[复审报告](reviews/2026-11/2026-11-26_173314-review.md)
+
+**第二轮修复（2026-11-26，复审 `2026-11-26_173314` 两项 P2）**：①前段失败早结算——`runPipeline` 收尾在发起杀树后 `await worker.whenClosed`，成功/失败/中止三路径统一等换声进程确认退出后才把结果交给上层（上层清理工作目录/释放配额不早于子进程退出）；新增 `createConvertWorker` 测试注入点，可控替身（kill 后延迟确认退出）配合 `failAt: fetch` 断言拒绝交付时事件序列恰为 `kill → closed`。②预热启动泄漏——预热启动从模块装配段移到初始化完成之后（`server.started` 即监听已建立、页面就绪），任何更早的启动失败（EADDRINUSE 等）抛出时不存在需要回收的预热进程；正常关闭的 `stop()` + 有界等待语义不变。实测：占位端口启动隔离实例被拒，失败前后 `convert-worker.py` 进程数 0/0、实例日志 0 条 warmup；正常实例日志 `server.started` 先于 warmup 记录。`npm run check` **300/300**（+1：前段失败的拒绝顺序）；`node scripts/singing-smoke.mjs 3791` 18/18、`node scripts/singing-panel-e2e.mjs 3793` 16/16、`node scripts/ws-smoke.mjs 3290` 30/30。[修复记录](reviews/2026-11/2026-11-26_173314-fixes.md)，待复审。
+
+**2026-11-27 点歌与换声预热第二轮修复复审**。提交 `0fb7d47` 复审通过，WT-P3-002、028 关闭，WT-P3-027、029 维持关闭。搜歌失败时换声进程先退出，随后释放配额。端口占用时预热进程数为零。`npm run check`（300/300）、`node scripts/singing-smoke.mjs 3801`（18/18）通过，实际换声走 DirectML 工作进程。真冷启动计时、OBS 实播和真实 B 站直播间点歌仍待验收。[复审报告](reviews/2026-11/2026-11-27_101440-review.md)
+
 ## 实施记录模板
 
 每次完成任务后补充以下内容。

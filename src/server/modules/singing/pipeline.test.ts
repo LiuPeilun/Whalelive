@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
-import { PipelineStepError, runPipeline, warmConvertRuntime, type PipelineDeps, type PipelineStepName } from './pipeline.js';
+import { PipelineStepError, runPipeline, warmConvertRuntime, type ConvertWorkerHandle, type PipelineDeps, type PipelineStepName } from './pipeline.js';
 import type { SingingSettings, SongJobStage } from '../../../shared/singing.js';
 import { keyForMedianF0 } from './keys.js';
 import type { Logger } from '../../infrastructure/logger.js';
@@ -13,8 +13,10 @@ import type { Logger } from '../../infrastructure/logger.js';
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whaletalk-pipeline-'));
 afterAll(() => {
-  // 替身子进程的 cwd 在临时目录里,退出释放句柄可能有延迟,带重试清理
-  fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+  // 替身子进程的 cwd 在临时目录里,句柄释放可能有延迟;清理尽力而为,泄漏的临时目录由系统回收
+  try {
+    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+  } catch { /* 仍有进程占用时放任系统临时目录清理 */ }
 });
 
 /** 步骤名 → 脚本文件;阶段标记按阶段名(每步启动前应已回报对应阶段)。 */
@@ -68,12 +70,14 @@ function makeSteps(opts: { hangAt?: PipelineStepName; failAt?: PipelineStepName 
       const mode = process.env.WORKER_MODE ?? 'ok';
       if (mode === 'fail-load') { console.log(JSON.stringify({ event: 'error', phase: 'load', message: 'stand-in load boom' })); process.exit(1); }
       if (mode === 'hang') { setInterval(() => {}, 60000); return; }
+      if (mode === 'ready-exit') { console.log(JSON.stringify({ event: 'ready', device: 'stand-in-dml' })); process.exit(0); }
       console.log(JSON.stringify({ event: 'ready', device: 'stand-in-dml' }));
       const line = fs.readFileSync(0, 'utf8');
       if (line.trim() === '') return;
       const cmd = JSON.parse(line);
       if (mode === 'fail-convert') { console.log(JSON.stringify({ event: 'error', phase: 'convert', message: 'stand-in inference boom' })); process.exit(1); }
       fs.writeFileSync(path.join(cmd.workDir, 'worker-cmd.json'), JSON.stringify(cmd));
+      if (mode === 'slow-convert') { setInterval(() => {}, 60000); return; }
       const wav = path.join(cmd.workDir, 'song-converted.wav');
       fs.writeFileSync(wav, 'RIFF');
       console.log(JSON.stringify({ event: 'done', wavPath: wav, medianHz: 303 }));
@@ -195,13 +199,106 @@ describe('runPipeline 子进程编排', () => {
     const logger = capturingLogger();
     // 预热在服务启动期发生,不经过 runPipeline;替身按约定核对「换声已在并行启动」标记
     fs.writeFileSync(path.join(deps.scriptsDir, 'stage-fetching.txt'), '1');
-    warmConvertRuntime(deps, logger as unknown as Logger);
-    const deadline = Date.now() + 10_000;
-    for (;;) {
-      if (logger.lines.some((l) => l.includes('warmup finished (stand-in-dml)'))) break;
-      if (Date.now() > deadline) throw new Error(`warmup 未完成: ${logger.lines.join(' | ')}`);
-      await new Promise((r) => setTimeout(r, 100));
+    const warm = warmConvertRuntime(deps, logger as unknown as Logger);
+    const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('warmup 未完成')), 10_000));
+    await Promise.race([warm.done, timeout]);
+    expect(logger.lines.some((l) => l.includes('warmup finished (stand-in-dml)'))).toBe(true);
+  });
+
+  it('WT-P3-027 复审:工作进程就绪后提前退出,下发时改走回退而不是直接失败', async () => {
+    process.env.WORKER_MODE = 'ready-exit';
+    const deps = makeSteps();
+    const workDir = path.join(tmpDir, 'work-ready-exit');
+    fs.mkdirSync(workDir, { recursive: true });
+    const recorder = stageRecorder(deps.scriptsDir);
+    const result = await runPipeline(deps, { title: '任意', workDir, settings, signal: new AbortController().signal, onStage: recorder.onStage });
+
+    expect(recorder.stages).toEqual(['fetching', 'separating', 'analyzing', 'converting']);
+    expect(result.key).toBe(7);
+    // 回退路径接手:convert.py 完成,未向已退出的 worker 下发指令
+    expect(fs.existsSync(path.join(workDir, 'convert-args.json'))).toBe(true);
+    expect(fs.existsSync(path.join(workDir, 'worker-cmd.json'))).toBe(false);
+  });
+
+  it('WT-P3-002 复审:等待就绪期间中止,取消后拒绝且不再回退 spawn-per-job', async () => {
+    process.env.WORKER_MODE = 'hang'; // worker 永不就绪,runPipeline 停在 await whenReady
+    const deps = makeSteps();
+    const workDir = path.join(tmpDir, 'work-abort-ready');
+    fs.mkdirSync(workDir, { recursive: true });
+    const recorder = stageRecorder(deps.scriptsDir);
+    const controller = new AbortController();
+    const promise = runPipeline(deps, { title: '任意', workDir, settings, signal: controller.signal, onStage: recorder.onStage });
+    void promise.catch(() => {});
+    // 等管线走到换声派发点(onStage converting 落标记),此时正挂在 whenReady
+    for (let i = 0; i < 100 && !fs.existsSync(path.join(deps.scriptsDir, 'stage-converting.txt')); i += 1) {
+      await new Promise((r) => setTimeout(r, 20));
     }
+    controller.abort();
+    await expect(promise).rejects.toMatchObject({ step: 'convert', tail: 'aborted' });
+    // 已取消后不再回退:工作目录里没有 convert.py 的 argv 记录
+    expect(fs.existsSync(path.join(workDir, 'convert-args.json'))).toBe(false);
+  });
+
+  it('WT-P3-002 复审:推理期间中止,子进程确认退出后才拒绝(配额释放前提)', async () => {
+    process.env.WORKER_MODE = 'slow-convert';
+    const deps = makeSteps();
+    const workDir = path.join(tmpDir, 'work-abort-infer');
+    fs.mkdirSync(workDir, { recursive: true });
+    const recorder = stageRecorder(deps.scriptsDir); // 步骤替身按各自阶段标记核对,须经 onStage 落标记
+    const controller = new AbortController();
+    const promise = runPipeline(deps, { title: '任意', workDir, settings, signal: controller.signal, onStage: recorder.onStage });
+    void promise.catch(() => {});
+    // 等指令送达替身(写入 worker-cmd.json),推理"进行中"后再急停
+    for (let i = 0; i < 300 && !fs.existsSync(path.join(workDir, 'worker-cmd.json')); i += 1) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(fs.existsSync(path.join(workDir, 'worker-cmd.json'))).toBe(true);
+    controller.abort();
+    await expect(promise).rejects.toMatchObject({ step: 'convert', tail: 'aborted' });
+  }, 15_000);
+
+  it('WT-P3-028 复审:预热句柄 stop() 终止预热进程并兑现 done', async () => {
+    process.env.WORKER_MODE = 'hang'; // 挂住的预热进程只能靠 stop() 终止
+    const deps = makeSteps();
+    const logger = capturingLogger();
+    const warm = warmConvertRuntime(deps, logger as unknown as Logger);
+    warm.stop();
+    const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('预热进程未在 5 秒内退出')), 5000));
+    await Promise.race([warm.done, timeout]);
+  });
+
+  it('WT-P3-002 复审:前段失败时,拒绝在换声进程确认退出之后才交给上层', async () => {
+    // 可控替身 worker:尚未就绪(并行加载中),kill 后延迟 200ms 才确认退出——
+    // 若收尾只发起杀树不等待(旧缺陷),拒绝会在 'closed' 之前交付,事件顺序断言失败
+    const events: string[] = [];
+    let settleClosed: (() => void) | null = null;
+    const fakeWorker: ConvertWorkerHandle = {
+      whenReady: new Promise<string | null>(() => {}),
+      whenClosed: new Promise<void>((resolve) => {
+        settleClosed = () => {
+          events.push('closed');
+          resolve();
+        };
+      }),
+      hasExited: () => false,
+      convert: async () => {
+        throw new PipelineStepError('convert', '不应向未就绪的 worker 派发');
+      },
+      kill(reason) {
+        events.push(`kill:${reason}`);
+        setTimeout(() => settleClosed?.(), 200);
+      },
+    };
+    const deps = {
+      ...makeSteps({ failAt: 'fetch' }),
+      createConvertWorker: () => fakeWorker,
+    };
+    const recorder = stageRecorder(deps.scriptsDir); // fetch 替身核对自己的阶段标记
+    const promise = runPipeline(deps, { title: '任意', workDir: path.join(tmpDir, 'work-front-fail'), settings, signal: new AbortController().signal, onStage: recorder.onStage });
+    void promise.catch(() => {});
+    await expect(promise).rejects.toMatchObject({ step: 'fetch', tail: expect.stringContaining('stand-in fetch exploded') });
+    // 收到拒绝时:已发起杀树,且 close 已确认(顺序即「先等子进程退出再结算」的直接证据)
+    expect(events).toEqual(['kill:pipeline-finished', 'closed']);
   });
 
   it('某步失败:抛出带步骤名与输出尾部的 PipelineStepError,后续步骤不再启动', async () => {
