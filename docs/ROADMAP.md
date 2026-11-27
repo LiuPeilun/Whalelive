@@ -538,6 +538,8 @@ P1 第一批的审核问题（WT-P1-001～014，共十四项，跨 `2026-11-18_1
 
 **第二轮修复（2026-11-26，复审 `2026-11-26_173314` 两项 P2）**：①前段失败早结算——`runPipeline` 收尾在发起杀树后 `await worker.whenClosed`，成功/失败/中止三路径统一等换声进程确认退出后才把结果交给上层（上层清理工作目录/释放配额不早于子进程退出）；新增 `createConvertWorker` 测试注入点，可控替身（kill 后延迟确认退出）配合 `failAt: fetch` 断言拒绝交付时事件序列恰为 `kill → closed`。②预热启动泄漏——预热启动从模块装配段移到初始化完成之后（`server.started` 即监听已建立、页面就绪），任何更早的启动失败（EADDRINUSE 等）抛出时不存在需要回收的预热进程；正常关闭的 `stop()` + 有界等待语义不变。实测：占位端口启动隔离实例被拒，失败前后 `convert-worker.py` 进程数 0/0、实例日志 0 条 warmup；正常实例日志 `server.started` 先于 warmup 记录。`npm run check` **300/300**（+1：前段失败的拒绝顺序）；`node scripts/singing-smoke.mjs 3791` 18/18、`node scripts/singing-panel-e2e.mjs 3793` 16/16、`node scripts/ws-smoke.mjs 3290` 30/30。[修复记录](reviews/2026-11/2026-11-26_173314-fixes.md)，待复审。
 
+**2026-11-27 点歌与换声预热第二轮修复复审**。提交 `0fb7d47` 复审通过，WT-P3-002、028 关闭，WT-P3-027、029 维持关闭。搜歌失败时换声进程先退出，随后释放配额。端口占用时预热进程数为零。`npm run check`（300/300）、`node scripts/singing-smoke.mjs 3801`（18/18）通过，实际换声走 DirectML 工作进程。真冷启动计时、OBS 实播和真实 B 站直播间点歌仍待验收。[复审报告](reviews/2026-11/2026-11-27_101440-review.md)
+
 ## 实施记录模板
 
 每次完成任务后补充以下内容。
